@@ -8,6 +8,9 @@ export type StrategyLimits = {
   accountId?: string;
   maxRiskRub: number;
   maxPositionRub: number;
+  maxSpreadPct: number;
+  maxEntryDeviationPct: number;
+  allowShort: boolean;
 };
 
 export type AppConfig = {
@@ -32,8 +35,14 @@ const envSchema = z.object({
   T_INVEST_SWING_ACCOUNT_ID: optionalNonEmpty,
   INTRADAY_MAX_RISK_RUB: z.coerce.number().positive().default(500),
   INTRADAY_MAX_POSITION_RUB: z.coerce.number().positive().default(50_000),
+  INTRADAY_MAX_SPREAD_PCT: z.coerce.number().positive().max(5).default(0.3),
+  INTRADAY_MAX_ENTRY_DEVIATION_PCT: z.coerce.number().positive().max(10).default(0.5),
+  INTRADAY_ALLOW_SHORT: z.enum(['true', 'false']).default('false'),
   SWING_MAX_RISK_RUB: z.coerce.number().positive().default(700),
   SWING_MAX_POSITION_RUB: z.coerce.number().positive().default(50_000),
+  SWING_MAX_SPREAD_PCT: z.coerce.number().positive().max(5).default(0.5),
+  SWING_MAX_ENTRY_DEVIATION_PCT: z.coerce.number().positive().max(10).default(1),
+  SWING_ALLOW_SHORT: z.enum(['true', 'false']).default('false'),
 });
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -50,11 +59,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
           : {}),
         maxRiskRub: parsed.INTRADAY_MAX_RISK_RUB,
         maxPositionRub: parsed.INTRADAY_MAX_POSITION_RUB,
+        maxSpreadPct: parsed.INTRADAY_MAX_SPREAD_PCT,
+        maxEntryDeviationPct: parsed.INTRADAY_MAX_ENTRY_DEVIATION_PCT,
+        allowShort: parsed.INTRADAY_ALLOW_SHORT === 'true',
       },
       swing: {
         ...(parsed.T_INVEST_SWING_ACCOUNT_ID ? { accountId: parsed.T_INVEST_SWING_ACCOUNT_ID } : {}),
         maxRiskRub: parsed.SWING_MAX_RISK_RUB,
         maxPositionRub: parsed.SWING_MAX_POSITION_RUB,
+        maxSpreadPct: parsed.SWING_MAX_SPREAD_PCT,
+        maxEntryDeviationPct: parsed.SWING_MAX_ENTRY_DEVIATION_PCT,
+        allowShort: parsed.SWING_ALLOW_SHORT === 'true',
       },
     },
   };
