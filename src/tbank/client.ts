@@ -186,6 +186,13 @@ export class TInvestClient {
     });
   }
 
+  public async findInstrument(query: string): Promise<unknown> {
+    return this.post('tinkoff.public.invest.api.contract.v1.InstrumentsService/FindInstrument', {
+      query,
+      apiTradeAvailableFlag: true,
+    });
+  }
+
   public async getLastPrices(instrumentIds: string[]): Promise<unknown> {
     return this.post('tinkoff.public.invest.api.contract.v1.MarketDataService/GetLastPrices', {
       instrumentId: instrumentIds,
@@ -194,12 +201,24 @@ export class TInvestClient {
     });
   }
 
+  public async getOrderBook(instrumentId: string, depth: number): Promise<unknown> {
+    return this.post('tinkoff.public.invest.api.contract.v1.MarketDataService/GetOrderBook', {
+      instrumentId,
+      depth,
+    });
+  }
+
+  public async getTradingStatus(instrumentId: string): Promise<unknown> {
+    return this.post('tinkoff.public.invest.api.contract.v1.MarketDataService/GetTradingStatus', {
+      instrumentId,
+    });
+  }
+
   public async getCandles(params: {
     instrumentId: string;
     from: string;
     to: string;
     interval: string;
-    limit: number;
   }): Promise<unknown> {
     return this.post('tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles', params);
   }

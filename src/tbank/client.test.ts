@@ -53,6 +53,60 @@ describe('TInvestClient', () => {
     });
   });
 
+  it('uses the documented market-context endpoints and payloads', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => {
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    const client = new TInvestClient('secret', 'https://example.test/rest', { fetchImpl: fetchMock });
+
+    await client.findInstrument('SBER');
+    await client.getOrderBook('instrument-id', 20);
+    await client.getTradingStatus('instrument-id');
+    await client.getCandles({
+      instrumentId: 'instrument-id',
+      from: '2026-09-01T00:00:00.000Z',
+      to: '2026-09-02T00:00:00.000Z',
+      interval: 'CANDLE_INTERVAL_5_MIN',
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'https://example.test/rest/tinkoff.public.invest.api.contract.v1.InstrumentsService/FindInstrument',
+      expect.objectContaining({
+        body: JSON.stringify({ query: 'SBER', apiTradeAvailableFlag: true }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'https://example.test/rest/tinkoff.public.invest.api.contract.v1.MarketDataService/GetOrderBook',
+      expect.objectContaining({
+        body: JSON.stringify({ instrumentId: 'instrument-id', depth: 20 }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      'https://example.test/rest/tinkoff.public.invest.api.contract.v1.MarketDataService/GetTradingStatus',
+      expect.objectContaining({
+        body: JSON.stringify({ instrumentId: 'instrument-id' }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      4,
+      'https://example.test/rest/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles',
+      expect.objectContaining({
+        body: JSON.stringify({
+          instrumentId: 'instrument-id',
+          from: '2026-09-01T00:00:00.000Z',
+          to: '2026-09-02T00:00:00.000Z',
+          interval: 'CANDLE_INTERVAL_5_MIN',
+        }),
+      }),
+    );
+  });
+
   it('reports the underlying fetch error without exposing credentials', async () => {
     const cause = Object.assign(new Error('connection reset by peer'), { code: 'ECONNRESET' });
     const fetchMock = vi
