@@ -1,0 +1,1 @@
+#!/usr/bin/env bash\nset -euo pipefail\n\nproject_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"\ncd -- "${project_dir}"\nexec node --env-file="${project_dir}/.env" "${project_dir}/dist/intraday-scanner.js"\n

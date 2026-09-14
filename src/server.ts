@@ -186,6 +186,12 @@ export function createServer(
         commissionRate: config.commissionRate,
         localScenarioJournal: true,
         paperTrading: true,
+        intradayScanner: {
+          watchlistConfigured: config.scanner.intradayWatchlist.length > 0,
+          watchlistSize: config.scanner.intradayWatchlist.length,
+          intervalSeconds: config.scanner.intervalSeconds,
+          candidateCooldownMinutes: config.scanner.candidateCooldownMinutes,
+        },
         limits: {
           intraday: {
             maxRiskRub: config.strategies.intraday.maxRiskRub,
