@@ -15,6 +15,7 @@
     "smoke:tinvest": "node --env-file=.env dist/smoke.js",
     "smoke:tinvest:ci": "node dist/smoke.js",
     "scan:intraday": "node --env-file=.env dist/intraday-scanner.js",
+    "service:telegram": "node --env-file=.env dist/telegram-service.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"
