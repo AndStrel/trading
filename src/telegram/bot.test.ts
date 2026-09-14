@@ -202,4 +202,41 @@ describe('TelegramTradingBot', () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain('Карточка не сформировалась');
   });
+
+  it('sends a clearly labelled non-market preview card', async () => {
+    const journal = createJournal();
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      TELEGRAM_ALLOWED_CHAT_IDS: '42',
+      T_INVEST_INTRADAY_WATCHLIST:
+        '[{"instrumentId":"sber","label":"SBER","lotSize":1,"priceStep":0.01}]',
+    });
+    const photos: Array<{ chatId: string; caption: string }> = [];
+    const client: TelegramClient = {
+      getUpdates: async () => [{ update_id: 1, message: { chat: { id: 42 }, text: '/preview' } }],
+      sendMessage: async () => undefined,
+      sendPhoto: async (input) => {
+        photos.push({ chatId: input.chatId, caption: input.caption });
+      },
+    };
+    const scanner = { isPaused: () => false, pause: () => undefined, resume: () => undefined };
+    const bot = new TelegramTradingBot(
+      config,
+      client,
+      scanner,
+      journal,
+      () => undefined,
+      async () => new Uint8Array([137, 80, 78, 71]),
+    );
+
+    await bot.pollOnce();
+
+    expect(photos).toEqual([
+      expect.objectContaining({
+        chatId: '42',
+        caption: expect.stringContaining('Тестовая карточка'),
+      }),
+    ]);
+  });
+
 });
