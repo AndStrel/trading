@@ -3,6 +3,7 @@ import * as z from 'zod/v4';
 
 import type { AppConfig, Strategy } from './config.js';
 import { getAccountId } from './config.js';
+import { analyzeCandles } from './domain/candle-analysis.js';
 import { calculateTradePlan } from './domain/trade-plan.js';
 import { TInvestClient } from './tbank/client.js';
 
@@ -185,6 +186,22 @@ export function createServer(
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
     async (params) => result(await client.getCandles(params)),
+  );
+
+  server.registerTool(
+    'analyze_candles',
+    {
+      description:
+        'Calculate deterministic trend, ATR volatility and relative volume from complete historical candles. It does not create a buy or sell signal.',
+      inputSchema: z.object({
+        instrumentId: instrumentIdSchema,
+        from: z.iso.datetime({ offset: true }),
+        to: z.iso.datetime({ offset: true }),
+        interval: candleIntervals,
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async (params) => result(analyzeCandles(await client.getCandles(params))),
   );
 
   server.registerTool(
