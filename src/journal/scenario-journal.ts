@@ -277,6 +277,31 @@ export class ScenarioJournal {
     }
   }
 
+  hasRecentCandidate(input: {
+    strategy: Strategy;
+    instrumentId: string;
+    since: string;
+  }): boolean {
+    const database = this.open();
+
+    try {
+      const row = database
+        .prepare(
+          `SELECT id FROM scenario_journal
+           WHERE strategy = ?
+             AND instrument_id = ?
+             AND decision = 'candidate'
+             AND recorded_at >= ?
+           ORDER BY id DESC
+           LIMIT 1`,
+        )
+        .get(input.strategy, input.instrumentId, input.since) as { id: number | bigint } | undefined;
+      return Boolean(row);
+    } finally {
+      database.close();
+    }
+  }
+
   openPaperTrade(input: PaperTradeInput): PaperTradeRecord {
     const database = this.open();
 
