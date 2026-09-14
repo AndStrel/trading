@@ -14,6 +14,7 @@ export type ScannerConfig = {
   intervalSeconds: number;
   lookbackMinutes: number;
   candidateCooldownMinutes: number;
+  slippageRate: number;
   intradayWatchlist: IntradayWatchlistItem[];
 };
 
@@ -67,6 +68,7 @@ const envSchema = z.object({
   T_INVEST_SCANNER_INTERVAL_SECONDS: z.coerce.number().int().min(300).max(3_600).default(300),
   T_INVEST_SCANNER_LOOKBACK_MINUTES: z.coerce.number().int().min(300).max(720).default(360),
   T_INVEST_SCANNER_CANDIDATE_COOLDOWN_MINUTES: z.coerce.number().int().min(5).max(1_440).default(30),
+  T_INVEST_SCANNER_SLIPPAGE_RATE: z.coerce.number().min(0).max(0.02).default(0.0005),
   T_INVEST_INTRADAY_ACCOUNT_ID: optionalNonEmpty,
   T_INVEST_SWING_ACCOUNT_ID: optionalNonEmpty,
   INTRADAY_MAX_RISK_RUB: z.coerce.number().positive().default(500),
@@ -93,6 +95,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       intervalSeconds: parsed.T_INVEST_SCANNER_INTERVAL_SECONDS,
       lookbackMinutes: parsed.T_INVEST_SCANNER_LOOKBACK_MINUTES,
       candidateCooldownMinutes: parsed.T_INVEST_SCANNER_CANDIDATE_COOLDOWN_MINUTES,
+      slippageRate: parsed.T_INVEST_SCANNER_SLIPPAGE_RATE,
       intradayWatchlist: parseIntradayWatchlist(parsed.T_INVEST_INTRADAY_WATCHLIST),
     },
     strategies: {
