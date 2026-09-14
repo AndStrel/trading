@@ -1,5 +1,7 @@
 import { z } from 'zod/v4';
 
+import type { TInvestTransport } from './tbank/client.js';
+
 export type Strategy = 'intraday' | 'swing';
 
 export type StrategyLimits = {
@@ -11,6 +13,7 @@ export type StrategyLimits = {
 export type AppConfig = {
   token?: string;
   baseUrl: string;
+  transport: TInvestTransport;
   commissionRate: number;
   strategies: Record<Strategy, StrategyLimits>;
 };
@@ -23,6 +26,7 @@ const optionalNonEmpty = z.preprocess(
 const envSchema = z.object({
   T_INVEST_TOKEN: optionalNonEmpty,
   T_INVEST_BASE_URL: z.string().url().default('https://invest-public-api.tbank.ru/rest'),
+  T_INVEST_TRANSPORT: z.enum(['fetch', 'system-curl']).default('fetch'),
   T_INVEST_COMMISSION_RATE: z.coerce.number().min(0).max(0.1).default(0.0005),
   T_INVEST_INTRADAY_ACCOUNT_ID: optionalNonEmpty,
   T_INVEST_SWING_ACCOUNT_ID: optionalNonEmpty,
@@ -37,6 +41,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     ...(parsed.T_INVEST_TOKEN ? { token: parsed.T_INVEST_TOKEN } : {}),
     baseUrl: parsed.T_INVEST_BASE_URL.replace(/\/$/, ''),
+    transport: parsed.T_INVEST_TRANSPORT,
     commissionRate: parsed.T_INVEST_COMMISSION_RATE,
     strategies: {
       intraday: {
