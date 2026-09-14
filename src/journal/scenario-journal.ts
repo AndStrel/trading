@@ -39,6 +39,7 @@ type JournalRow = {
   stop_price: number;
   target_price: number;
   lot_size: number;
+  slippage_rate: number;
   decision: 'candidate' | 'review' | 'blocked';
   blockers_json: string;
   warnings_json: string;
@@ -58,6 +59,7 @@ const schema = `
     stop_price REAL NOT NULL,
     target_price REAL NOT NULL,
     lot_size INTEGER NOT NULL,
+    slippage_rate REAL NOT NULL,
     decision TEXT NOT NULL CHECK(decision IN ('candidate', 'review', 'blocked')),
     blockers_json TEXT NOT NULL,
     warnings_json TEXT NOT NULL,
@@ -98,7 +100,7 @@ export class ScenarioJournal {
         .prepare(
           `INSERT INTO scenario_journal (
             recorded_at, observed_at, strategy, instrument_id, side,
-            entry_price, stop_price, target_price, lot_size, decision,
+            entry_price, stop_price, target_price, lot_size, slippage_rate, decision,
             blockers_json, warnings_json, snapshot_json, note
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
@@ -112,6 +114,7 @@ export class ScenarioJournal {
           input.input.stopPrice,
           input.input.targetPrice,
           input.input.lotSize,
+          input.input.slippageRate,
           input.decision,
           JSON.stringify(input.blockers),
           JSON.stringify(input.warnings),
@@ -181,9 +184,7 @@ export class ScenarioJournal {
         stopPrice: row.stop_price,
         targetPrice: row.target_price,
         lotSize: row.lot_size,
-        slippageRate: parseJson<number>(row.snapshot_json, 0) === 0
-          ? 0
-          : parseJson<{ input?: { slippageRate?: number } }>(row.snapshot_json, {}).input?.slippageRate ?? 0,
+        slippageRate: row.slippage_rate,
       },
       decision: row.decision,
       blockers: parseStringArray(row.blockers_json),
