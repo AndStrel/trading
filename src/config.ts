@@ -6,7 +6,7 @@ export type Strategy = 'intraday' | 'swing';
 
 export type IntradayWatchlistItem = {
   instrumentId: string;
-  label?: string;
+  label?: string | undefined;
   lotSize: number;
   priceStep: number;
 };
