@@ -125,6 +125,7 @@ export function createServer(config: AppConfig, client = new TInvestClient(confi
         'Calculate a deterministic position size and net reward/risk including round-trip commission and slippage.',
       inputSchema: z.object({
         strategy: strategySchema,
+        side: z.enum(['long', 'short']),
         entryPrice: z.number().positive(),
         stopPrice: z.number().nonnegative(),
         targetPrice: z.number().nonnegative(),

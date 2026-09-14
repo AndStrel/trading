@@ -1,6 +1,7 @@
 import { roundMoney } from './money.js';
 
 export type TradePlanInput = {
+  side: 'long' | 'short';
   entryPrice: number;
   stopPrice: number;
   targetPrice: number;
@@ -28,7 +29,16 @@ export type TradePlan = {
 
 export function calculateTradePlan(input: TradePlanInput): TradePlan {
   const { entryPrice, stopPrice, targetPrice, lotSize, maxRiskRub, maxPositionRub } = input;
-  const values = Object.values(input);
+  const values = [
+    input.entryPrice,
+    input.stopPrice,
+    input.targetPrice,
+    input.lotSize,
+    input.maxRiskRub,
+    input.maxPositionRub,
+    input.commissionRate,
+    input.slippageRate,
+  ];
   if (values.some((value) => !Number.isFinite(value) || value < 0)) {
     throw new Error('All numeric values must be finite and non-negative');
   }
@@ -36,6 +46,13 @@ export function calculateTradePlan(input: TradePlanInput): TradePlan {
     throw new Error('Entry, lot size and limits must be greater than zero');
   }
   if (!Number.isInteger(lotSize)) throw new Error('Lot size must be an integer');
+
+  if (input.side === 'long' && !(stopPrice < entryPrice && targetPrice > entryPrice)) {
+    throw new Error('Long trade requires stop below entry and target above entry');
+  }
+  if (input.side === 'short' && !(stopPrice > entryPrice && targetPrice < entryPrice)) {
+    throw new Error('Short trade requires stop above entry and target below entry');
+  }
 
   const priceRiskPerUnit = Math.abs(entryPrice - stopPrice);
   const rewardPerUnit = Math.abs(targetPrice - entryPrice);

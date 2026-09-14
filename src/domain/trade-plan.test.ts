@@ -5,6 +5,7 @@ import { calculateTradePlan } from './trade-plan.js';
 describe('calculateTradePlan', () => {
   it('sizes by the stricter risk limit and includes round-trip costs', () => {
     const plan = calculateTradePlan({
+      side: 'long',
       entryPrice: 300,
       stopPrice: 295,
       targetPrice: 315,
@@ -28,6 +29,7 @@ describe('calculateTradePlan', () => {
 
   it('rejects a plan with insufficient net reward-to-risk', () => {
     const plan = calculateTradePlan({
+      side: 'long',
       entryPrice: 300,
       stopPrice: 295,
       targetPrice: 307,
@@ -44,6 +46,7 @@ describe('calculateTradePlan', () => {
 
   it('does not allow a partial lot', () => {
     const plan = calculateTradePlan({
+      side: 'long',
       entryPrice: 10_000,
       stopPrice: 9_000,
       targetPrice: 12_500,
@@ -56,5 +59,21 @@ describe('calculateTradePlan', () => {
 
     expect(plan.lots).toBe(0);
     expect(plan.allowed).toBe(false);
+  });
+
+  it('rejects invalid levels for the selected side', () => {
+    expect(() =>
+      calculateTradePlan({
+        side: 'long',
+        entryPrice: 300,
+        stopPrice: 305,
+        targetPrice: 290,
+        lotSize: 10,
+        maxRiskRub: 500,
+        maxPositionRub: 50_000,
+        commissionRate: 0.0005,
+        slippageRate: 0.0005,
+      }),
+    ).toThrow('Long trade requires stop below entry and target above entry');
   });
 });
