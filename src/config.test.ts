@@ -6,6 +6,7 @@ describe('loadConfig', () => {
   it('uses conservative scenario guardrails by default', () => {
     const config = loadConfig({});
 
+    expect(config.journalPath).toBe('.trading/journal.sqlite');
     expect(config.strategies.intraday.maxSpreadPct).toBe(0.3);
     expect(config.strategies.intraday.maxEntryDeviationPct).toBe(0.5);
     expect(config.strategies.intraday.allowShort).toBe(false);
