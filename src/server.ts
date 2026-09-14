@@ -14,6 +14,9 @@ const candleIntervals = z.enum([
   'CANDLE_INTERVAL_HOUR',
   'CANDLE_INTERVAL_DAY',
 ]);
+const instrumentIdSchema = z.string().trim().min(1).max(256);
+const instrumentQuerySchema = z.string().trim().min(1).max(128);
+const orderBookDepthSchema = z.number().int().min(1).max(50).default(20);
 
 function result(data: unknown) {
   return {
@@ -95,11 +98,22 @@ export function createServer(
   );
 
   server.registerTool(
+    'find_instrument',
+    {
+      description:
+        'Find API-tradable T-Invest instruments by ticker, FIGI, ISIN or name before requesting market data.',
+      inputSchema: z.object({ query: instrumentQuerySchema }),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ query }) => result(await client.findInstrument(query)),
+  );
+
+  server.registerTool(
     'get_last_prices',
     {
       description: 'Get exchange last prices for one or more T-Invest instrument identifiers.',
       inputSchema: z.object({
-        instrumentIds: z.array(z.string().min(1)).min(1).max(50),
+        instrumentIds: z.array(instrumentIdSchema).min(1).max(50),
       }),
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
@@ -107,15 +121,66 @@ export function createServer(
   );
 
   server.registerTool(
+    'get_order_book',
+    {
+      description:
+        'Get the current order book. Use it to assess spread and available bid/ask volume; it is not a trade signal.',
+      inputSchema: z.object({
+        instrumentId: instrumentIdSchema,
+        depth: orderBookDepthSchema,
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ instrumentId, depth }) => result(await client.getOrderBook(instrumentId, depth)),
+  );
+
+  server.registerTool(
+    'get_trading_status',
+    {
+      description:
+        'Get current exchange and API trading availability for an instrument before considering a trade.',
+      inputSchema: z.object({ instrumentId: instrumentIdSchema }),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ instrumentId }) => result(await client.getTradingStatus(instrumentId)),
+  );
+
+  server.registerTool(
+    'get_market_snapshot',
+    {
+      description:
+        'Get last price, order book and trading status in parallel for a single instrument. This is a point-in-time observation, not a trade recommendation.',
+      inputSchema: z.object({
+        instrumentId: instrumentIdSchema,
+        depth: orderBookDepthSchema,
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ instrumentId, depth }) => {
+      const [lastPrices, orderBook, tradingStatus] = await Promise.all([
+        client.getLastPrices([instrumentId]),
+        client.getOrderBook(instrumentId, depth),
+        client.getTradingStatus(instrumentId),
+      ]);
+      return result({
+        instrumentId,
+        observedAt: new Date().toISOString(),
+        lastPrices,
+        orderBook,
+        tradingStatus,
+      });
+    },
+  );
+
+  server.registerTool(
     'get_candles',
     {
       description: 'Get historical candles. Dates must be ISO-8601 UTC strings.',
       inputSchema: z.object({
-        instrumentId: z.string().min(1),
+        instrumentId: instrumentIdSchema,
         from: z.iso.datetime({ offset: true }),
         to: z.iso.datetime({ offset: true }),
         interval: candleIntervals,
-        limit: z.number().int().min(1).max(1000).default(500),
       }),
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
