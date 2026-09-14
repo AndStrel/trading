@@ -109,8 +109,7 @@ describe('assessTradeScenario', () => {
   });
 
   it('blocks short scenarios until they are explicitly enabled', () => {
-    const input = completeInput();
-    input.side = 'short';
+    const input = { ...completeInput(), side: 'short' as const };
 
     const assessment = assessTradeScenario(input);
 
