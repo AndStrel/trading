@@ -59,6 +59,11 @@ npm run scan:intraday
 
 Для непрерывной работы через systemd см. [инструкцию сканера](docs/INTRADAY_SCANNER.md). Для Telegram и будущего VPS — [инструкцию Telegram-сервиса](docs/TELEGRAM_SERVICE.md).
 
+
+### Выкладка Telegram-сервиса
+
+Для контейнерной автоматизации на сервере есть ручной GitHub Actions workflow. Его работа, обязательный серверный `.env` и безопасный откат описаны в [инструкции deploy](docs/DEPLOY_TELEGRAM_SERVICE.md).
+
 ### Ubuntu и российские сертификаты
 
 На 14 сентября 2026 T-Invest API отдаёт сертификат `*.tbank.ru`, выпущенный `Russian Trusted Sub CA` Минцифры. Если системный `curl` открывает `https://invest-public-api.tbank.ru/rest`, а Node сообщает `SELF_SIGNED_CERT_IN_CHAIN`, включите только в локальном `.env`:
