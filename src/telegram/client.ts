@@ -9,6 +9,7 @@ export type TelegramUpdate = {
 export type TelegramClient = {
   getUpdates(input: { offset: number; timeoutSeconds: number }): Promise<TelegramUpdate[]>;
   sendMessage(chatId: string, text: string): Promise<void>;
+  sendPhoto(input: { chatId: string; png: Uint8Array; caption: string }): Promise<void>;
 };
 
 type TelegramApiResponse<T> = {
@@ -54,11 +55,44 @@ export class TelegramBotClient implements TelegramClient {
     await this.request('sendMessage', { chat_id: chatId, text }, 15_000);
   }
 
+  async sendPhoto(input: { chatId: string; png: Uint8Array; caption: string }): Promise<void> {
+    if (input.caption.length > 1_024) {
+      throw new Error('Telegram photo caption exceeds the 1024 character limit');
+    }
+
+    const body = new FormData();
+    body.set('chat_id', input.chatId);
+    body.set('caption', input.caption);
+    body.set('photo', new Blob([input.png], { type: 'image/png' }), 'intraday-candidate.png');
+    await this.requestForm('sendPhoto', body, 30_000);
+  }
+
   private async request<T>(method: string, body: unknown, timeoutMs: number): Promise<T> {
+    return this.parseResponse(
+      await this.fetchJson(method, body, timeoutMs),
+    );
+  }
+
+  private async requestForm<T>(method: string, body: FormData, timeoutMs: number): Promise<T> {
     let response: Response;
 
     try {
       response = await this.fetchImpl(`https://api.telegram.org/bot${this.token}/${method}`, {
+        method: 'POST',
+        body,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : 'Unknown network failure';
+      throw new Error(`Telegram network error: ${detail}`);
+    }
+
+    return this.parseResponse<T>(response);
+  }
+
+  private async fetchJson(method: string, body: unknown, timeoutMs: number): Promise<Response> {
+    try {
+      return await this.fetchImpl(`https://api.telegram.org/bot${this.token}/${method}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -68,7 +102,9 @@ export class TelegramBotClient implements TelegramClient {
       const detail = error instanceof Error ? error.message : 'Unknown network failure';
       throw new Error(`Telegram network error: ${detail}`);
     }
+  }
 
+  private async parseResponse<T>(response: Response): Promise<T> {
     const payload = (await response.json().catch(() => ({}))) as TelegramApiResponse<T>;
     if (!response.ok || payload.ok !== true) {
       const description = typeof payload.description === 'string' ? payload.description : response.statusText;
