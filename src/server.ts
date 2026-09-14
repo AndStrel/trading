@@ -4,6 +4,7 @@ import * as z from 'zod/v4';
 import type { AppConfig, Strategy } from './config.js';
 import { getAccountId } from './config.js';
 import { analyzeCandles } from './domain/candle-analysis.js';
+import { assessTradeScenario } from './domain/trade-scenario.js';
 import { calculateTradePlan } from './domain/trade-plan.js';
 import { TInvestClient } from './tbank/client.js';
 
@@ -59,10 +60,16 @@ export function createServer(
           intraday: {
             maxRiskRub: config.strategies.intraday.maxRiskRub,
             maxPositionRub: config.strategies.intraday.maxPositionRub,
+            maxSpreadPct: config.strategies.intraday.maxSpreadPct,
+            maxEntryDeviationPct: config.strategies.intraday.maxEntryDeviationPct,
+            allowShort: config.strategies.intraday.allowShort,
           },
           swing: {
             maxRiskRub: config.strategies.swing.maxRiskRub,
             maxPositionRub: config.strategies.swing.maxPositionRub,
+            maxSpreadPct: config.strategies.swing.maxSpreadPct,
+            maxEntryDeviationPct: config.strategies.swing.maxEntryDeviationPct,
+            allowShort: config.strategies.swing.allowShort,
           },
         },
       }),
@@ -202,6 +209,75 @@ export function createServer(
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
     async (params) => result(analyzeCandles(await client.getCandles(params))),
+  );
+
+  server.registerTool(
+    'prepare_trade_scenario',
+    {
+      description:
+        'Build one analysis-only trade scenario from live price, order book, trading status, candles and configured risk limits. It never submits an order.',
+      inputSchema: z.object({
+        strategy: strategySchema,
+        instrumentId: instrumentIdSchema,
+        side: z.enum(['long', 'short']),
+        entryPrice: z.number().positive(),
+        stopPrice: z.number().nonnegative(),
+        targetPrice: z.number().nonnegative(),
+        lotSize: z.number().int().positive(),
+        slippageRate: z.number().min(0).max(0.02).default(0.0005),
+        from: z.iso.datetime({ offset: true }),
+        to: z.iso.datetime({ offset: true }),
+        interval: candleIntervals,
+        depth: orderBookDepthSchema,
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ strategy, instrumentId, from, to, interval, depth, ...tradeInput }) => {
+      const limits = config.strategies[strategy as Strategy];
+      const [candles, lastPrices, orderBook, tradingStatus] = await Promise.all([
+        client.getCandles({ instrumentId, from, to, interval }),
+        client.getLastPrices([instrumentId]),
+        client.getOrderBook(instrumentId, depth),
+        client.getTradingStatus(instrumentId),
+      ]);
+      const candleAnalysis = analyzeCandles(candles);
+      const tradePlan = calculateTradePlan({
+        ...tradeInput,
+        commissionRate: config.commissionRate,
+        maxRiskRub: limits.maxRiskRub,
+        maxPositionRub: limits.maxPositionRub,
+      });
+      const assessment = assessTradeScenario({
+        side: tradeInput.side,
+        entryPrice: tradeInput.entryPrice,
+        maxSpreadPct: limits.maxSpreadPct,
+        maxEntryDeviationPct: limits.maxEntryDeviationPct,
+        allowShort: limits.allowShort,
+        tradePlan,
+        candleAnalysis,
+        lastPricesPayload: lastPrices,
+        orderBookPayload: orderBook,
+        tradingStatusPayload: tradingStatus,
+      });
+
+      return result({
+        mode: 'analysis-only',
+        observedAt: new Date().toISOString(),
+        strategy,
+        instrumentId,
+        input: {
+          side: tradeInput.side,
+          entryPrice: tradeInput.entryPrice,
+          stopPrice: tradeInput.stopPrice,
+          targetPrice: tradeInput.targetPrice,
+          lotSize: tradeInput.lotSize,
+          slippageRate: tradeInput.slippageRate,
+        },
+        tradePlan,
+        candleAnalysis,
+        ...assessment,
+      });
+    },
   );
 
   server.registerTool(
