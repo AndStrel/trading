@@ -364,6 +364,41 @@ export class ScenarioJournal {
     }
   }
 
+  listClosedPaperTrades(
+    from: string,
+    to: string,
+    strategy?: Strategy,
+  ): PaperTradeRecord[] {
+    const database = this.open();
+
+    try {
+      const rows = strategy
+        ? database
+            .prepare(
+              `SELECT * FROM paper_trades
+               WHERE status = 'closed'
+                 AND strategy = ?
+                 AND closed_at >= ?
+                 AND closed_at < ?
+               ORDER BY closed_at DESC`,
+            )
+            .all(strategy, from, to)
+        : database
+            .prepare(
+              `SELECT * FROM paper_trades
+               WHERE status = 'closed'
+                 AND closed_at >= ?
+                 AND closed_at < ?
+               ORDER BY closed_at DESC`,
+            )
+            .all(from, to);
+
+      return (rows as PaperTradeRow[]).map((row) => this.toPaperTrade(row));
+    } finally {
+      database.close();
+    }
+  }
+
   closePaperTrade(input: PaperTradeCloseInput): PaperTradeRecord {
     const database = this.open();
 
