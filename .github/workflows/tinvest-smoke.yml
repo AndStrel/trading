@@ -1,0 +1,41 @@
+name: T-Invest read-only smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tinvest-readonly-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Verify read-only API access
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: tinvest-readonly
+    env:
+      T_INVEST_TOKEN: ${{ secrets.T_INVEST_READONLY_TOKEN }}
+    steps:
+      - name: Check out trusted main revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build trusted source
+        run: npm run build
+
+      - name: Verify T-Invest authentication
+        run: npm run smoke:tinvest

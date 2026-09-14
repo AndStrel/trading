@@ -12,6 +12,7 @@
     "check": "npm run typecheck && npm test",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
+    "smoke:tinvest": "node dist/smoke.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"
