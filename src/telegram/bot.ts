@@ -41,11 +41,51 @@ function formatCandidateFallback(record: JournalScenarioRecord, config: AppConfi
   ].join('\n');
 }
 
+function previewScenario(config: AppConfig): JournalScenarioRecord {
+  const watchlistItem = config.scanner.intradayWatchlist[0];
+  const instrumentId = watchlistItem?.instrumentId ?? 'preview';
+  const lotSize = watchlistItem?.lotSize ?? 1;
+
+  return {
+    id: 0,
+    recordedAt: new Date().toISOString(),
+    observedAt: new Date().toISOString(),
+    strategy: 'intraday',
+    instrumentId,
+    input: {
+      side: 'long',
+      entryPrice: 100,
+      stopPrice: 99,
+      targetPrice: 102.5,
+      lotSize,
+      slippageRate: config.scanner.slippageRate,
+    },
+    decision: 'candidate',
+    blockers: [],
+    warnings: [],
+    snapshot: {
+      tradePlan: {
+        lots: 5,
+        units: 5 * lotSize,
+        positionRub: 500,
+        totalRiskRub: 7,
+        estimatedCommissionRub: 0.5,
+        estimatedSlippageRub: 0.5,
+        netRewardRub: 11.5,
+        rewardToRisk: 1.64,
+      },
+      market: { bestBid: 99.99, bestAsk: 100, spreadPct: 0.01 },
+      candleAnalysis: { trend: 'up', relativeVolume: 1.2, averageTrueRange14: 0.3 },
+    },
+  };
+}
+
 function helpText(): string {
   return [
     'Команды:',
     '/status — состояние сканера',
     '/candidates — последние кандидаты',
+    '/preview — тестовая карточка без запроса рынка',
     '/pause — поставить сканер на паузу',
     '/resume — продолжить проходы',
     '',
@@ -135,6 +175,14 @@ export class TelegramTradingBot {
 
     if (command === '/candidates') {
       await this.sendRecentCandidates(normalizedChatId);
+      return;
+    }
+    if (command === '/preview') {
+      await this.sendCandidateCard(
+        normalizedChatId,
+        previewScenario(this.config),
+        'Тестовая карточка — это не данные рынка',
+      );
       return;
     }
 
