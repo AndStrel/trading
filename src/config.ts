@@ -6,6 +6,7 @@ export type Strategy = 'intraday' | 'swing';
 
 export type IntradayWatchlistItem = {
   instrumentId: string;
+  label?: string;
   lotSize: number;
   priceStep: number;
 };
@@ -16,6 +17,12 @@ export type ScannerConfig = {
   candidateCooldownMinutes: number;
   slippageRate: number;
   intradayWatchlist: IntradayWatchlistItem[];
+};
+
+export type TelegramConfig = {
+  token?: string;
+  allowedChatIds: string[];
+  pollingTimeoutSeconds: number;
 };
 
 export type StrategyLimits = {
@@ -34,6 +41,7 @@ export type AppConfig = {
   commissionRate: number;
   journalPath: string;
   scanner: ScannerConfig;
+  telegram: TelegramConfig;
   strategies: Record<Strategy, StrategyLimits>;
 };
 
@@ -44,6 +52,7 @@ const optionalNonEmpty = z.preprocess(
 
 const intradayWatchlistItemSchema = z.object({
   instrumentId: z.string().trim().min(1).max(256),
+  label: z.string().trim().min(1).max(64).optional(),
   lotSize: z.coerce.number().int().positive(),
   priceStep: z.coerce.number().positive(),
 });
@@ -53,9 +62,22 @@ function parseIntradayWatchlist(raw: string): IntradayWatchlistItem[] {
     return z.array(intradayWatchlistItemSchema).max(10).parse(JSON.parse(raw));
   } catch {
     throw new Error(
-      'T_INVEST_INTRADAY_WATCHLIST must be a JSON array of instrumentId, lotSize and priceStep values',
+      'T_INVEST_INTRADAY_WATCHLIST must be a JSON array of instrumentId, optional label, lotSize and priceStep values',
     );
   }
+}
+
+function parseTelegramAllowedChatIds(raw: string): string[] {
+  const chatIds = raw
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  if (chatIds.some((chatId) => !/^-?\d+$/.test(chatId))) {
+    throw new Error('TELEGRAM_ALLOWED_CHAT_IDS must be a comma-separated list of numeric Telegram chat IDs');
+  }
+
+  return [...new Set(chatIds)].slice(0, 10);
 }
 
 const envSchema = z.object({
@@ -69,6 +91,9 @@ const envSchema = z.object({
   T_INVEST_SCANNER_LOOKBACK_MINUTES: z.coerce.number().int().min(300).max(720).default(360),
   T_INVEST_SCANNER_CANDIDATE_COOLDOWN_MINUTES: z.coerce.number().int().min(5).max(1_440).default(30),
   T_INVEST_SCANNER_SLIPPAGE_RATE: z.coerce.number().min(0).max(0.02).default(0.0005),
+  TELEGRAM_BOT_TOKEN: optionalNonEmpty,
+  TELEGRAM_ALLOWED_CHAT_IDS: z.string().default(''),
+  TELEGRAM_POLLING_TIMEOUT_SECONDS: z.coerce.number().int().min(10).max(50).default(25),
   T_INVEST_INTRADAY_ACCOUNT_ID: optionalNonEmpty,
   T_INVEST_SWING_ACCOUNT_ID: optionalNonEmpty,
   INTRADAY_MAX_RISK_RUB: z.coerce.number().positive().default(500),
@@ -97,6 +122,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       candidateCooldownMinutes: parsed.T_INVEST_SCANNER_CANDIDATE_COOLDOWN_MINUTES,
       slippageRate: parsed.T_INVEST_SCANNER_SLIPPAGE_RATE,
       intradayWatchlist: parseIntradayWatchlist(parsed.T_INVEST_INTRADAY_WATCHLIST),
+    },
+    telegram: {
+      ...(parsed.TELEGRAM_BOT_TOKEN ? { token: parsed.TELEGRAM_BOT_TOKEN } : {}),
+      allowedChatIds: parseTelegramAllowedChatIds(parsed.TELEGRAM_ALLOWED_CHAT_IDS),
+      pollingTimeoutSeconds: parsed.TELEGRAM_POLLING_TIMEOUT_SECONDS,
     },
     strategies: {
       intraday: {
