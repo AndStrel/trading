@@ -1,5 +1,5 @@
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { afterEach, describe, expect, it } from 'vitest';
@@ -70,6 +70,6 @@ describe('ScenarioJournal', () => {
     journal.record(scenario('intraday'));
 
     expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(statSync(join(path, '..')).mode & 0o777).toBe(0o700);
+    expect(statSync(dirname(path)).mode & 0o777).toBe(0o700);
   });
 });
