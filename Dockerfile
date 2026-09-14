@@ -14,7 +14,7 @@ FROM node:24-bookworm-slim AS runtime
 # Download both certificates from the official Ministry of Digital Development endpoint
 # during image build; TLS verification remains enabled for this download.
 RUN apt-get update \
-  && apt-get install --no-install-recommends -y ca-certificates curl librsvg2-bin \
+  && apt-get install --no-install-recommends -y ca-certificates curl librsvg2-bin fonts-dejavu-core \
   && curl --fail --location --proto '=https' --tlsv1.2 \
     --output /usr/local/share/ca-certificates/russian_trusted_root_ca.crt \
     https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt \
