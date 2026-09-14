@@ -1,0 +1,25 @@
+name: andstrel-trading
+
+services:
+  telegram-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      T_INVEST_JOURNAL_PATH: /app/data/journal.sqlite
+    volumes:
+      - trading-journal:/app/data
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=700
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  trading-journal:

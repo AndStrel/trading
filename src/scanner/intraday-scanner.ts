@@ -9,10 +9,12 @@ import { TInvestClient } from '../tbank/client.js';
 export type IntradayScanEvent = {
   instrumentId: string;
   observedAt: string;
-  status: 'skipped' | 'candidate-recorded' | 'candidate-suppressed' | 'error';
+  status: 'paused' | 'skipped' | 'candidate-recorded' | 'candidate-suppressed' | 'error';
   reasons: string[];
   scenarioId?: number;
 };
+
+export type IntradayScanEventListener = (event: IntradayScanEvent) => void | Promise<void>;
 
 function skippedReasons(input: {
   trend: string;
@@ -29,6 +31,8 @@ function skippedReasons(input: {
 }
 
 export class IntradayScanner {
+  private readonly listeners: IntradayScanEventListener[] = [];
+
   constructor(
     private readonly config: AppConfig,
     private readonly client: TInvestClient,
@@ -37,7 +41,34 @@ export class IntradayScanner {
       process.stdout.write(JSON.stringify(event) + '\n'),
   ) {}
 
+  addEventListener(listener: IntradayScanEventListener): void {
+    this.listeners.push(listener);
+  }
+
+  isPaused(): boolean {
+    return this.journal.isScannerPaused('intraday');
+  }
+
+  pause(): void {
+    this.journal.setScannerPaused('intraday', true);
+  }
+
+  resume(): void {
+    this.journal.setScannerPaused('intraday', false);
+  }
+
   async scanOnce(now = new Date()): Promise<IntradayScanEvent[]> {
+    if (this.isPaused()) {
+      const event: IntradayScanEvent = {
+        instrumentId: 'scanner',
+        observedAt: now.toISOString(),
+        status: 'paused',
+        reasons: ['Intraday scanner is paused by an authorized operator'],
+      };
+      await this.emit(event);
+      return [event];
+    }
+
     const events: IntradayScanEvent[] = [];
 
     for (const instrument of this.config.scanner.intradayWatchlist) {
@@ -53,7 +84,7 @@ export class IntradayScanner {
       }
     }
 
-    for (const event of events) this.log(event);
+    for (const event of events) await this.emit(event);
     return events;
   }
 
@@ -74,6 +105,19 @@ export class IntradayScanner {
       }, delay);
     };
     scheduleNext();
+  }
+
+  private async emit(event: IntradayScanEvent): Promise<void> {
+    this.log(event);
+
+    for (const listener of this.listeners) {
+      try {
+        await listener(event);
+      } catch (error: unknown) {
+        const detail = error instanceof Error ? error.message : 'Unknown event listener error';
+        process.stderr.write(`Intraday scanner event listener failed: ${detail}\n`);
+      }
+    }
   }
 
   private async scanInstrument(
