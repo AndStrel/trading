@@ -94,6 +94,8 @@ export class IntradayScanner {
       candleAnalysis,
       orderBookPayload: orderBook,
       priceStep: instrument.priceStep,
+      commissionRate: this.config.commissionRate,
+      slippageRate: this.config.scanner.slippageRate,
     });
 
     if (!proposal) {
