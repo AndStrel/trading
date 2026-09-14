@@ -28,6 +28,8 @@ describe('proposeIntradayLong', () => {
       candleAnalysis: upwardAnalysis,
       orderBookPayload: { asks: [{ price: { units: '100', nano: 0 } }] },
       priceStep: 0.01,
+      commissionRate: 0.0005,
+      slippageRate: 0.0005,
     });
 
     expect(proposal).toMatchObject({
@@ -43,6 +45,8 @@ describe('proposeIntradayLong', () => {
         candleAnalysis: { ...upwardAnalysis, trend: 'flat' },
         orderBookPayload: { asks: [{ price: { units: '100', nano: 0 } }] },
         priceStep: 0.01,
+        commissionRate: 0.0005,
+        slippageRate: 0.0005,
       }),
     ).toBeNull();
     expect(
@@ -50,6 +54,23 @@ describe('proposeIntradayLong', () => {
         candleAnalysis: { ...upwardAnalysis, relativeVolume: 0.99 },
         orderBookPayload: { asks: [{ price: { units: '100', nano: 0 } }] },
         priceStep: 0.01,
+        commissionRate: 0.0005,
+        slippageRate: 0.0005,
+      }),
+    ).toBeNull();
+  });
+});
+
+
+describe('cost-aware target guardrail', () => {
+  it('rejects a quiet setup when costs require an implausibly distant target', () => {
+    expect(
+      proposeIntradayLong({
+        candleAnalysis: { ...upwardAnalysis, averageTrueRange14: 0.17, latestClose: 285.67 },
+        orderBookPayload: { asks: [{ price: { units: '285', nano: 680000000 } }] },
+        priceStep: 0.01,
+        commissionRate: 0.0005,
+        slippageRate: 0.0005,
       }),
     ).toBeNull();
   });
