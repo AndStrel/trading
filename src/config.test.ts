@@ -8,6 +8,7 @@ describe('loadConfig', () => {
 
     expect(config.journalPath).toBe('.trading/journal.sqlite');
     expect(config.scanner.intervalSeconds).toBe(300);
+    expect(config.scanner.slippageRate).toBe(0.0005);
     expect(config.scanner.intradayWatchlist).toEqual([]);
     expect(config.strategies.intraday.maxSpreadPct).toBe(0.3);
     expect(config.strategies.intraday.maxEntryDeviationPct).toBe(0.5);
