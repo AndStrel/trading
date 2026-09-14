@@ -102,7 +102,7 @@ export class ScenarioJournal {
             recorded_at, observed_at, strategy, instrument_id, side,
             entry_price, stop_price, target_price, lot_size, slippage_rate, decision,
             blockers_json, warnings_json, snapshot_json, note
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           recordedAt,
