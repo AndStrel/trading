@@ -108,6 +108,7 @@ export function createServer(
   config: AppConfig,
   client = new TInvestClient(config.token, config.baseUrl, { transport: config.transport }),
 ) {
+  const journal = new ScenarioJournal(config.journalPath);
   const server = new McpServer(
     { name: 'andstrel-trading', version: '0.1.0' },
     {
@@ -125,7 +126,7 @@ export function createServer(
     },
     async () =>
       result({
-        mode: 'read-only',
+        mode: 'analysis-only',
         transport: config.transport,
         tokenConfigured: Boolean(config.token),
         accountsConfigured: {
