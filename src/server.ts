@@ -22,7 +22,10 @@ function result(data: unknown) {
   };
 }
 
-export function createServer(config: AppConfig, client = new TInvestClient(config.token, config.baseUrl)) {
+export function createServer(
+  config: AppConfig,
+  client = new TInvestClient(config.token, config.baseUrl, { transport: config.transport }),
+) {
   const server = new McpServer(
     { name: 'andstrel-trading', version: '0.1.0' },
     {
@@ -41,6 +44,7 @@ export function createServer(config: AppConfig, client = new TInvestClient(confi
     async () =>
       result({
         mode: 'read-only',
+        transport: config.transport,
         tokenConfigured: Boolean(config.token),
         accountsConfigured: {
           intraday: Boolean(config.strategies.intraday.accountId),

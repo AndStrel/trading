@@ -7,7 +7,7 @@ async function main(): Promise<void> {
     throw new Error('T_INVEST_TOKEN is required for the manual smoke test');
   }
 
-  const client = new TInvestClient(config.token, config.baseUrl);
+  const client = new TInvestClient(config.token, config.baseUrl, { transport: config.transport });
   await client.getAccounts();
 
   console.error('T-Invest read-only authentication smoke test passed');

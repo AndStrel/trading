@@ -1,10 +1,38 @@
+import { spawn } from 'node:child_process';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 export type FetchLike = typeof fetch;
+export type TInvestTransport = 'fetch' | 'system-curl';
 
 type ApiErrorBody = {
   code?: string | number;
   message?: string;
   description?: string;
 };
+
+type CurlResponse = {
+  status: number;
+  statusText: string;
+  body: string;
+};
+
+type CurlPostInput = {
+  url: string;
+  token: string;
+  body: string;
+};
+
+export type CurlPost = (input: CurlPostInput) => Promise<CurlResponse>;
+
+export type TInvestClientOptions = {
+  transport?: TInvestTransport;
+  fetchImpl?: FetchLike;
+  curlPost?: CurlPost;
+};
+
+const curlStatusPrefix = '\n__ANDSTREL_TINVEST_STATUS__:';
 
 function describeNetworkError(error: unknown): string {
   if (!(error instanceof Error)) return 'unknown network failure';
@@ -17,12 +45,129 @@ function describeNetworkError(error: unknown): string {
   return `${prefix}${cause.message}`;
 }
 
+function asApiErrorBody(payload: unknown): ApiErrorBody {
+  if (typeof payload !== 'object' || payload === null) return {};
+  return payload as ApiErrorBody;
+}
+
+function parsePayload(raw: string): unknown {
+  return JSON.parse(raw) as unknown;
+}
+
+async function runCurl(args: string[], input: string): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('curl', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+
+    child.once('error', reject);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.stdin.once('error', reject);
+    child.once('close', (exitCode) => {
+      if (exitCode === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+
+      const detail = stderr.trim().slice(0, 500);
+      reject(
+        new Error(
+          detail
+            ? `system curl exited with code ${exitCode}: ${detail}`
+            : `system curl exited with code ${exitCode}`,
+        ),
+      );
+    });
+    child.stdin.end(input);
+  });
+}
+
+function parseCurlResponse(stdout: string): CurlResponse {
+  const markerIndex = stdout.lastIndexOf(curlStatusPrefix);
+  if (markerIndex === -1) {
+    throw new Error('system curl did not return an HTTP status');
+  }
+
+  const status = Number.parseInt(stdout.slice(markerIndex + curlStatusPrefix.length).trim(), 10);
+  if (!Number.isInteger(status) || status < 100 || status > 599) {
+    throw new Error('system curl returned an invalid HTTP status');
+  }
+
+  return {
+    status,
+    statusText: `HTTP ${status}`,
+    body: stdout.slice(0, markerIndex),
+  };
+}
+
+export async function postWithSystemCurl(input: CurlPostInput): Promise<CurlResponse> {
+  const directory = await mkdtemp(join(tmpdir(), 'andstrel-trading-'));
+  const headersFile = join(directory, 'headers');
+
+  try {
+    await chmod(directory, 0o700);
+    await writeFile(
+      headersFile,
+      [
+        `Authorization: Bearer ${input.token}`,
+        'Content-Type: application/json',
+        'Accept: application/json',
+        'x-app-name: AndStrel.trading-mcp',
+      ].join('\n'),
+      { encoding: 'utf8', mode: 0o600 },
+    );
+
+    const { stdout } = await runCurl(
+      [
+        '--disable',
+        '--silent',
+        '--show-error',
+        '--request',
+        'POST',
+        '--header',
+        `@${headersFile}`,
+        '--connect-timeout',
+        '10',
+        '--max-time',
+        '10',
+        '--proto',
+        '=https',
+        '--data-binary',
+        '@-',
+        '--write-out',
+        `${curlStatusPrefix}%{http_code}`,
+        input.url,
+      ],
+      input.body,
+    );
+
+    return parseCurlResponse(stdout);
+  } finally {
+    await rm(directory, { recursive: true, force: true, maxRetries: 1 });
+  }
+}
+
 export class TInvestClient {
+  private readonly transport: TInvestTransport;
+  private readonly fetchImpl: FetchLike;
+  private readonly curlPost: CurlPost;
+
   public constructor(
     private readonly token: string | undefined,
     private readonly baseUrl: string,
-    private readonly fetchImpl: FetchLike = fetch,
-  ) {}
+    options: TInvestClientOptions = {},
+  ) {
+    this.transport = options.transport ?? 'fetch';
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.curlPost = options.curlPost ?? postWithSystemCurl;
+  }
 
   public async getAccounts(): Promise<unknown> {
     return this.post('tinkoff.public.invest.api.contract.v1.UsersService/GetAccounts', {});
@@ -64,27 +209,49 @@ export class TInvestClient {
       throw new Error('T_INVEST_TOKEN is not configured. Use a read-only token.');
     }
 
-    let response: Response;
+    const url = `${this.baseUrl}/${path}`;
+    const serializedBody = JSON.stringify(body);
+
+    let status: number;
+    let statusText: string;
+    let payload: unknown;
+
     try {
-      response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          'Content-Type': 'application/json',
-          'x-app-name': 'AndStrel.trading-mcp',
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(10_000),
-      });
+      if (this.transport === 'system-curl') {
+        const response = await this.curlPost({
+          url,
+          token: this.token,
+          body: serializedBody,
+        });
+        status = response.status;
+        statusText = response.statusText;
+        payload = parsePayload(response.body);
+      } else {
+        const response = await this.fetchImpl(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            'Content-Type': 'application/json',
+            'x-app-name': 'AndStrel.trading-mcp',
+          },
+          body: serializedBody,
+          signal: AbortSignal.timeout(10_000),
+        });
+
+        status = response.status;
+        statusText = response.statusText;
+        payload = await response.json().catch(() => ({}));
+      }
     } catch (error: unknown) {
       throw new Error(`T-Invest network error: ${describeNetworkError(error)}`);
     }
 
-    const payload = (await response.json().catch(() => ({}))) as ApiErrorBody;
-    if (!response.ok) {
-      const detail = payload.message ?? payload.description ?? response.statusText;
-      throw new Error(`T-Invest API ${response.status}: ${detail}`);
+    if (status < 200 || status >= 300) {
+      const errorBody = asApiErrorBody(payload);
+      const detail = errorBody.message ?? errorBody.description ?? statusText;
+      throw new Error(`T-Invest API ${status}: ${detail}`);
     }
+
     return payload;
   }
 }
