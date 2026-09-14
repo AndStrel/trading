@@ -6,6 +6,7 @@ import { getAccountId } from './config.js';
 import { analyzeCandles } from './domain/candle-analysis.js';
 import { assessTradeScenario } from './domain/trade-scenario.js';
 import { calculateTradePlan } from './domain/trade-plan.js';
+import { ScenarioJournal } from './journal/scenario-journal.js';
 import { TInvestClient } from './tbank/client.js';
 
 const strategySchema = z.enum(['intraday', 'swing']);
@@ -19,11 +20,87 @@ const candleIntervals = z.enum([
 const instrumentIdSchema = z.string().trim().min(1).max(256);
 const instrumentQuerySchema = z.string().trim().min(1).max(128);
 const orderBookDepthSchema = z.number().int().min(1).max(50).default(20);
+const scenarioInputSchema = z.object({
+  strategy: strategySchema,
+  instrumentId: instrumentIdSchema,
+  side: z.enum(['long', 'short']),
+  entryPrice: z.number().positive(),
+  stopPrice: z.number().nonnegative(),
+  targetPrice: z.number().nonnegative(),
+  lotSize: z.number().int().positive(),
+  slippageRate: z.number().min(0).max(0.02).default(0.0005),
+  from: z.iso.datetime({ offset: true }),
+  to: z.iso.datetime({ offset: true }),
+  interval: candleIntervals,
+  depth: orderBookDepthSchema,
+});
+type ScenarioInput = z.infer<typeof scenarioInputSchema>;
 
 function result(data: unknown) {
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     structuredContent: { data },
+  };
+}
+
+async function buildTradeScenario(
+  config: AppConfig,
+  client: TInvestClient,
+  input: ScenarioInput,
+) {
+  const limits = config.strategies[input.strategy as Strategy];
+  const [candles, lastPrices, orderBook, tradingStatus] = await Promise.all([
+    client.getCandles({
+      instrumentId: input.instrumentId,
+      from: input.from,
+      to: input.to,
+      interval: input.interval,
+    }),
+    client.getLastPrices([input.instrumentId]),
+    client.getOrderBook(input.instrumentId, input.depth),
+    client.getTradingStatus(input.instrumentId),
+  ]);
+  const candleAnalysis = analyzeCandles(candles);
+  const tradePlan = calculateTradePlan({
+    side: input.side,
+    entryPrice: input.entryPrice,
+    stopPrice: input.stopPrice,
+    targetPrice: input.targetPrice,
+    lotSize: input.lotSize,
+    slippageRate: input.slippageRate,
+    commissionRate: config.commissionRate,
+    maxRiskRub: limits.maxRiskRub,
+    maxPositionRub: limits.maxPositionRub,
+  });
+  const assessment = assessTradeScenario({
+    side: input.side,
+    entryPrice: input.entryPrice,
+    maxSpreadPct: limits.maxSpreadPct,
+    maxEntryDeviationPct: limits.maxEntryDeviationPct,
+    allowShort: limits.allowShort,
+    tradePlan,
+    candleAnalysis,
+    lastPricesPayload: lastPrices,
+    orderBookPayload: orderBook,
+    tradingStatusPayload: tradingStatus,
+  });
+
+  return {
+    mode: 'analysis-only' as const,
+    observedAt: new Date().toISOString(),
+    strategy: input.strategy,
+    instrumentId: input.instrumentId,
+    input: {
+      side: input.side,
+      entryPrice: input.entryPrice,
+      stopPrice: input.stopPrice,
+      targetPrice: input.targetPrice,
+      lotSize: input.lotSize,
+      slippageRate: input.slippageRate,
+    },
+    tradePlan,
+    candleAnalysis,
+    ...assessment,
   };
 }
 
@@ -35,7 +112,7 @@ export function createServer(
     { name: 'andstrel-trading', version: '0.1.0' },
     {
       instructions:
-        'This server is read-only. Treat market data as informational. Calculate a trade plan before proposing a trade. Never claim an order was placed.',
+        'This server has analysis-only broker access. It may save local scenario journal records but never submits an order. Treat market data as informational and calculate a trade plan before proposing a trade.',
     },
   );
 
@@ -56,6 +133,7 @@ export function createServer(
           swing: Boolean(config.strategies.swing.accountId),
         },
         commissionRate: config.commissionRate,
+        localScenarioJournal: true,
         limits: {
           intraday: {
             maxRiskRub: config.strategies.intraday.maxRiskRub,
@@ -216,68 +294,64 @@ export function createServer(
     {
       description:
         'Build one analysis-only trade scenario from live price, order book, trading status, candles and configured risk limits. It never submits an order.',
-      inputSchema: z.object({
-        strategy: strategySchema,
-        instrumentId: instrumentIdSchema,
-        side: z.enum(['long', 'short']),
-        entryPrice: z.number().positive(),
-        stopPrice: z.number().nonnegative(),
-        targetPrice: z.number().nonnegative(),
-        lotSize: z.number().int().positive(),
-        slippageRate: z.number().min(0).max(0.02).default(0.0005),
-        from: z.iso.datetime({ offset: true }),
-        to: z.iso.datetime({ offset: true }),
-        interval: candleIntervals,
-        depth: orderBookDepthSchema,
-      }),
+      inputSchema: scenarioInputSchema,
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
-    async ({ strategy, instrumentId, from, to, interval, depth, ...tradeInput }) => {
-      const limits = config.strategies[strategy as Strategy];
-      const [candles, lastPrices, orderBook, tradingStatus] = await Promise.all([
-        client.getCandles({ instrumentId, from, to, interval }),
-        client.getLastPrices([instrumentId]),
-        client.getOrderBook(instrumentId, depth),
-        client.getTradingStatus(instrumentId),
-      ]);
-      const candleAnalysis = analyzeCandles(candles);
-      const tradePlan = calculateTradePlan({
-        ...tradeInput,
-        commissionRate: config.commissionRate,
-        maxRiskRub: limits.maxRiskRub,
-        maxPositionRub: limits.maxPositionRub,
-      });
-      const assessment = assessTradeScenario({
-        side: tradeInput.side,
-        entryPrice: tradeInput.entryPrice,
-        maxSpreadPct: limits.maxSpreadPct,
-        maxEntryDeviationPct: limits.maxEntryDeviationPct,
-        allowShort: limits.allowShort,
-        tradePlan,
-        candleAnalysis,
-        lastPricesPayload: lastPrices,
-        orderBookPayload: orderBook,
-        tradingStatusPayload: tradingStatus,
+    async (input) => result(await buildTradeScenario(config, client, input as ScenarioInput)),
+  );
+
+  server.registerTool(
+    'record_trade_scenario',
+    {
+      description:
+        'Build a fresh analysis-only scenario and save its safe snapshot in the local SQLite journal. It never submits an order or stores a token.',
+      inputSchema: scenarioInputSchema.extend({
+        note: z.string().trim().min(1).max(1_000).optional(),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async ({ note, ...input }) => {
+      const scenario = await buildTradeScenario(config, client, input as ScenarioInput);
+      const record = journal.record({
+        observedAt: scenario.observedAt,
+        strategy: scenario.strategy,
+        instrumentId: scenario.instrumentId,
+        input: scenario.input,
+        decision: scenario.decision,
+        blockers: scenario.blockers,
+        warnings: scenario.warnings,
+        snapshot: {
+          input: scenario.input,
+          tradePlan: scenario.tradePlan,
+          candleAnalysis: scenario.candleAnalysis,
+          market: scenario.market,
+        },
+        ...(note ? { note } : {}),
       });
 
       return result({
-        mode: 'analysis-only',
-        observedAt: new Date().toISOString(),
-        strategy,
-        instrumentId,
-        input: {
-          side: tradeInput.side,
-          entryPrice: tradeInput.entryPrice,
-          stopPrice: tradeInput.stopPrice,
-          targetPrice: tradeInput.targetPrice,
-          lotSize: tradeInput.lotSize,
-          slippageRate: tradeInput.slippageRate,
+        ...scenario,
+        journal: {
+          id: record.id,
+          recordedAt: record.recordedAt,
+          note: record.note ?? null,
         },
-        tradePlan,
-        candleAnalysis,
-        ...assessment,
       });
     },
+  );
+
+  server.registerTool(
+    'list_recorded_scenarios',
+    {
+      description:
+        'List safe local scenario snapshots from the SQLite journal. This reads only the local journal and never contacts T-Invest.',
+      inputSchema: z.object({
+        strategy: strategySchema.optional(),
+        limit: z.number().int().min(1).max(100).default(20),
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ strategy, limit }) => result(journal.list(limit, strategy as Strategy | undefined)),
   );
 
   server.registerTool(
