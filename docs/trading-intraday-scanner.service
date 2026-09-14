@@ -1,0 +1,15 @@
+[Unit]
+Description=AndStrel Trading intraday paper scanner
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dev/trading
+ExecStart=%h/dev/trading/scripts/start-intraday-scanner.sh
+Restart=on-failure
+RestartSec=15
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target
