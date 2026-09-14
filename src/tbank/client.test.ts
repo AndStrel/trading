@@ -30,4 +30,19 @@ describe('TInvestClient', () => {
       }),
     );
   });
+
+  it('reports the underlying network error without exposing credentials', async () => {
+    const cause = Object.assign(new Error('connection reset by peer'), { code: 'ECONNRESET' });
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockRejectedValue(new TypeError('fetch failed', { cause }));
+    const client = new TInvestClient('secret-token', 'https://example.test/rest', fetchMock);
+
+    await expect(client.getAccounts()).rejects.toThrow(
+      'T-Invest network error: ECONNRESET: connection reset by peer',
+    );
+    await client.getAccounts().catch((error: unknown) => {
+      expect(String(error)).not.toContain('secret-token');
+    });
+  });
 });
