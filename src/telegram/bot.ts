@@ -7,8 +7,8 @@ import type { IntradayScanEvent, IntradayScanner } from '../scanner/intraday-sca
 import type { TelegramClient, TelegramUpdate } from './client.js';
 
 type ScannerControl = Pick<IntradayScanner, 'isPaused' | 'pause' | 'resume'>;
-
 type TelegramBotLog = (message: string) => void;
+type UnknownRecord = Record<string, unknown>;
 
 function normalizeCommand(text: string): string {
   const firstWord = text.trim().split(/\s+/, 1)[0]?.toLowerCase() ?? '';
@@ -19,21 +19,97 @@ function formatNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
+function formatRubles(value: number | null): string {
+  return value === null ? '—' : `${formatNumber(value)} ₽`;
+}
+
 function formatDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
 }
 
-function formatScenario(record: JournalScenarioRecord, config: AppConfig): string {
+function asRecord(value: unknown): UnknownRecord | null {
+  return typeof value === 'object' && value !== null ? (value as UnknownRecord) : null;
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function formatCandidateCard(record: JournalScenarioRecord, config: AppConfig): string {
   const instrument =
     config.scanner.intradayWatchlist.find((item) => item.instrumentId === record.instrumentId)?.label ??
     record.instrumentId;
+  const snapshot = asRecord(record.snapshot);
+  const tradePlan = asRecord(snapshot?.tradePlan);
+  const market = asRecord(snapshot?.market);
+  const candleAnalysis = asRecord(snapshot?.candleAnalysis);
+  const proposal = asRecord(snapshot?.proposal);
 
-  return [
-    `#${record.id} · ${instrument}`,
-    `Вход: ${formatNumber(record.input.entryPrice)} ₽ · стоп: ${formatNumber(record.input.stopPrice)} ₽ · цель: ${formatNumber(record.input.targetPrice)} ₽`,
-    `Лот: ${record.input.lotSize} · время: ${formatDate(record.observedAt)}`,
-  ].join('\n');
+  const lots = asFiniteNumber(tradePlan?.lots);
+  const units = asFiniteNumber(tradePlan?.units);
+  const positionRub = asFiniteNumber(tradePlan?.positionRub);
+  const grossRiskRub = asFiniteNumber(tradePlan?.grossRiskRub);
+  const commissionRub = asFiniteNumber(tradePlan?.estimatedCommissionRub);
+  const slippageRub = asFiniteNumber(tradePlan?.estimatedSlippageRub);
+  const totalRiskRub = asFiniteNumber(tradePlan?.totalRiskRub);
+  const netRewardRub = asFiniteNumber(tradePlan?.netRewardRub);
+  const rewardToRisk = asFiniteNumber(tradePlan?.rewardToRisk);
+  const lastPrice = asFiniteNumber(market?.lastPrice);
+  const bestBid = asFiniteNumber(market?.bestBid);
+  const bestAsk = asFiniteNumber(market?.bestAsk);
+  const spreadPct = asFiniteNumber(market?.spreadPct);
+  const relativeVolume = asFiniteNumber(candleAnalysis?.relativeVolume);
+  const atr = asFiniteNumber(candleAnalysis?.averageTrueRange14);
+  const trend = typeof candleAnalysis?.trend === 'string' ? candleAnalysis.trend : null;
+  const reasons = asStringArray(proposal?.reasons);
+
+  const direction = record.input.side === 'long' ? 'Покупка' : 'Продажа';
+  const lines = [
+    `#${record.id} · ${instrument} · ${direction}`,
+    `Время сигнала: ${formatDate(record.observedAt)}`,
+    '',
+    'План:',
+    `Вход: ${formatRubles(record.input.entryPrice)}`,
+    `Стоп: ${formatRubles(record.input.stopPrice)} · цель: ${formatRubles(record.input.targetPrice)}`,
+  ];
+
+  if (lots !== null && units !== null && positionRub !== null) {
+    lines.push(
+      '',
+      `Объём: ${formatNumber(lots)} лот. (${formatNumber(units)} шт.) · ${formatRubles(positionRub)}`,
+    );
+  }
+  if (grossRiskRub !== null && totalRiskRub !== null) {
+    lines.push(`Риск до стопа: ${formatRubles(grossRiskRub)} · с затратами: ${formatRubles(totalRiskRub)}`);
+  }
+  if (commissionRub !== null && slippageRub !== null) {
+    lines.push(`Затраты кругом: комиссия ${formatRubles(commissionRub)} + проскальзывание ${formatRubles(slippageRub)}`);
+  }
+  if (netRewardRub !== null && rewardToRisk !== null) {
+    lines.push(`Потенциал чистыми: ${formatRubles(netRewardRub)} · R/R: ${formatNumber(rewardToRisk)}`);
+  }
+  if (lastPrice !== null || bestBid !== null || bestAsk !== null) {
+    lines.push(
+      '',
+      `Рынок: последняя ${formatRubles(lastPrice)} · bid/ask ${formatRubles(bestBid)} / ${formatRubles(bestAsk)}${spreadPct === null ? '' : ` · спред ${formatNumber(spreadPct)}%`}`,
+    );
+  }
+  if (trend !== null || relativeVolume !== null || atr !== null) {
+    lines.push(
+      `Сигнал: тренд 5м ${trend ?? '—'} · относ. объём ${relativeVolume === null ? '—' : formatNumber(relativeVolume)} · ATR ${formatRubles(atr)}`,
+    );
+  }
+  if (reasons.length > 0) {
+    lines.push('', 'Почему кандидат:', ...reasons.map((reason) => `• ${reason}`));
+  }
+
+  lines.push('', 'Требуется ручная проверка. Бот не создавал заявку.');
+  return lines.join('\n');
 }
 
 function helpText(): string {
@@ -42,7 +118,7 @@ function helpText(): string {
     '/status — состояние сканера',
     '/candidates — последние кандидаты',
     '/pause — поставить сканер на паузу',
-    '/resume — продолжить сканирование',
+    '/resume — продолжить проходы',
     '',
     'Бот не открывает paper-сделки и не выставляет брокерские заявки.',
   ].join('\n');
@@ -98,7 +174,7 @@ export class TelegramTradingBot {
       return;
     }
 
-    const text = ['Новый кандидат для проверки', formatScenario(scenario, this.config)].join('\n\n');
+    const text = ['Новый кандидат для проверки', formatCandidateCard(scenario, this.config)].join('\n\n');
     for (const chatId of this.config.telegram.allowedChatIds) {
       try {
         await this.client.sendMessage(chatId, text);
@@ -181,7 +257,7 @@ export class TelegramTradingBot {
       return 'В журнале пока нет intraday-кандидатов.';
     }
 
-    return ['Последние кандидаты:', ...candidates.map((record) => formatScenario(record, this.config))].join(
+    return ['Последние кандидаты:', ...candidates.map((record) => formatCandidateCard(record, this.config))].join(
       '\n\n',
     );
   }
