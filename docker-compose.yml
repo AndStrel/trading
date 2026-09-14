@@ -15,7 +15,7 @@ services:
     init: true
     read_only: true
     tmpfs:
-      - /tmp:rw,noexec,nosuid,size=64m,mode=700
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
     security_opt:
       - no-new-privileges:true
     cap_drop:
