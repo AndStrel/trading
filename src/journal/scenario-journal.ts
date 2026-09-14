@@ -174,6 +174,12 @@ const schema = `
 
   CREATE INDEX IF NOT EXISTS paper_trades_status_opened_at
     ON paper_trades(status, opened_at DESC);
+
+  CREATE TABLE IF NOT EXISTS runtime_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  ) STRICT;
 `;
 
 function parseJson<T>(value: string, fallback: T): T {
@@ -300,6 +306,58 @@ export class ScenarioJournal {
     } finally {
       database.close();
     }
+  }
+
+  getRuntimeState(key: string): string | null {
+    const database = this.open();
+
+    try {
+      const row = database.prepare('SELECT value FROM runtime_state WHERE key = ?').get(key) as
+        | { value: string }
+        | undefined;
+      return row?.value ?? null;
+    } finally {
+      database.close();
+    }
+  }
+
+  setRuntimeState(key: string, value: string): void {
+    const database = this.open();
+
+    try {
+      database
+        .prepare(
+          `INSERT INTO runtime_state (key, value, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+        )
+        .run(key, value, new Date().toISOString());
+    } finally {
+      database.close();
+    }
+  }
+
+  isScannerPaused(strategy: Strategy): boolean {
+    return this.getRuntimeState(`scanner.${strategy}.paused`) === 'true';
+  }
+
+  setScannerPaused(strategy: Strategy, paused: boolean): void {
+    this.setRuntimeState(`scanner.${strategy}.paused`, paused ? 'true' : 'false');
+  }
+
+  getTelegramUpdateOffset(): number {
+    const raw = this.getRuntimeState('telegram.update_offset');
+    if (!raw) return 0;
+
+    const offset = Number.parseInt(raw, 10);
+    return Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+  }
+
+  setTelegramUpdateOffset(offset: number): void {
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new Error('Telegram update offset must be a non-negative safe integer');
+    }
+    this.setRuntimeState('telegram.update_offset', String(offset));
   }
 
   openPaperTrade(input: PaperTradeInput): PaperTradeRecord {
