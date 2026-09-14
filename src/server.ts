@@ -5,7 +5,9 @@ import type { AppConfig, Strategy } from './config.js';
 import { getAccountId } from './config.js';
 import { analyzeCandles } from './domain/candle-analysis.js';
 import { assessTradeScenario } from './domain/trade-scenario.js';
+import { calculatePaperEntry, calculatePaperExit } from './domain/paper-trade.js';
 import { calculateTradePlan } from './domain/trade-plan.js';
+import { quotationToNumber } from './domain/money.js';
 import { ScenarioJournal } from './journal/scenario-journal.js';
 import { TInvestClient } from './tbank/client.js';
 
@@ -20,6 +22,7 @@ const candleIntervals = z.enum([
 const instrumentIdSchema = z.string().trim().min(1).max(256);
 const instrumentQuerySchema = z.string().trim().min(1).max(128);
 const orderBookDepthSchema = z.number().int().min(1).max(50).default(20);
+const paperTradeStatusSchema = z.enum(['open', 'closed']);
 const scenarioInputSchema = z.object({
   strategy: strategySchema,
   instrumentId: instrumentIdSchema,
@@ -41,6 +44,43 @@ function result(data: unknown) {
     content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
     structuredContent: { data },
   };
+}
+
+function getExchangeLastPrice(payload: unknown): number {
+  if (typeof payload !== 'object' || payload === null) {
+    throw new Error('T-Invest did not return a last-price payload');
+  }
+  const lastPrices = (payload as { lastPrices?: unknown }).lastPrices;
+  if (!Array.isArray(lastPrices) || lastPrices.length === 0) {
+    throw new Error('T-Invest did not return an exchange last price');
+  }
+  const first = lastPrices[0];
+  if (typeof first !== 'object' || first === null) {
+    throw new Error('T-Invest returned an invalid last price');
+  }
+  const price = quotationToNumber((first as { price?: { units?: string | number; nano?: number } }).price);
+  if (price === null || price <= 0) {
+    throw new Error('T-Invest returned an invalid exchange last price');
+  }
+  return price;
+}
+
+function getPaperPosition(snapshot: unknown): { lots: number; units: number } {
+  if (typeof snapshot !== 'object' || snapshot === null) {
+    throw new Error('Recorded scenario has no paper-trade snapshot');
+  }
+  const tradePlan = (snapshot as { tradePlan?: unknown }).tradePlan;
+  if (typeof tradePlan !== 'object' || tradePlan === null) {
+    throw new Error('Recorded scenario has no trade plan');
+  }
+  const plan = tradePlan as { allowed?: unknown; lots?: unknown; units?: unknown };
+  if (plan.allowed !== true || !Number.isInteger(plan.lots) || !Number.isInteger(plan.units)) {
+    throw new Error('Recorded scenario does not contain an allowed whole-lot trade plan');
+  }
+  if ((plan.lots as number) < 1 || (plan.units as number) < 1) {
+    throw new Error('Recorded scenario does not contain a positive paper position');
+  }
+  return { lots: plan.lots as number, units: plan.units as number };
 }
 
 async function buildTradeScenario(
@@ -113,7 +153,7 @@ export function createServer(
     { name: 'andstrel-trading', version: '0.1.0' },
     {
       instructions:
-        'This server has analysis-only broker access. It may save local scenario journal records but never submits an order. Treat market data as informational and calculate a trade plan before proposing a trade.',
+        'This server has analysis-only broker access. It may save local scenarios and paper trades but never submits an order. Treat market data as informational and calculate a trade plan before proposing a trade.',
     },
   );
 
@@ -135,6 +175,7 @@ export function createServer(
         },
         commissionRate: config.commissionRate,
         localScenarioJournal: true,
+        paperTrading: true,
         limits: {
           intraday: {
             maxRiskRub: config.strategies.intraday.maxRiskRub,
@@ -353,6 +394,116 @@ export function createServer(
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
     async ({ strategy, limit }) => result(journal.list(limit, strategy as Strategy | undefined)),
+  );
+
+  server.registerTool(
+    'open_paper_trade',
+    {
+      description:
+        'Open one local paper trade from a saved candidate scenario. It fetches a current last price, applies adverse simulated slippage and entry commission, and never submits an order.',
+      inputSchema: z.object({
+        scenarioId: z.number().int().positive(),
+        confirmPaperTrade: z.literal(true),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async ({ scenarioId }) => {
+      const scenario = journal.getScenario(scenarioId);
+      if (!scenario) throw new Error('Recorded scenario was not found');
+      if (scenario.decision !== 'candidate') {
+        throw new Error('Only a candidate scenario can open a paper trade');
+      }
+
+      const position = getPaperPosition(scenario.snapshot);
+      const marketPrice = getExchangeLastPrice(await client.getLastPrices([scenario.instrumentId]));
+      const entry = calculatePaperEntry({
+        side: scenario.input.side,
+        units: position.units,
+        marketPrice,
+        commissionRate: config.commissionRate,
+        slippageRate: scenario.input.slippageRate,
+      });
+      const paperTrade = journal.openPaperTrade({
+        scenarioId: scenario.id,
+        strategy: scenario.strategy,
+        instrumentId: scenario.instrumentId,
+        side: scenario.input.side,
+        lots: position.lots,
+        units: position.units,
+        ...entry,
+        commissionRate: config.commissionRate,
+        slippageRate: scenario.input.slippageRate,
+      });
+
+      return result({
+        mode: 'paper-trading',
+        paperTrade,
+        model: {
+          orderSubmitted: false,
+          slippage: 'Adverse slippage is included in the simulated fill price',
+          commission: 'Entry commission is included; exit commission will be added when the trade is closed',
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    'close_paper_trade',
+    {
+      description:
+        'Close one open local paper trade at a fresh simulated exit price. It applies adverse exit slippage and commission, then stores gross and net PnL. It never submits an order.',
+      inputSchema: z.object({
+        paperTradeId: z.number().int().positive(),
+        confirmClose: z.literal(true),
+        note: z.string().trim().min(1).max(1_000).optional(),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async ({ paperTradeId, note }) => {
+      const paperTrade = journal.getPaperTrade(paperTradeId);
+      if (!paperTrade) throw new Error('Paper trade was not found');
+      if (paperTrade.status !== 'open') throw new Error('Paper trade is already closed');
+
+      const marketPrice = getExchangeLastPrice(await client.getLastPrices([paperTrade.instrumentId]));
+      const exit = calculatePaperExit({
+        side: paperTrade.side,
+        units: paperTrade.units,
+        entryFillPrice: paperTrade.entryFillPrice,
+        entryCommissionRub: paperTrade.entryCommissionRub,
+        entrySlippageRub: paperTrade.entrySlippageRub,
+        marketPrice,
+        commissionRate: paperTrade.commissionRate,
+        slippageRate: paperTrade.slippageRate,
+      });
+      const closedTrade = journal.closePaperTrade({
+        id: paperTrade.id,
+        ...exit,
+        ...(note ? { closeNote: note } : {}),
+      });
+
+      return result({
+        mode: 'paper-trading',
+        paperTrade: closedTrade,
+        model: {
+          orderSubmitted: false,
+          netPnlFormula: 'Gross PnL after simulated fill prices minus entry and exit commissions',
+        },
+      });
+    },
+  );
+
+  server.registerTool(
+    'list_paper_trades',
+    {
+      description:
+        'List local paper trades and their simulated costs and PnL. This reads only the local SQLite journal and never contacts T-Invest.',
+      inputSchema: z.object({
+        status: paperTradeStatusSchema.optional(),
+        limit: z.number().int().min(1).max(100).default(20),
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ status, limit }) => result(journal.listPaperTrades(limit, status)),
   );
 
   server.registerTool(
