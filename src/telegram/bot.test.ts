@@ -62,7 +62,7 @@ describe('TelegramTradingBot', () => {
     expect(paused).toBe(true);
     expect(journal.getTelegramUpdateOffset()).toBe(13);
     expect(sent).toHaveLength(2);
-    expect(sent[0]?.text).toContain('пауза');
+    expect(sent[0]?.text).toContain('паузу');
     expect(sent[1]?.text).toContain('Сканер: пауза');
   });
 
