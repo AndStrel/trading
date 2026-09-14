@@ -1,0 +1,75 @@
+name: Deploy Telegram service
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trading-telegram-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DEPLOY_HOST: ${{ vars.TRADING_DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.TRADING_DEPLOY_USER }}
+      DEPLOY_PATH: ${{ vars.TRADING_DEPLOY_PATH }}
+      DEPLOY_SSH_KEY: ${{ secrets.TRADING_DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.TRADING_DEPLOY_KNOWN_HOSTS }}
+    steps:
+      - name: Validate deployment configuration
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test "$DEPLOY_PATH" = "/opt/andstrel/trading"
+
+      - name: Configure verified SSH access
+        run: |
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Deploy main to the isolated service directory
+        run: |
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+              set -Eeuo pipefail
+
+              deployment_path="/opt/andstrel/trading"
+              parent_path="/opt/andstrel"
+
+              command -v git >/dev/null
+              command -v docker >/dev/null
+              docker compose version >/dev/null
+
+              if [ ! -d "$deployment_path/.git" ]; then
+                install -d -m 0750 "$parent_path"
+                git clone https://github.com/AndStrel/trading.git "$deployment_path"
+              fi
+
+              cd "$deployment_path"
+              git fetch --depth=1 origin main
+              git checkout --detach origin/main
+
+              if [ ! -f .env ]; then
+                echo "Server .env is missing at $deployment_path/.env; deployment intentionally stopped."
+                exit 1
+              fi
+
+              chmod 600 .env
+              docker compose up -d --build --remove-orphans
+              docker compose ps
+              docker compose logs --tail=40 telegram-service
+REMOTE
