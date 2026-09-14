@@ -111,6 +111,52 @@ describe('ScenarioJournal', () => {
     expect(journal.listPaperTrades(10, 'open')).toEqual([]);
   });
 
+
+  it('filters closed paper trades by an ISO time window', () => {
+    const { journal } = createJournal();
+    const recorded = journal.record(scenario('swing'));
+    const opened = journal.openPaperTrade({
+      scenarioId: recorded.id,
+      strategy: recorded.strategy,
+      instrumentId: recorded.instrumentId,
+      side: 'long',
+      lots: 1,
+      units: 10,
+      entryMarketPrice: 100,
+      entryFillPrice: 100.1,
+      entryCommissionRub: 0.5,
+      entrySlippageRub: 1,
+      commissionRate: 0.0005,
+      slippageRate: 0.001,
+    });
+    journal.closePaperTrade({
+      id: opened.id,
+      exitMarketPrice: 110,
+      exitFillPrice: 109.89,
+      exitCommissionRub: 0.55,
+      exitSlippageRub: 1.1,
+      grossPnlRub: 97.9,
+      totalCommissionRub: 1.05,
+      totalSlippageRub: 2.1,
+      netPnlRub: 96.85,
+    });
+
+    expect(
+      journal.listClosedPaperTrades(
+        new Date(Date.now() - 60_000).toISOString(),
+        new Date(Date.now() + 60_000).toISOString(),
+        'swing',
+      ),
+    ).toHaveLength(1);
+    expect(
+      journal.listClosedPaperTrades(
+        new Date(Date.now() - 60_000).toISOString(),
+        new Date(Date.now() + 60_000).toISOString(),
+        'intraday',
+      ),
+    ).toEqual([]);
+  });
+
   it('restricts the database and its directory to the current user', () => {
     const { journal, path } = createJournal();
 
