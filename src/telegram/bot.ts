@@ -4,11 +4,12 @@ import {
   ScenarioJournal,
 } from '../journal/scenario-journal.js';
 import type { IntradayScanEvent, IntradayScanner } from '../scanner/intraday-scanner.js';
+import { buildCandidateCardSvg, renderCandidateCardPng } from './candidate-card.js';
 import type { TelegramClient, TelegramUpdate } from './client.js';
 
 type ScannerControl = Pick<IntradayScanner, 'isPaused' | 'pause' | 'resume'>;
-
 type TelegramBotLog = (message: string) => void;
+type CardRenderer = (svg: string) => Promise<Uint8Array>;
 
 function normalizeCommand(text: string): string {
   const firstWord = text.trim().split(/\s+/, 1)[0]?.toLowerCase() ?? '';
@@ -24,16 +25,59 @@ function formatDate(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
 }
 
-function formatScenario(record: JournalScenarioRecord, config: AppConfig): string {
-  const instrument =
+function instrumentLabel(record: JournalScenarioRecord, config: AppConfig): string {
+  return (
     config.scanner.intradayWatchlist.find((item) => item.instrumentId === record.instrumentId)?.label ??
-    record.instrumentId;
+    record.instrumentId
+  );
+}
 
+function formatCandidateFallback(record: JournalScenarioRecord, config: AppConfig): string {
   return [
-    `#${record.id} · ${instrument}`,
+    `Кандидат #${record.id} · ${instrumentLabel(record, config)}`,
     `Вход: ${formatNumber(record.input.entryPrice)} ₽ · стоп: ${formatNumber(record.input.stopPrice)} ₽ · цель: ${formatNumber(record.input.targetPrice)} ₽`,
-    `Лот: ${record.input.lotSize} · время: ${formatDate(record.observedAt)}`,
+    `Время: ${formatDate(record.observedAt)}`,
+    'Карточка не сформировалась; заявка не создана.',
   ].join('\n');
+}
+
+function previewScenario(config: AppConfig): JournalScenarioRecord {
+  const watchlistItem = config.scanner.intradayWatchlist[0];
+  const instrumentId = watchlistItem?.instrumentId ?? 'preview';
+  const lotSize = watchlistItem?.lotSize ?? 1;
+
+  return {
+    id: 0,
+    recordedAt: new Date().toISOString(),
+    observedAt: new Date().toISOString(),
+    strategy: 'intraday',
+    instrumentId,
+    input: {
+      side: 'long',
+      entryPrice: 100,
+      stopPrice: 99,
+      targetPrice: 102.5,
+      lotSize,
+      slippageRate: config.scanner.slippageRate,
+    },
+    decision: 'candidate',
+    blockers: [],
+    warnings: [],
+    snapshot: {
+      tradePlan: {
+        lots: 5,
+        units: 5 * lotSize,
+        positionRub: 500,
+        totalRiskRub: 7,
+        estimatedCommissionRub: 0.5,
+        estimatedSlippageRub: 0.5,
+        netRewardRub: 11.5,
+        rewardToRisk: 1.64,
+      },
+      market: { bestBid: 99.99, bestAsk: 100, spreadPct: 0.01 },
+      candleAnalysis: { trend: 'up', relativeVolume: 1.2, averageTrueRange14: 0.3 },
+    },
+  };
 }
 
 function helpText(): string {
@@ -41,8 +85,9 @@ function helpText(): string {
     'Команды:',
     '/status — состояние сканера',
     '/candidates — последние кандидаты',
+    '/preview — тестовая карточка без запроса рынка',
     '/pause — поставить сканер на паузу',
-    '/resume — продолжить сканирование',
+    '/resume — продолжить проходы',
     '',
     'Бот не открывает paper-сделки и не выставляет брокерские заявки.',
   ].join('\n');
@@ -58,6 +103,7 @@ export class TelegramTradingBot {
     private readonly scanner: ScannerControl,
     private readonly journal: ScenarioJournal,
     private readonly log: TelegramBotLog = (message) => process.stdout.write(`${message}\n`),
+    private readonly renderCard: CardRenderer = renderCandidateCardPng,
   ) {}
 
   async start(): Promise<never> {
@@ -98,14 +144,8 @@ export class TelegramTradingBot {
       return;
     }
 
-    const text = ['Новый кандидат для проверки', formatScenario(scenario, this.config)].join('\n\n');
     for (const chatId of this.config.telegram.allowedChatIds) {
-      try {
-        await this.client.sendMessage(chatId, text);
-      } catch (error: unknown) {
-        const detail = error instanceof Error ? error.message : 'Unknown Telegram send error';
-        this.log(`Candidate notification to an authorized chat failed: ${detail}`);
-      }
+      await this.sendCandidateCard(chatId, scenario, 'Новый кандидат для проверки');
     }
   }
 
@@ -133,8 +173,61 @@ export class TelegramTradingBot {
       return;
     }
 
+    if (command === '/candidates') {
+      await this.sendRecentCandidates(normalizedChatId);
+      return;
+    }
+    if (command === '/preview') {
+      await this.sendCandidateCard(
+        normalizedChatId,
+        previewScenario(this.config),
+        'Тестовая карточка — это не данные рынка',
+      );
+      return;
+    }
+
     const reply = this.commandReply(command);
     await this.client.sendMessage(normalizedChatId, reply);
+  }
+
+  private async sendCandidateCard(
+    chatId: string,
+    scenario: JournalScenarioRecord,
+    captionPrefix: string,
+  ): Promise<void> {
+    const caption = `${captionPrefix}: #${scenario.id} · ${instrumentLabel(scenario, this.config)}. Ручная проверка обязательна; заявка не создана.`;
+
+    try {
+      const png = await this.renderCard(buildCandidateCardSvg(scenario, this.config));
+      await this.client.sendPhoto({ chatId, png, caption });
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : 'Unknown candidate card error';
+      this.log(`Candidate card delivery failed: ${detail}`);
+
+      try {
+        await this.client.sendMessage(chatId, formatCandidateFallback(scenario, this.config));
+      } catch (fallbackError: unknown) {
+        const fallbackDetail =
+          fallbackError instanceof Error ? fallbackError.message : 'Unknown Telegram send error';
+        this.log(`Candidate fallback delivery failed: ${fallbackDetail}`);
+      }
+    }
+  }
+
+  private async sendRecentCandidates(chatId: string): Promise<void> {
+    const candidates = this.journal
+      .list(30, 'intraday')
+      .filter((record) => record.decision === 'candidate')
+      .slice(0, 5);
+
+    if (candidates.length === 0) {
+      await this.client.sendMessage(chatId, 'В журнале пока нет intraday-кандидатов.');
+      return;
+    }
+
+    for (const candidate of candidates) {
+      await this.sendCandidateCard(chatId, candidate, 'Кандидат из журнала');
+    }
   }
 
   private commandReply(command: string): string {
@@ -144,8 +237,6 @@ export class TelegramTradingBot {
         return helpText();
       case '/status':
         return this.statusText();
-      case '/candidates':
-        return this.candidatesText();
       case '/pause':
         this.scanner.pause();
         return 'Сканер поставлен на паузу. Новые проходы не будут запрашивать данные рынка.';
@@ -169,20 +260,5 @@ export class TelegramTradingBot {
       `Cooldown кандидатов: ${this.config.scanner.candidateCooldownMinutes} мин.`,
       'Брокерские и paper-заявки бот не создаёт.',
     ].join('\n');
-  }
-
-  private candidatesText(): string {
-    const candidates = this.journal
-      .list(30, 'intraday')
-      .filter((record) => record.decision === 'candidate')
-      .slice(0, 5);
-
-    if (candidates.length === 0) {
-      return 'В журнале пока нет intraday-кандидатов.';
-    }
-
-    return ['Последние кандидаты:', ...candidates.map((record) => formatScenario(record, this.config))].join(
-      '\n\n',
-    );
   }
 }
