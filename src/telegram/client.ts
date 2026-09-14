@@ -20,10 +20,6 @@ type TelegramApiResponse<T> = {
 
 type FetchLike = typeof fetch;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
-}
-
 export class TelegramBotClient implements TelegramClient {
   constructor(
     private readonly token: string,
@@ -60,10 +56,11 @@ export class TelegramBotClient implements TelegramClient {
       throw new Error('Telegram photo caption exceeds the 1024 character limit');
     }
 
+    const pngBytes = Uint8Array.from(input.png);
     const body = new FormData();
     body.set('chat_id', input.chatId);
     body.set('caption', input.caption);
-    body.set('photo', new Blob([input.png], { type: 'image/png' }), 'intraday-candidate.png');
+    body.set('photo', new Blob([pngBytes.buffer], { type: 'image/png' }), 'intraday-candidate.png');
     await this.requestForm('sendPhoto', body, 30_000);
   }
 
