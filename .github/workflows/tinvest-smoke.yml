@@ -38,4 +38,4 @@ jobs:
         run: npm run build
 
       - name: Verify T-Invest authentication
-        run: npm run smoke:tinvest
+        run: npm run smoke:tinvest:ci

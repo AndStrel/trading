@@ -15,50 +15,62 @@
 - запрет рекомендации при `reward/risk < 2`;
 - тесты, сборка и GitHub Actions.
 
-## Запуск
+## Локальный запуск
 
-Требуется Node.js 22+.
+Требуется Node.js 22+. Токен хранится только в локальном файле `.env`; он уже исключён из Git.
 
 ```bash
-npm install
+git clone https://github.com/AndStrel/trading.git
+cd trading
+node --version
+npm ci
 cp .env.example .env
-npm run check
-npm run build
+chmod 600 .env
 ```
 
-Заполните `T_INVEST_TOKEN` токеном **только для чтения**. Затем временно запустите `npm run dev`, вызовите MCP-инструмент `list_accounts` и внесите идентификаторы двух счетов в локальный `.env`.
+Заполните в `.env` только `T_INVEST_TOKEN` токеном **только для чтения**. Не передавайте его в чат, issue, commit или скриншот. Затем выполните:
 
-Для MCP-клиента:
+```bash
+npm run check
+npm run build
+npm run smoke:tinvest
+chmod 700 scripts/start-local.sh
+```
+
+Успешная проверка выведет только `T-Invest read-only authentication smoke test passed`; данные счёта и токен в вывод не попадают.
+
+Подключите MCP-клиент к локальному launcher — он сам найдёт `.env` рядом с проектом, поэтому токена в конфиге нет:
 
 ```json
 {
   "mcpServers": {
     "trading": {
-      "command": "node",
-      "args": ["/absolute/path/to/trading/dist/index.js"],
-      "env": {
-        "T_INVEST_TOKEN": "read-only-token",
-        "T_INVEST_INTRADAY_ACCOUNT_ID": "account-id",
-        "T_INVEST_SWING_ACCOUNT_ID": "account-id"
-      }
+      "command": "/absolute/path/to/trading/scripts/start-local.sh"
     }
   }
 }
 ```
 
-Не вставляйте токен в чат, issue, commit или скриншот. Для локальной проверки используйте MCP Inspector:
+После первого подключения вызовите `list_accounts`, добавьте идентификаторы счетов в локальный `.env` и перезапустите MCP:
 
-```bash
-npx @modelcontextprotocol/inspector node dist/index.js
+```dotenv
+T_INVEST_INTRADAY_ACCOUNT_ID=account-id
+T_INVEST_SWING_ACCOUNT_ID=account-id
 ```
 
-## Секреты GitHub
+Для локальной отладки можно также запустить `npm run dev` или MCP Inspector:
 
-GitHub Actions secret применяется только для ручной проверки связи с T-Invest API. Создайте Environment `tinvest-readonly`, добавьте в него secret `T_INVEST_READONLY_TOKEN` и включите обязательное подтверждение запуска.
+```bash
+npx @modelcontextprotocol/inspector scripts/start-local.sh
+```
 
-Workflow `T-Invest read-only smoke` запускается вручную и вызывает только `GetAccounts`. Он всегда собирает код из доверенной ветки `main`, ничего не печатает из ответа API и не имеет разрешения на изменение репозитория.
+## Рабочий компьютер
 
-Этот secret недоступен MCP-серверу, запущенному на вашем компьютере. Для локальной работы нужен отдельный read-only токен в локальном `.env` или системном хранилище секретов.
+На корпоративном или управляемом устройстве локальный токен потенциально доступен администраторам и защитному ПО. Для этого компьютера используйте только отдельный токен T-Invest без торговых полномочий, храните `.env` с правами `600` и отзывайте токен при смене устройства или подозрении на утечку.
+
+## GitHub Actions
+
+GitHub-hosted runner при проверке T-Invest вернул `SELF_SIGNED_CERT_IN_CHAIN`, поэтому он не подходит для этого токена. Рабочий MCP запускается локально, а не в Actions. Если `T_INVEST_READONLY_TOKEN` уже добавлен в GitHub Environment, удалите его после успешного локального smoke-теста и не запускайте workflow до отдельной настройки доверенной self-hosted среды.
 
 ## Инструменты MCP
 
