@@ -18,6 +18,7 @@ export type AppConfig = {
   baseUrl: string;
   transport: TInvestTransport;
   commissionRate: number;
+  journalPath: string;
   strategies: Record<Strategy, StrategyLimits>;
 };
 
@@ -31,6 +32,7 @@ const envSchema = z.object({
   T_INVEST_BASE_URL: z.string().url().default('https://invest-public-api.tbank.ru/rest'),
   T_INVEST_TRANSPORT: z.enum(['fetch', 'system-curl']).default('fetch'),
   T_INVEST_COMMISSION_RATE: z.coerce.number().min(0).max(0.1).default(0.0005),
+  T_INVEST_JOURNAL_PATH: z.string().trim().min(1).default('.trading/journal.sqlite'),
   T_INVEST_INTRADAY_ACCOUNT_ID: optionalNonEmpty,
   T_INVEST_SWING_ACCOUNT_ID: optionalNonEmpty,
   INTRADAY_MAX_RISK_RUB: z.coerce.number().positive().default(500),
@@ -52,6 +54,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     baseUrl: parsed.T_INVEST_BASE_URL.replace(/\/$/, ''),
     transport: parsed.T_INVEST_TRANSPORT,
     commissionRate: parsed.T_INVEST_COMMISSION_RATE,
+    journalPath: parsed.T_INVEST_JOURNAL_PATH,
     strategies: {
       intraday: {
         ...(parsed.T_INVEST_INTRADAY_ACCOUNT_ID
