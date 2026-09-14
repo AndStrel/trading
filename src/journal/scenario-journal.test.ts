@@ -157,6 +157,18 @@ describe('ScenarioJournal', () => {
     ).toEqual([]);
   });
 
+  it('persists scanner pause and Telegram update state', () => {
+    const { journal } = createJournal();
+
+    expect(journal.isScannerPaused('intraday')).toBe(false);
+    journal.setScannerPaused('intraday', true);
+    journal.setTelegramUpdateOffset(42);
+
+    expect(journal.isScannerPaused('intraday')).toBe(true);
+    expect(journal.getTelegramUpdateOffset()).toBe(42);
+    expect(() => journal.setTelegramUpdateOffset(-1)).toThrow('Telegram update offset');
+  });
+
   it('restricts the database and its directory to the current user', () => {
     const { journal, path } = createJournal();
 
