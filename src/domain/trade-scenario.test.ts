@@ -95,6 +95,7 @@ describe('assessTradeScenario', () => {
       tradingStatus: 'SECURITY_TRADING_STATUS_NORMAL_TRADING',
       apiTradeAvailable: false,
       limitOrderAvailable: false,
+      marketOrderAvailable: false,
     };
 
     const assessment = assessTradeScenario(input);
