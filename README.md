@@ -52,6 +52,14 @@ npm run build
 npx @modelcontextprotocol/inspector node dist/index.js
 ```
 
+## Секреты GitHub
+
+GitHub Actions secret применяется только для ручной проверки связи с T-Invest API. Создайте Environment `tinvest-readonly`, добавьте в него secret `T_INVEST_READONLY_TOKEN` и включите обязательное подтверждение запуска.
+
+Workflow `T-Invest read-only smoke` запускается вручную и вызывает только `GetAccounts`. Он всегда собирает код из доверенной ветки `main`, ничего не печатает из ответа API и не имеет разрешения на изменение репозитория.
+
+Этот secret недоступен MCP-серверу, запущенному на вашем компьютере. Для локальной работы нужен отдельный read-only токен в локальном `.env` или системном хранилище секретов.
+
 ## Инструменты MCP
 
 | Инструмент | Назначение |
