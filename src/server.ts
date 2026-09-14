@@ -5,6 +5,7 @@ import type { AppConfig, Strategy } from './config.js';
 import { getAccountId } from './config.js';
 import { analyzeCandles } from './domain/candle-analysis.js';
 import { assessTradeScenario } from './domain/trade-scenario.js';
+import { summarizePaperTrades } from './domain/paper-report.js';
 import { calculatePaperEntry, calculatePaperExit } from './domain/paper-trade.js';
 import { calculateTradePlan } from './domain/trade-plan.js';
 import { quotationToNumber } from './domain/money.js';
@@ -23,6 +24,7 @@ const instrumentIdSchema = z.string().trim().min(1).max(256);
 const instrumentQuerySchema = z.string().trim().min(1).max(128);
 const orderBookDepthSchema = z.number().int().min(1).max(50).default(20);
 const paperTradeStatusSchema = z.enum(['open', 'closed']);
+const reportPeriodSchema = z.enum(['day', 'week']);
 const scenarioInputSchema = z.object({
   strategy: strategySchema,
   instrumentId: instrumentIdSchema,
@@ -63,6 +65,14 @@ function getExchangeLastPrice(payload: unknown): number {
     throw new Error('T-Invest returned an invalid exchange last price');
   }
   return price;
+}
+
+function getReportWindow(period: 'day' | 'week', endAt?: string) {
+  const to = endAt ? new Date(endAt) : new Date();
+  if (Number.isNaN(to.getTime())) throw new Error('Invalid report end time');
+  const durationMs = period === 'day' ? 24 * 60 * 60 * 1_000 : 7 * 24 * 60 * 60 * 1_000;
+  const from = new Date(to.getTime() - durationMs);
+  return { from: from.toISOString(), to: to.toISOString() };
 }
 
 function getPaperPosition(snapshot: unknown): { lots: number; units: number } {
@@ -504,6 +514,53 @@ export function createServer(
       annotations: { readOnlyHint: true, idempotentHint: true },
     },
     async ({ status, limit }) => result(journal.listPaperTrades(limit, status)),
+  );
+
+  server.registerTool(
+    'get_paper_report',
+    {
+      description:
+        'Summarize closed local paper trades for a rolling day or week. It reports simulated gross/net PnL, commission, slippage, win rate and sample-size warnings without contacting T-Invest.',
+      inputSchema: z.object({
+        period: reportPeriodSchema,
+        endAt: z.iso.datetime({ offset: true }).optional(),
+        strategy: strategySchema.optional(),
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ period, endAt, strategy }) => {
+      const window = getReportWindow(period, endAt);
+      const trades = journal.listClosedPaperTrades(window.from, window.to, strategy as Strategy | undefined);
+      const report = summarizePaperTrades(
+        trades.map((trade) => {
+          if (
+            trade.status !== 'closed' ||
+            trade.grossPnlRub === undefined ||
+            trade.totalCommissionRub === undefined ||
+            trade.totalSlippageRub === undefined ||
+            trade.netPnlRub === undefined
+          ) {
+            throw new Error('Paper trade journal contains an incomplete closed trade');
+          }
+          return {
+            status: 'closed' as const,
+            grossPnlRub: trade.grossPnlRub,
+            totalCommissionRub: trade.totalCommissionRub,
+            totalSlippageRub: trade.totalSlippageRub,
+            netPnlRub: trade.netPnlRub,
+          };
+        }),
+      );
+
+      return result({
+        mode: 'paper-trading',
+        accounting: 'simulated',
+        period,
+        window,
+        ...(strategy ? { strategy } : {}),
+        report,
+      });
+    },
   );
 
   server.registerTool(
