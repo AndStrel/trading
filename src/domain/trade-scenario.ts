@@ -128,9 +128,15 @@ export function assessTradeScenario(input: TradeScenarioInput): TradeScenarioAss
     lastPrice !== null && lastPrice > 0 ? (Math.abs(input.entryPrice - lastPrice) / lastPrice) * 100 : null;
 
   const orderBookConsistent = asBoolean(orderBook?.isConsistent);
-  const apiTradeAvailable = asBoolean(tradingStatus?.apiTradeAvailable);
-  const limitOrderAvailable = asBoolean(tradingStatus?.limitOrderAvailable);
-  const marketOrderAvailable = asBoolean(tradingStatus?.marketOrderAvailable);
+  const apiTradeAvailable = asBoolean(
+    tradingStatus?.apiTradeAvailableFlag ?? tradingStatus?.apiTradeAvailable,
+  );
+  const limitOrderAvailable = asBoolean(
+    tradingStatus?.limitOrderAvailableFlag ?? tradingStatus?.limitOrderAvailable,
+  );
+  const marketOrderAvailable = asBoolean(
+    tradingStatus?.marketOrderAvailableFlag ?? tradingStatus?.marketOrderAvailable,
+  );
   const tradingStatusValue = asString(tradingStatus?.tradingStatus);
 
   const blockers: string[] = [];

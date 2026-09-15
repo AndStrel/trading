@@ -1,4 +1,5 @@
 import type { AppConfig } from '../config.js';
+import type { ExecutionService } from '../execution/execution-service.js';
 import {
   type JournalScenarioRecord,
   ScenarioJournal,
@@ -8,6 +9,19 @@ import { buildCandidateCardSvg, renderCandidateCardPng } from './candidate-card.
 import type { TelegramClient, TelegramUpdate } from './client.js';
 
 type ScannerControl = Pick<IntradayScanner, 'isPaused' | 'pause' | 'resume'>;
+type ExecutionControl = Pick<
+  ExecutionService,
+  | 'mode'
+  | 'isConfigured'
+  | 'isReady'
+  | 'isKilled'
+  | 'armSandbox'
+  | 'kill'
+  | 'queueScenario'
+  | 'rejectScenario'
+  | 'listRecent'
+  | 'submitScenario'
+>;
 type TelegramBotLog = (message: string) => void;
 type CardRenderer = (svg: string) => Promise<Uint8Array>;
 
@@ -32,12 +46,16 @@ function instrumentLabel(record: JournalScenarioRecord, config: AppConfig): stri
   );
 }
 
-function formatCandidateFallback(record: JournalScenarioRecord, config: AppConfig): string {
+function formatCandidateFallback(
+  record: JournalScenarioRecord,
+  config: AppConfig,
+  executionHint = '',
+): string {
   return [
     `Кандидат #${record.id} · ${instrumentLabel(record, config)}`,
     `Вход: ${formatNumber(record.input.entryPrice)} ₽ · стоп: ${formatNumber(record.input.stopPrice)} ₽ · цель: ${formatNumber(record.input.targetPrice)} ₽`,
     `Время: ${formatDate(record.observedAt)}`,
-    'Карточка не сформировалась; заявка не создана.',
+    `Карточка не сформировалась; брокерская заявка не отправлена.${executionHint}`,
   ].join('\n');
 }
 
@@ -88,8 +106,14 @@ function helpText(): string {
     '/preview — тестовая карточка без запроса рынка',
     '/pause — поставить сканер на паузу',
     '/resume — продолжить проходы',
+    '/execution — состояние исполнения',
+    '/orders — последние подготовленные поручения',
+    '/execution_arm SANDBOX — разрешить подтверждённые заявки в песочнице',
+    '/approve ID CONFIRM — подтвердить одну sandbox-заявку',
+    '/reject ID — отклонить подготовленную заявку',
+    '/kill — немедленно запретить новые отправки заявок',
     '',
-    'Бот не открывает paper-сделки и не выставляет брокерские заявки.',
+    'Реальный счёт недоступен: реализовано только подтверждаемое исполнение в песочнице.',
   ].join('\n');
 }
 
@@ -104,6 +128,7 @@ export class TelegramTradingBot {
     private readonly journal: ScenarioJournal,
     private readonly log: TelegramBotLog = (message) => process.stdout.write(`${message}\n`),
     private readonly renderCard: CardRenderer = renderCandidateCardPng,
+    private readonly execution?: ExecutionControl,
   ) {}
 
   async start(): Promise<never> {
@@ -144,8 +169,29 @@ export class TelegramTradingBot {
       return;
     }
 
+    let executionHint = '';
+    let executionScenarioId: number | undefined;
+    if (this.execution?.mode() === 'sandbox') {
+      try {
+        const order = this.execution.queueScenario(scenario);
+        if (order) {
+          executionHint = `\nПесочница: /approve ${scenario.id} CONFIRM или /reject ${scenario.id}`;
+          executionScenarioId = scenario.id;
+        }
+      } catch (error: unknown) {
+        const detail = error instanceof Error ? error.message : 'Unknown execution queue error';
+        this.log(`Execution queue failed for scenario ${scenario.id}: ${detail}`);
+      }
+    }
+
     for (const chatId of this.config.telegram.allowedChatIds) {
-      await this.sendCandidateCard(chatId, scenario, 'Новый кандидат для проверки');
+      await this.sendCandidateCard(
+        chatId,
+        scenario,
+        'Новый кандидат для проверки',
+        executionHint,
+        executionScenarioId,
+      );
     }
   }
 
@@ -156,6 +202,11 @@ export class TelegramTradingBot {
   }
 
   private async handleUpdate(update: TelegramUpdate): Promise<void> {
+    if (update.callback_query) {
+      await this.handleCallbackQuery(update);
+      return;
+    }
+
     const chatId = update.message?.chat?.id;
     const text = update.message?.text;
     if (!Number.isSafeInteger(chatId) || typeof text !== 'string') return;
@@ -185,6 +236,32 @@ export class TelegramTradingBot {
       );
       return;
     }
+    if (command === '/approve') {
+      await this.approveExecution(normalizedChatId, text);
+      return;
+    }
+    if (command === '/reject') {
+      await this.rejectExecution(normalizedChatId, text);
+      return;
+    }
+    if (command === '/orders') {
+      await this.client.sendMessage(normalizedChatId, this.ordersText());
+      return;
+    }
+    if (command === '/execution_arm') {
+      await this.armExecution(normalizedChatId, text);
+      return;
+    }
+    if (command === '/kill') {
+      this.execution?.kill();
+      await this.client.sendMessage(
+        normalizedChatId,
+        this.execution
+          ? 'Kill switch включён. Новые заявки не будут отправляться.'
+          : 'Модуль исполнения не подключён.',
+      );
+      return;
+    }
 
     const reply = this.commandReply(command);
     await this.client.sendMessage(normalizedChatId, reply);
@@ -194,18 +271,47 @@ export class TelegramTradingBot {
     chatId: string,
     scenario: JournalScenarioRecord,
     captionPrefix: string,
+    executionHint = '',
+    executionScenarioId?: number,
   ): Promise<void> {
-    const caption = `${captionPrefix}: #${scenario.id} · ${instrumentLabel(scenario, this.config)}. Ручная проверка обязательна; заявка не создана.`;
+    const caption = `${captionPrefix}: #${scenario.id} · ${instrumentLabel(scenario, this.config)}. Ручная проверка обязательна; брокерская заявка не отправлена.${executionHint}`;
 
     try {
       const png = await this.renderCard(buildCandidateCardSvg(scenario, this.config));
-      await this.client.sendPhoto({ chatId, png, caption });
+      await this.client.sendPhoto({
+        chatId,
+        png,
+        caption,
+        ...(executionScenarioId
+          ? {
+              replyMarkup: {
+                inline_keyboard: [
+                  [
+                    {
+                      text: `✅ Подтвердить sandbox #${executionScenarioId}`,
+                      callback_data: `exec:approve:${executionScenarioId}:confirm`,
+                    },
+                  ],
+                  [
+                    {
+                      text: `❌ Отклонить #${executionScenarioId}`,
+                      callback_data: `exec:reject:${executionScenarioId}`,
+                    },
+                  ],
+                ],
+              },
+            }
+          : {}),
+      });
     } catch (error: unknown) {
       const detail = error instanceof Error ? error.message : 'Unknown candidate card error';
       this.log(`Candidate card delivery failed: ${detail}`);
 
       try {
-        await this.client.sendMessage(chatId, formatCandidateFallback(scenario, this.config));
+        await this.client.sendMessage(
+          chatId,
+          formatCandidateFallback(scenario, this.config, executionHint),
+        );
       } catch (fallbackError: unknown) {
         const fallbackDetail =
           fallbackError instanceof Error ? fallbackError.message : 'Unknown Telegram send error';
@@ -237,6 +343,8 @@ export class TelegramTradingBot {
         return helpText();
       case '/status':
         return this.statusText();
+      case '/execution':
+        return this.executionText();
       case '/pause':
         this.scanner.pause();
         return 'Сканер поставлен на паузу. Новые проходы не будут запрашивать данные рынка.';
@@ -258,7 +366,143 @@ export class TelegramTradingBot {
       `Интервал: ${this.config.scanner.intervalSeconds / 60} мин.`,
       `Watchlist: ${watchlist || 'не задан'}`,
       `Cooldown кандидатов: ${this.config.scanner.candidateCooldownMinutes} мин.`,
-      'Брокерские и paper-заявки бот не создаёт.',
+      this.executionText(),
     ].join('\n');
+  }
+
+  private executionText(): string {
+    if (!this.execution) return 'Исполнение: модуль не подключён';
+    return [
+      `Исполнение: ${this.execution.mode()}`,
+      `Токен: ${this.execution.isConfigured() ? 'задан' : 'не задан'}`,
+      `Sandbox-счёт: ${this.execution.isReady() ? 'готов' : 'будет создан при включении'}`,
+      `Kill switch: ${this.execution.isKilled() ? 'включён' : 'выключен'}`,
+      'Live-режим отсутствует; доступна только песочница с подтверждением каждой заявки.',
+    ].join('\n');
+  }
+
+  private ordersText(): string {
+    if (!this.execution) return 'Модуль исполнения не подключён.';
+    const orders = this.execution.listRecent(5);
+    if (orders.length === 0) return 'Подготовленных поручений пока нет.';
+    return [
+      'Последние sandbox-поручения:',
+      ...orders.map(
+        (order) =>
+          `#${order.scenarioId}: ${order.status}, ${order.lots} лот. по ${formatNumber(order.limitPrice)} ₽, риск ${formatNumber(order.estimatedRiskRub)} ₽`,
+      ),
+    ].join('\n');
+  }
+
+  private async armExecution(chatId: string, text: string): Promise<void> {
+    if (!this.execution) {
+      await this.client.sendMessage(chatId, 'Модуль исполнения не подключён.');
+      return;
+    }
+    const confirmation = text.trim().split(/\s+/)[1];
+    if (confirmation !== 'SANDBOX') {
+      await this.client.sendMessage(chatId, 'Для включения отправьте точно: /execution_arm SANDBOX');
+      return;
+    }
+    try {
+      await this.execution.armSandbox();
+      await this.client.sendMessage(
+        chatId,
+        'Sandbox-исполнение разрешено. Каждая заявка всё равно требует /approve ID CONFIRM.',
+      );
+    } catch (error: unknown) {
+      await this.client.sendMessage(chatId, `Не включено: ${this.errorMessage(error)}`);
+    }
+  }
+
+  private async approveExecution(chatId: string, text: string): Promise<void> {
+    if (!this.execution) {
+      await this.client.sendMessage(chatId, 'Модуль исполнения не подключён.');
+      return;
+    }
+    const [, rawId, confirmation] = text.trim().split(/\s+/);
+    const scenarioId = Number(rawId);
+    if (!Number.isSafeInteger(scenarioId) || scenarioId <= 0 || confirmation !== 'CONFIRM') {
+      await this.client.sendMessage(chatId, 'Формат подтверждения: /approve ID CONFIRM');
+      return;
+    }
+    await this.submitExecution(chatId, scenarioId);
+  }
+
+  private async submitExecution(chatId: string, scenarioId: number): Promise<void> {
+    if (!this.execution) {
+      await this.client.sendMessage(chatId, 'Модуль исполнения не подключён.');
+      return;
+    }
+    try {
+      const result = await this.execution.submitScenario(scenarioId, chatId);
+      await this.client.sendMessage(
+        chatId,
+        `Sandbox-заявка #${scenarioId}: ${result.executionStatus}; исполнено ${result.lotsExecuted}/${result.order.lots} лот.`,
+      );
+    } catch (error: unknown) {
+      await this.client.sendMessage(chatId, `Заявка #${scenarioId} не отправлена: ${this.errorMessage(error)}`);
+    }
+  }
+
+  private async rejectExecution(chatId: string, text: string): Promise<void> {
+    if (!this.execution) {
+      await this.client.sendMessage(chatId, 'Модуль исполнения не подключён.');
+      return;
+    }
+    const rawId = text.trim().split(/\s+/)[1];
+    const scenarioId = Number(rawId);
+    if (!Number.isSafeInteger(scenarioId) || scenarioId <= 0) {
+      await this.client.sendMessage(chatId, 'Формат отказа: /reject ID');
+      return;
+    }
+    await this.rejectExecutionById(chatId, scenarioId);
+  }
+
+  private async rejectExecutionById(chatId: string, scenarioId: number): Promise<void> {
+    if (!this.execution) {
+      await this.client.sendMessage(chatId, 'Модуль исполнения не подключён.');
+      return;
+    }
+    try {
+      this.execution.rejectScenario(scenarioId, chatId);
+      await this.client.sendMessage(chatId, `Sandbox-заявка #${scenarioId} отклонена.`);
+    } catch (error: unknown) {
+      await this.client.sendMessage(chatId, `Не отклонено: ${this.errorMessage(error)}`);
+    }
+  }
+
+  private async handleCallbackQuery(update: TelegramUpdate): Promise<void> {
+    const callback = update.callback_query;
+    const callbackId = callback?.id;
+    const chatId = callback?.message?.chat?.id;
+    const data = callback?.data;
+    if (!callbackId || !Number.isSafeInteger(chatId) || typeof data !== 'string') return;
+
+    const normalizedChatId = String(chatId);
+    if (!this.config.telegram.allowedChatIds.includes(normalizedChatId)) {
+      await this.client.answerCallbackQuery?.(callbackId, 'Нет доступа');
+      this.log(`Ignored Telegram callback from an unauthorized chat: ${normalizedChatId}`);
+      return;
+    }
+
+    const approveMatch = /^exec:approve:(\d+):confirm$/.exec(data);
+    const rejectMatch = /^exec:reject:(\d+)$/.exec(data);
+    const scenarioId = Number(approveMatch?.[1] ?? rejectMatch?.[1]);
+    if (!Number.isSafeInteger(scenarioId) || scenarioId <= 0) {
+      await this.client.answerCallbackQuery?.(callbackId, 'Некорректная команда');
+      return;
+    }
+
+    await this.client.answerCallbackQuery?.(
+      callbackId,
+      approveMatch ? 'Проверяю и отправляю…' : 'Отклоняю…',
+    );
+    if (approveMatch) await this.submitExecution(normalizedChatId, scenarioId);
+    else await this.rejectExecutionById(normalizedChatId, scenarioId);
+  }
+
+  private errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : 'неизвестная ошибка';
   }
 }

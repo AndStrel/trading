@@ -3,6 +3,7 @@ import { z } from 'zod/v4';
 import type { TInvestTransport } from './tbank/client.js';
 
 export type Strategy = 'intraday' | 'swing';
+export type ExecutionMode = 'disabled' | 'sandbox';
 
 export type IntradayWatchlistItem = {
   instrumentId: string;
@@ -25,6 +26,16 @@ export type TelegramConfig = {
   pollingTimeoutSeconds: number;
 };
 
+export type ExecutionConfig = {
+  mode: ExecutionMode;
+  token?: string;
+  accountId?: string;
+  maxOrdersPerDay: number;
+  maxDailyRiskRub: number;
+  candidateMaxAgeMinutes: number;
+  sandboxInitialBalanceRub: number;
+};
+
 export type StrategyLimits = {
   accountId?: string;
   maxRiskRub: number;
@@ -42,6 +53,7 @@ export type AppConfig = {
   journalPath: string;
   scanner: ScannerConfig;
   telegram: TelegramConfig;
+  execution: ExecutionConfig;
   strategies: Record<Strategy, StrategyLimits>;
 };
 
@@ -94,6 +106,13 @@ const envSchema = z.object({
   TELEGRAM_BOT_TOKEN: optionalNonEmpty,
   TELEGRAM_ALLOWED_CHAT_IDS: z.string().default(''),
   TELEGRAM_POLLING_TIMEOUT_SECONDS: z.coerce.number().int().min(10).max(50).default(25),
+  T_INVEST_EXECUTION_MODE: z.enum(['disabled', 'sandbox']).default('disabled'),
+  T_INVEST_TRADING_TOKEN: optionalNonEmpty,
+  T_INVEST_SANDBOX_ACCOUNT_ID: optionalNonEmpty,
+  T_INVEST_EXECUTION_MAX_ORDERS_PER_DAY: z.coerce.number().int().min(1).max(20).default(3),
+  T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB: z.coerce.number().positive().max(10_000).default(1_000),
+  T_INVEST_EXECUTION_CANDIDATE_MAX_AGE_MINUTES: z.coerce.number().int().min(1).max(60).default(10),
+  T_INVEST_SANDBOX_INITIAL_BALANCE_RUB: z.coerce.number().positive().max(1_000_000).default(100_000),
   T_INVEST_INTRADAY_ACCOUNT_ID: optionalNonEmpty,
   T_INVEST_SWING_ACCOUNT_ID: optionalNonEmpty,
   INTRADAY_MAX_RISK_RUB: z.coerce.number().positive().default(500),
@@ -127,6 +146,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       ...(parsed.TELEGRAM_BOT_TOKEN ? { token: parsed.TELEGRAM_BOT_TOKEN } : {}),
       allowedChatIds: parseTelegramAllowedChatIds(parsed.TELEGRAM_ALLOWED_CHAT_IDS),
       pollingTimeoutSeconds: parsed.TELEGRAM_POLLING_TIMEOUT_SECONDS,
+    },
+    execution: {
+      mode: parsed.T_INVEST_EXECUTION_MODE,
+      ...(parsed.T_INVEST_TRADING_TOKEN ? { token: parsed.T_INVEST_TRADING_TOKEN } : {}),
+      ...(parsed.T_INVEST_SANDBOX_ACCOUNT_ID
+        ? { accountId: parsed.T_INVEST_SANDBOX_ACCOUNT_ID }
+        : {}),
+      maxOrdersPerDay: parsed.T_INVEST_EXECUTION_MAX_ORDERS_PER_DAY,
+      maxDailyRiskRub: parsed.T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB,
+      candidateMaxAgeMinutes: parsed.T_INVEST_EXECUTION_CANDIDATE_MAX_AGE_MINUTES,
+      sandboxInitialBalanceRub: parsed.T_INVEST_SANDBOX_INITIAL_BALANCE_RUB,
     },
     strategies: {
       intraday: {
