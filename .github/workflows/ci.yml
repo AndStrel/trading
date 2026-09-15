@@ -22,3 +22,8 @@ jobs:
       - run: npm run check
       - run: npm run build
       - run: docker build --tag andstrel/trading:ci .
+      - name: Verify PNG rendering in the hardened runtime
+        run: |
+          docker run --rm --network none --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
+            andstrel/trading:ci npm run smoke:candidate-card

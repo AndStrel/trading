@@ -12,6 +12,7 @@
     "check": "npm run typecheck && npm test",
     "dev": "node --env-file=.env --import tsx src/index.ts",
     "start": "node --env-file=.env dist/index.js",
+    "smoke:candidate-card": "node dist/candidate-card-smoke.js",
     "smoke:tinvest": "node --env-file=.env dist/smoke.js",
     "smoke:tinvest:ci": "node dist/smoke.js",
     "scan:intraday": "node --env-file=.env dist/intraday-scanner.js",
