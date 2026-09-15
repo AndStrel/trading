@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import type { Strategy } from '../config.js';
+import type { ExecutionMode, Strategy } from '../config.js';
 
 export type JournalScenarioInput = {
   observedAt: string;
@@ -74,6 +74,36 @@ export type PaperTradeCloseInput = {
   closeNote?: string;
 };
 
+export type ExecutionOrderStatus =
+  | 'pending'
+  | 'rejected'
+  | 'submitting'
+  | 'accepted'
+  | 'failed';
+
+export type ExecutionOrderRecord = {
+  id: number;
+  scenarioId: number;
+  mode: ExecutionMode;
+  status: ExecutionOrderStatus;
+  instrumentId: string;
+  side: 'long' | 'short';
+  lots: number;
+  limitPrice: number;
+  estimatedRiskRub: number;
+  orderRequestId: string;
+  brokerOrderId?: string;
+  approvedByChatId?: string;
+  createdAt: string;
+  updatedAt: string;
+  detail?: string;
+};
+
+export type ExecutionOrderInput = Omit<
+  ExecutionOrderRecord,
+  'id' | 'status' | 'brokerOrderId' | 'approvedByChatId' | 'createdAt' | 'updatedAt' | 'detail'
+>;
+
 type JournalRow = {
   id: number | bigint;
   recorded_at: string;
@@ -119,6 +149,24 @@ type PaperTradeRow = {
   total_slippage_rub: number | null;
   net_pnl_rub: number | null;
   close_note: string | null;
+};
+
+type ExecutionOrderRow = {
+  id: number | bigint;
+  scenario_id: number | bigint;
+  mode: ExecutionMode;
+  status: ExecutionOrderStatus;
+  instrument_id: string;
+  side: 'long' | 'short';
+  lots: number;
+  limit_price: number;
+  estimated_risk_rub: number;
+  order_request_id: string;
+  broker_order_id: string | null;
+  approved_by_chat_id: string | null;
+  created_at: string;
+  updated_at: string;
+  detail: string | null;
 };
 
 const schema = `
@@ -180,6 +228,38 @@ const schema = `
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
   ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS execution_orders (
+    id INTEGER PRIMARY KEY,
+    scenario_id INTEGER NOT NULL UNIQUE REFERENCES scenario_journal(id),
+    mode TEXT NOT NULL CHECK(mode IN ('disabled', 'sandbox')),
+    status TEXT NOT NULL CHECK(status IN ('pending', 'rejected', 'submitting', 'accepted', 'failed')),
+    instrument_id TEXT NOT NULL,
+    side TEXT NOT NULL CHECK(side IN ('long', 'short')),
+    lots INTEGER NOT NULL CHECK(lots > 0),
+    limit_price REAL NOT NULL CHECK(limit_price > 0),
+    estimated_risk_rub REAL NOT NULL CHECK(estimated_risk_rub > 0),
+    order_request_id TEXT NOT NULL UNIQUE,
+    broker_order_id TEXT,
+    approved_by_chat_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    detail TEXT
+  ) STRICT;
+
+  CREATE INDEX IF NOT EXISTS execution_orders_updated_at
+    ON execution_orders(updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS execution_events (
+    id INTEGER PRIMARY KEY,
+    execution_order_id INTEGER NOT NULL REFERENCES execution_orders(id),
+    event_type TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    detail_json TEXT NOT NULL
+  ) STRICT;
+
+  CREATE INDEX IF NOT EXISTS execution_events_order_created
+    ON execution_events(execution_order_id, created_at ASC);
 `;
 
 function parseJson<T>(value: string, fallback: T): T {
@@ -529,6 +609,260 @@ export class ScenarioJournal {
     }
   }
 
+  queueExecution(input: ExecutionOrderInput): ExecutionOrderRecord {
+    const database = this.open();
+
+    try {
+      database.exec('BEGIN IMMEDIATE');
+      const existing = database
+        .prepare('SELECT * FROM execution_orders WHERE scenario_id = ?')
+        .get(input.scenarioId) as ExecutionOrderRow | undefined;
+      if (existing) {
+        database.exec('COMMIT');
+        return this.toExecutionOrder(existing);
+      }
+
+      const now = new Date().toISOString();
+      const insertion = database
+        .prepare(
+          `INSERT INTO execution_orders (
+            scenario_id, mode, status, instrument_id, side, lots, limit_price,
+            estimated_risk_rub, order_request_id, created_at, updated_at
+          ) VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.scenarioId,
+          input.mode,
+          input.instrumentId,
+          input.side,
+          input.lots,
+          input.limitPrice,
+          input.estimatedRiskRub,
+          input.orderRequestId,
+          now,
+          now,
+        );
+      const id = Number(insertion.lastInsertRowid);
+      this.appendExecutionEvent(database, id, 'queued', { mode: input.mode });
+      database.exec('COMMIT');
+
+      const row = database.prepare('SELECT * FROM execution_orders WHERE id = ?').get(id) as ExecutionOrderRow;
+      return this.toExecutionOrder(row);
+    } catch (error: unknown) {
+      try {
+        database.exec('ROLLBACK');
+      } catch {
+        // Transaction may already be committed.
+      }
+      throw error;
+    } finally {
+      database.close();
+    }
+  }
+
+  getExecutionByScenario(scenarioId: number): ExecutionOrderRecord | null {
+    const database = this.open();
+    try {
+      const row = database
+        .prepare('SELECT * FROM execution_orders WHERE scenario_id = ?')
+        .get(scenarioId) as ExecutionOrderRow | undefined;
+      return row ? this.toExecutionOrder(row) : null;
+    } finally {
+      database.close();
+    }
+  }
+
+  listExecutionOrders(limit: number): ExecutionOrderRecord[] {
+    const database = this.open();
+    try {
+      const rows = database
+        .prepare('SELECT * FROM execution_orders ORDER BY id DESC LIMIT ?')
+        .all(limit) as ExecutionOrderRow[];
+      return rows.map((row) => this.toExecutionOrder(row));
+    } finally {
+      database.close();
+    }
+  }
+
+  claimExecution(scenarioId: number, chatId: string): ExecutionOrderRecord {
+    const database = this.open();
+    try {
+      database.exec('BEGIN IMMEDIATE');
+      const row = database
+        .prepare('SELECT * FROM execution_orders WHERE scenario_id = ?')
+        .get(scenarioId) as ExecutionOrderRow | undefined;
+      if (!row) throw new Error('Execution order was not found');
+
+      if (row.status === 'pending') {
+        const now = new Date().toISOString();
+        database
+          .prepare(
+            `UPDATE execution_orders
+             SET status = 'submitting', approved_by_chat_id = ?, updated_at = ?
+             WHERE id = ? AND status = 'pending'`,
+          )
+          .run(chatId, now, row.id);
+        this.appendExecutionEvent(database, Number(row.id), 'approved', { chatId });
+      } else if (row.status !== 'submitting') {
+        throw new Error(`Execution order is already ${row.status}`);
+      }
+
+      database.exec('COMMIT');
+      const claimed = database.prepare('SELECT * FROM execution_orders WHERE id = ?').get(row.id) as ExecutionOrderRow;
+      return this.toExecutionOrder(claimed);
+    } catch (error: unknown) {
+      try {
+        database.exec('ROLLBACK');
+      } catch {
+        // Transaction may already be committed.
+      }
+      throw error;
+    } finally {
+      database.close();
+    }
+  }
+
+  rejectExecution(scenarioId: number, chatId: string): ExecutionOrderRecord {
+    const database = this.open();
+    try {
+      database.exec('BEGIN IMMEDIATE');
+      const row = database
+        .prepare('SELECT * FROM execution_orders WHERE scenario_id = ?')
+        .get(scenarioId) as ExecutionOrderRow | undefined;
+      if (!row) throw new Error('Execution order was not found');
+      if (row.status !== 'pending') throw new Error(`Execution order is already ${row.status}`);
+
+      const now = new Date().toISOString();
+      database
+        .prepare(
+          `UPDATE execution_orders
+           SET status = 'rejected', approved_by_chat_id = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(chatId, now, row.id);
+      this.appendExecutionEvent(database, Number(row.id), 'rejected', { chatId });
+      database.exec('COMMIT');
+
+      const rejected = database.prepare('SELECT * FROM execution_orders WHERE id = ?').get(row.id) as ExecutionOrderRow;
+      return this.toExecutionOrder(rejected);
+    } catch (error: unknown) {
+      try {
+        database.exec('ROLLBACK');
+      } catch {
+        // Transaction may already be committed.
+      }
+      throw error;
+    } finally {
+      database.close();
+    }
+  }
+
+  markExecutionAccepted(scenarioId: number, brokerOrderId: string, detail: string): ExecutionOrderRecord {
+    return this.finishExecution(scenarioId, 'accepted', brokerOrderId, detail, 'broker_accepted');
+  }
+
+  markExecutionFailed(scenarioId: number, detail: string): ExecutionOrderRecord {
+    return this.finishExecution(scenarioId, 'failed', null, detail, 'broker_rejected');
+  }
+
+  recordExecutionUncertain(scenarioId: number, detail: string): void {
+    const database = this.open();
+    try {
+      const row = database
+        .prepare('SELECT id FROM execution_orders WHERE scenario_id = ?')
+        .get(scenarioId) as { id: number | bigint } | undefined;
+      if (!row) throw new Error('Execution order was not found');
+      this.appendExecutionEvent(database, Number(row.id), 'submission_uncertain', {
+        detail: detail.slice(0, 500),
+      });
+    } finally {
+      database.close();
+    }
+  }
+
+  getExecutionDailyUsage(from: string, to: string): { orderCount: number; riskRub: number } {
+    const database = this.open();
+    try {
+      const row = database
+        .prepare(
+          `SELECT COUNT(*) AS order_count, COALESCE(SUM(estimated_risk_rub), 0) AS risk_rub
+           FROM execution_orders
+           WHERE updated_at >= ? AND updated_at < ?
+             AND status IN ('submitting', 'accepted')`,
+        )
+        .get(from, to) as { order_count: number | bigint; risk_rub: number };
+      return { orderCount: Number(row.order_count), riskRub: row.risk_rub };
+    } finally {
+      database.close();
+    }
+  }
+
+  isExecutionKilled(): boolean {
+    return this.getRuntimeState('execution.kill_switch') !== 'false';
+  }
+
+  setExecutionKilled(killed: boolean): void {
+    this.setRuntimeState('execution.kill_switch', killed ? 'true' : 'false');
+  }
+
+  private finishExecution(
+    scenarioId: number,
+    status: 'accepted' | 'failed',
+    brokerOrderId: string | null,
+    detail: string,
+    eventType: string,
+  ): ExecutionOrderRecord {
+    const database = this.open();
+    try {
+      database.exec('BEGIN IMMEDIATE');
+      const row = database
+        .prepare('SELECT * FROM execution_orders WHERE scenario_id = ?')
+        .get(scenarioId) as ExecutionOrderRow | undefined;
+      if (!row) throw new Error('Execution order was not found');
+      if (row.status !== 'submitting') throw new Error(`Execution order is already ${row.status}`);
+
+      const now = new Date().toISOString();
+      database
+        .prepare(
+          `UPDATE execution_orders
+           SET status = ?, broker_order_id = ?, detail = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(status, brokerOrderId, detail.slice(0, 500), now, row.id);
+      this.appendExecutionEvent(database, Number(row.id), eventType, {
+        brokerOrderId,
+        detail: detail.slice(0, 500),
+      });
+      database.exec('COMMIT');
+
+      const finished = database.prepare('SELECT * FROM execution_orders WHERE id = ?').get(row.id) as ExecutionOrderRow;
+      return this.toExecutionOrder(finished);
+    } catch (error: unknown) {
+      try {
+        database.exec('ROLLBACK');
+      } catch {
+        // Transaction may already be committed.
+      }
+      throw error;
+    } finally {
+      database.close();
+    }
+  }
+
+  private appendExecutionEvent(
+    database: DatabaseSync,
+    executionOrderId: number,
+    eventType: string,
+    detail: unknown,
+  ): void {
+    database
+      .prepare(
+        `INSERT INTO execution_events (execution_order_id, event_type, created_at, detail_json)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(executionOrderId, eventType, new Date().toISOString(), JSON.stringify(detail));
+  }
+
   private open(): DatabaseSync {
     const directory = dirname(this.databasePath);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -591,6 +925,26 @@ export class ScenarioJournal {
       ...(row.total_slippage_rub !== null ? { totalSlippageRub: row.total_slippage_rub } : {}),
       ...(row.net_pnl_rub !== null ? { netPnlRub: row.net_pnl_rub } : {}),
       ...(row.close_note ? { closeNote: row.close_note } : {}),
+    };
+  }
+
+  private toExecutionOrder(row: ExecutionOrderRow): ExecutionOrderRecord {
+    return {
+      id: Number(row.id),
+      scenarioId: Number(row.scenario_id),
+      mode: row.mode,
+      status: row.status,
+      instrumentId: row.instrument_id,
+      side: row.side,
+      lots: row.lots,
+      limitPrice: row.limit_price,
+      estimatedRiskRub: row.estimated_risk_rub,
+      orderRequestId: row.order_request_id,
+      ...(row.broker_order_id ? { brokerOrderId: row.broker_order_id } : {}),
+      ...(row.approved_by_chat_id ? { approvedByChatId: row.approved_by_chat_id } : {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      ...(row.detail ? { detail: row.detail } : {}),
     };
   }
 }

@@ -4,12 +4,27 @@ export type TelegramUpdate = {
     chat?: { id?: number };
     text?: string;
   };
+  callback_query?: {
+    id?: string;
+    data?: string;
+    message?: { chat?: { id?: number } };
+  };
+};
+
+export type TelegramInlineKeyboard = {
+  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
 };
 
 export type TelegramClient = {
   getUpdates(input: { offset: number; timeoutSeconds: number }): Promise<TelegramUpdate[]>;
   sendMessage(chatId: string, text: string): Promise<void>;
-  sendPhoto(input: { chatId: string; png: Uint8Array; caption: string }): Promise<void>;
+  sendPhoto(input: {
+    chatId: string;
+    png: Uint8Array;
+    caption: string;
+    replyMarkup?: TelegramInlineKeyboard;
+  }): Promise<void>;
+  answerCallbackQuery?(callbackQueryId: string, text: string): Promise<void>;
 };
 
 type TelegramApiResponse<T> = {
@@ -33,7 +48,7 @@ export class TelegramBotClient implements TelegramClient {
     const result = await this.request<unknown>('getUpdates', {
       offset: input.offset,
       timeout: input.timeoutSeconds,
-      allowed_updates: ['message'],
+      allowed_updates: ['message', 'callback_query'],
     }, (input.timeoutSeconds + 10) * 1_000);
 
     if (!Array.isArray(result)) {
@@ -51,7 +66,12 @@ export class TelegramBotClient implements TelegramClient {
     await this.request('sendMessage', { chat_id: chatId, text }, 15_000);
   }
 
-  async sendPhoto(input: { chatId: string; png: Uint8Array; caption: string }): Promise<void> {
+  async sendPhoto(input: {
+    chatId: string;
+    png: Uint8Array;
+    caption: string;
+    replyMarkup?: TelegramInlineKeyboard;
+  }): Promise<void> {
     if (input.caption.length > 1_024) {
       throw new Error('Telegram photo caption exceeds the 1024 character limit');
     }
@@ -61,7 +81,16 @@ export class TelegramBotClient implements TelegramClient {
     body.set('chat_id', input.chatId);
     body.set('caption', input.caption);
     body.set('photo', new Blob([pngBytes.buffer], { type: 'image/png' }), 'intraday-candidate.png');
+    if (input.replyMarkup) body.set('reply_markup', JSON.stringify(input.replyMarkup));
     await this.requestForm('sendPhoto', body, 30_000);
+  }
+
+  async answerCallbackQuery(callbackQueryId: string, text: string): Promise<void> {
+    await this.request(
+      'answerCallbackQuery',
+      { callback_query_id: callbackQueryId, text: text.slice(0, 200) },
+      15_000,
+    );
   }
 
   private async request<T>(method: string, body: unknown, timeoutMs: number): Promise<T> {

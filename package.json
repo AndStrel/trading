@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Read-only MCP server for T-Invest market data, portfolios and deterministic trade-risk calculations.",
+  "description": "T-Invest analysis MCP with deterministic risk checks and isolated confirmed sandbox execution.",
   "engines": {
     "node": ">=22"
   },

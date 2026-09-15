@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { loadConfig } from '../config.js';
 import { ScenarioJournal } from '../journal/scenario-journal.js';
@@ -146,11 +146,93 @@ describe('TelegramTradingBot', () => {
     ]);
   });
 
+  it('prepares a sandbox order automatically and includes exact Telegram actions', async () => {
+    const journal = createJournal();
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      TELEGRAM_ALLOWED_CHAT_IDS: '42',
+      T_INVEST_EXECUTION_MODE: 'sandbox',
+      T_INVEST_TRADING_TOKEN: 'trade-token',
+      T_INVEST_INTRADAY_WATCHLIST:
+        '[{"instrumentId":"sber","label":"SBER","lotSize":1,"priceStep":0.01}]',
+    });
+    const scenario = journal.record({
+      observedAt: '2026-09-14T13:00:00.000Z',
+      strategy: 'intraday',
+      instrumentId: 'sber',
+      input: {
+        side: 'long',
+        entryPrice: 100,
+        stopPrice: 99,
+        targetPrice: 102.5,
+        lotSize: 1,
+        slippageRate: 0.0005,
+      },
+      decision: 'candidate',
+      blockers: [],
+      warnings: [],
+      snapshot: { tradePlan: { lots: 5, positionRub: 500, totalRiskRub: 7 } },
+    });
+    const queueScenario = vi.fn().mockReturnValue({ scenarioId: scenario.id });
+    const execution = {
+      mode: () => 'sandbox',
+      isConfigured: () => true,
+      isReady: () => true,
+      isKilled: () => false,
+      armSandbox: vi.fn(),
+      kill: vi.fn(),
+      queueScenario,
+      rejectScenario: vi.fn(),
+      listRecent: () => [],
+      submitScenario: vi.fn(),
+    };
+    const photos: Array<{ caption: string; callbackData?: string }> = [];
+    const client: TelegramClient = {
+      getUpdates: async () => [],
+      sendMessage: async () => undefined,
+      sendPhoto: async ({ caption, replyMarkup }) => {
+        const callbackData = replyMarkup?.inline_keyboard[0]?.[0]?.callback_data;
+        photos.push({
+          caption,
+          ...(callbackData ? { callbackData } : {}),
+        });
+      },
+    };
+    const scanner = { isPaused: () => false, pause: () => undefined, resume: () => undefined };
+    const bot = new TelegramTradingBot(
+      config,
+      client,
+      scanner,
+      journal,
+      () => undefined,
+      async () => new Uint8Array([137, 80, 78, 71]),
+      execution,
+    );
+
+    await bot.notifyScannerEvent({
+      instrumentId: 'sber',
+      observedAt: scenario.observedAt,
+      status: 'candidate-recorded',
+      scenarioId: scenario.id,
+      reasons: [],
+    });
+
+    expect(queueScenario).toHaveBeenCalledWith(scenario);
+    expect(photos).toEqual([
+      {
+        caption: expect.stringContaining(`/approve ${scenario.id} CONFIRM или /reject ${scenario.id}`),
+        callbackData: `exec:approve:${scenario.id}:confirm`,
+      },
+    ]);
+  });
+
   it('falls back to text when card rendering fails', async () => {
     const journal = createJournal();
     const config = loadConfig({
       TELEGRAM_BOT_TOKEN: 'test-token',
       TELEGRAM_ALLOWED_CHAT_IDS: '42',
+      T_INVEST_EXECUTION_MODE: 'sandbox',
+      T_INVEST_TRADING_TOKEN: 'trade-token',
       T_INVEST_INTRADAY_WATCHLIST:
         '[{"instrumentId":"sber","label":"SBER","lotSize":1,"priceStep":0.01}]',
     });
@@ -180,6 +262,18 @@ describe('TelegramTradingBot', () => {
       sendPhoto: async () => undefined,
     };
     const scanner = { isPaused: () => false, pause: () => undefined, resume: () => undefined };
+    const execution = {
+      mode: () => 'sandbox',
+      isConfigured: () => true,
+      isReady: () => true,
+      isKilled: () => false,
+      armSandbox: vi.fn(),
+      kill: vi.fn(),
+      queueScenario: vi.fn().mockReturnValue({ scenarioId: scenario.id }),
+      rejectScenario: vi.fn(),
+      listRecent: () => [],
+      submitScenario: vi.fn(),
+    };
     const bot = new TelegramTradingBot(
       config,
       client,
@@ -189,6 +283,7 @@ describe('TelegramTradingBot', () => {
       async () => {
         throw new Error('renderer unavailable');
       },
+      execution,
     );
 
     await bot.notifyScannerEvent({
@@ -201,6 +296,7 @@ describe('TelegramTradingBot', () => {
 
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain('Карточка не сформировалась');
+    expect(sent[0]).toContain(`/approve ${scenario.id} CONFIRM или /reject ${scenario.id}`);
   });
 
   it('sends a clearly labelled non-market preview card', async () => {
@@ -237,6 +333,127 @@ describe('TelegramTradingBot', () => {
         caption: expect.stringContaining('Тестовая карточка'),
       }),
     ]);
+  });
+
+  it('requires explicit sandbox arming and per-order confirmation commands', async () => {
+    const journal = createJournal();
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      TELEGRAM_ALLOWED_CHAT_IDS: '42',
+      T_INVEST_INTRADAY_WATCHLIST:
+        '[{"instrumentId":"sber","label":"SBER","lotSize":1,"priceStep":0.01}]',
+    });
+    const sent: string[] = [];
+    const updates: TelegramUpdate[] = [
+      { update_id: 1, message: { chat: { id: 42 }, text: '/execution_arm SANDBOX' } },
+      { update_id: 2, message: { chat: { id: 42 }, text: '/approve 17 CONFIRM' } },
+      { update_id: 3, message: { chat: { id: 42 }, text: '/kill' } },
+    ];
+    const client: TelegramClient = {
+      getUpdates: async () => updates.splice(0),
+      sendMessage: async (_chatId, text) => {
+        sent.push(text);
+      },
+      sendPhoto: async () => undefined,
+    };
+    const scanner = { isPaused: () => false, pause: () => undefined, resume: () => undefined };
+    const armSandbox = vi.fn();
+    const kill = vi.fn();
+    const submitScenario = vi.fn().mockResolvedValue({
+      order: { lots: 5 },
+      executionStatus: 'EXECUTION_REPORT_STATUS_FILL',
+      lotsExecuted: 5,
+    });
+    const execution = {
+      mode: () => 'sandbox',
+      isConfigured: () => true,
+      isReady: () => true,
+      isKilled: () => false,
+      armSandbox,
+      kill,
+      queueScenario: vi.fn(),
+      rejectScenario: vi.fn(),
+      listRecent: () => [],
+      submitScenario,
+    };
+    const bot = new TelegramTradingBot(
+      config,
+      client,
+      scanner,
+      journal,
+      () => undefined,
+      async () => new Uint8Array(),
+      execution,
+    );
+
+    await bot.pollOnce();
+
+    expect(armSandbox).toHaveBeenCalledOnce();
+    expect(submitScenario).toHaveBeenCalledWith(17, '42');
+    expect(kill).toHaveBeenCalledOnce();
+    expect(sent.some((message) => message.includes('Sandbox-заявка #17'))).toBe(true);
+  });
+
+  it('accepts an allowlisted sandbox approval button', async () => {
+    const journal = createJournal();
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      TELEGRAM_ALLOWED_CHAT_IDS: '42',
+    });
+    const answers: Array<{ callbackId: string; text: string }> = [];
+    const sent: string[] = [];
+    const client: TelegramClient = {
+      getUpdates: async () => [
+        {
+          update_id: 1,
+          callback_query: {
+            id: 'callback-1',
+            data: 'exec:approve:17:confirm',
+            message: { chat: { id: 42 } },
+          },
+        },
+      ],
+      sendMessage: async (_chatId, text) => {
+        sent.push(text);
+      },
+      sendPhoto: async () => undefined,
+      answerCallbackQuery: async (callbackId, text) => {
+        answers.push({ callbackId, text });
+      },
+    };
+    const scanner = { isPaused: () => false, pause: () => undefined, resume: () => undefined };
+    const submitScenario = vi.fn().mockResolvedValue({
+      order: { lots: 5 },
+      executionStatus: 'EXECUTION_REPORT_STATUS_FILL',
+      lotsExecuted: 5,
+    });
+    const execution = {
+      mode: () => 'sandbox',
+      isConfigured: () => true,
+      isReady: () => true,
+      isKilled: () => false,
+      armSandbox: vi.fn(),
+      kill: vi.fn(),
+      queueScenario: vi.fn(),
+      rejectScenario: vi.fn(),
+      listRecent: () => [],
+      submitScenario,
+    };
+    const bot = new TelegramTradingBot(
+      config,
+      client,
+      scanner,
+      journal,
+      () => undefined,
+      async () => new Uint8Array(),
+      execution,
+    );
+
+    await bot.pollOnce();
+
+    expect(answers).toEqual([{ callbackId: 'callback-1', text: 'Проверяю и отправляю…' }]);
+    expect(submitScenario).toHaveBeenCalledWith(17, '42');
+    expect(sent[0]).toContain('Sandbox-заявка #17');
   });
 
 });

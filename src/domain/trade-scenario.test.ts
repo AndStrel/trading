@@ -74,6 +74,23 @@ describe('assessTradeScenario', () => {
     expect(assessment.market.spreadPct).toBeCloseTo(0.0333, 3);
   });
 
+  it('accepts the flag-suffixed fields returned by the REST API', () => {
+    const input = {
+      ...completeInput(),
+      tradingStatusPayload: {
+        tradingStatus: 'SECURITY_TRADING_STATUS_NORMAL_TRADING',
+        apiTradeAvailableFlag: true,
+        limitOrderAvailableFlag: true,
+        marketOrderAvailableFlag: true,
+      },
+    };
+
+    const assessment = assessTradeScenario(input);
+
+    expect(assessment.decision).toBe('candidate');
+    expect(assessment.market.apiTradeAvailable).toBe(true);
+  });
+
   it('requires review when the candle trend opposes the setup', () => {
     const input = completeInput();
     input.candleAnalysis = { ...upwardCandles, trend: 'down' };

@@ -11,6 +11,13 @@ describe('loadConfig', () => {
     expect(config.scanner.slippageRate).toBe(0.0005);
     expect(config.scanner.intradayWatchlist).toEqual([]);
     expect(config.telegram).toEqual({ allowedChatIds: [], pollingTimeoutSeconds: 25 });
+    expect(config.execution).toEqual({
+      mode: 'disabled',
+      maxOrdersPerDay: 3,
+      maxDailyRiskRub: 1_000,
+      candidateMaxAgeMinutes: 10,
+      sandboxInitialBalanceRub: 100_000,
+    });
     expect(config.strategies.intraday.maxSpreadPct).toBe(0.3);
     expect(config.strategies.intraday.maxEntryDeviationPct).toBe(0.5);
     expect(config.strategies.intraday.allowShort).toBe(false);
@@ -62,5 +69,27 @@ describe('loadConfig', () => {
 
     expect(config.strategies.intraday.allowShort).toBe(true);
     expect(config.strategies.swing.allowShort).toBe(false);
+  });
+
+  it('keeps sandbox credentials separate from the read-only client', () => {
+    const config = loadConfig({
+      T_INVEST_TOKEN: 'read-token',
+      T_INVEST_EXECUTION_MODE: 'sandbox',
+      T_INVEST_TRADING_TOKEN: 'trade-token',
+      T_INVEST_SANDBOX_ACCOUNT_ID: 'sandbox-account',
+      T_INVEST_EXECUTION_MAX_ORDERS_PER_DAY: '2',
+      T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB: '750',
+    });
+
+    expect(config.token).toBe('read-token');
+    expect(config.execution).toEqual({
+      mode: 'sandbox',
+      token: 'trade-token',
+      accountId: 'sandbox-account',
+      maxOrdersPerDay: 2,
+      maxDailyRiskRub: 750,
+      candidateMaxAgeMinutes: 10,
+      sandboxInitialBalanceRub: 100_000,
+    });
   });
 });
