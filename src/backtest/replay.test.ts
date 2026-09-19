@@ -184,6 +184,9 @@ describe('replayVwapPullback', () => {
     });
 
     expect(report.phases[0]!.executedTradeCount).toBe(0);
+    expect(report.phases[0]!.signalCount).toBe(1);
+    expect(report.phases[0]!.planApprovedCount).toBe(1);
+    expect(report.phases[0]!.incompleteDataTradeCount).toBe(1);
   });
 
   it('resets indicators after an incomplete five-minute bucket', () => {
@@ -195,6 +198,27 @@ describe('replayVwapPullback', () => {
       '2025-01-21T07:34:00.000Z',
     ]);
     const candles = syntheticArchive().filter((candle) => !omittedBucket.has(candle.time));
+
+    const report = replayVwapPullback({
+      instruments: [{ instrument, candles }],
+      phases: [{ id: 'out_of_sample', label: 'synthetic holdout', from: '2025-01-21', to: '2025-01-21' }],
+      parameters: replayParameters(),
+    });
+
+    expect(report.phases[0]!.executedTradeCount).toBe(0);
+  });
+
+  it('resets cross-session indicators around incomplete session edges', () => {
+    const incompleteEdge = new Set([
+      '2025-01-21T07:00:00.000Z',
+      '2025-01-21T07:01:00.000Z',
+      '2025-01-21T07:02:00.000Z',
+      '2025-01-21T07:03:00.000Z',
+      '2025-01-21T07:04:00.000Z',
+      '2025-01-21T07:09:00.000Z',
+      '2025-01-20T12:09:00.000Z',
+    ]);
+    const candles = syntheticArchive().filter((candle) => !incompleteEdge.has(candle.time));
 
     const report = replayVwapPullback({
       instruments: [{ instrument, candles }],

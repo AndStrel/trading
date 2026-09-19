@@ -139,6 +139,8 @@ export type ReplayPhaseReport = {
   phase: ReplayPhase;
   signalCount: number;
   planApprovedCount: number;
+  /** Approved signals omitted because the archive ends before a terminal exit is observable. */
+  incompleteDataTradeCount: number;
   executedTradeCount: number;
   skipped: ReplaySkippedCandidates;
   startingCapitalRub: number;
@@ -218,6 +220,7 @@ type Candidate = {
 type CandidateBuildResult = {
   candidates: Candidate[];
   rejectedPlanSessionDates: string[];
+  rejectedTerminalExitSessionDates: string[];
 };
 
 type ActivePosition = {
@@ -359,10 +362,7 @@ function toFiveMinuteBars(session: PreparedMinuteCandle[]): FiveMinuteBar[] {
   const bars: FiveMinuteBar[] = [];
   for (const [bucket, candles] of [...groups.entries()].sort(([left], [right]) => left - right)) {
     candles.sort((left, right) => left.epochMs - right.epochMs);
-    if (
-      candles.length !== 5 ||
-      candles.some((candle, index) => index > 0 && candle.epochMs !== candles[index - 1]!.epochMs + MINUTE_MS)
-    ) {
+    if (!isCompleteFiveMinuteBucket(candles)) {
       continue;
     }
     const first = candles[0]!;
@@ -380,6 +380,36 @@ function toFiveMinuteBars(session: PreparedMinuteCandle[]): FiveMinuteBar[] {
     });
   }
   return bars;
+}
+
+function isCompleteFiveMinuteBucket(candles: readonly PreparedMinuteCandle[]): boolean {
+  return (
+    candles.length === 5 &&
+    candles.every(
+      (candle, index) => index === 0 || candle.epochMs === candles[index - 1]!.epochMs + MINUTE_MS,
+    )
+  );
+}
+
+function hasIncompleteSessionEdge(
+  session: readonly PreparedMinuteCandle[],
+  forceExitMinuteMoscow: number,
+): { first: boolean; last: boolean } {
+  const mainSession = session.filter((candle) => candle.minuteOfDayMoscow <= forceExitMinuteMoscow);
+  if (mainSession.length === 0) return { first: false, last: false };
+
+  const groups = new Map<number, PreparedMinuteCandle[]>();
+  for (const candle of mainSession) {
+    const bucket = Math.floor(candle.epochMs / FIVE_MINUTE_MS) * FIVE_MINUTE_MS;
+    const candles = groups.get(bucket) ?? [];
+    candles.push(candle);
+    groups.set(bucket, candles);
+  }
+  const ordered = [...groups.entries()].sort(([left], [right]) => left - right).map(([, candles]) => candles);
+  return {
+    first: !isCompleteFiveMinuteBucket(ordered[0]!),
+    last: !isCompleteFiveMinuteBucket(ordered.at(-1)!),
+  };
 }
 
 function average(values: readonly number[]): number | null {
@@ -526,6 +556,8 @@ function buildCandidates(
   const historicalVolumes = new Map<number, number[]>();
   const candidates: Candidate[] = [];
   const rejectedPlanSessionDates: string[] = [];
+  const rejectedTerminalExitSessionDates: string[] = [];
+  let resetGlobalClosesAtSessionStart = false;
 
   for (const [, session] of sessions) {
     // Deliberately omit the evening session from all trend and volume indicators. The baseline
@@ -534,6 +566,11 @@ function buildCandidates(
     const bars = toFiveMinuteBars(session).filter(
       (bar) => bar.minuteOfDayMoscow <= parameters.forceExitMinuteMoscow,
     );
+    const incompleteEdge = hasIncompleteSessionEdge(session, parameters.forceExitMinuteMoscow);
+    if (resetGlobalClosesAtSessionStart || incompleteEdge.first) {
+      globalCloses.length = 0;
+    }
+    resetGlobalClosesAtSessionStart = incompleteEdge.last;
     let cumulativeTypicalVolume = 0;
     let cumulativeVolume = 0;
     let previousVwap: number | null = null;
@@ -654,6 +691,7 @@ function buildCandidates(
         parameters,
       });
       if (!exit) {
+        rejectedTerminalExitSessionDates.push(bar.sessionDate);
         previousVwap = vwap;
         continue;
       }
@@ -682,7 +720,7 @@ function buildCandidates(
     addSessionVolumes(historicalVolumes, bars);
   }
 
-  return { candidates, rejectedPlanSessionDates };
+  return { candidates, rejectedPlanSessionDates, rejectedTerminalExitSessionDates };
 }
 
 function materializeTrade(candidate: Candidate, parameters: ReplayParameters): {
@@ -752,6 +790,7 @@ function summarizePhase(
   phase: ReplayPhase,
   candidates: Candidate[],
   rejectedPlanSessionDates: readonly string[],
+  rejectedTerminalExitSessionDates: readonly string[],
   parameters: ReplayParameters,
 ): ReplayPhaseReport {
   const phaseCandidates = candidates
@@ -762,6 +801,9 @@ function summarizePhase(
     );
   const skipped = emptySkippedCandidates();
   skipped.invalidTradePlan = rejectedPlanSessionDates.filter(
+    (sessionDate) => sessionDate >= phase.from && sessionDate <= phase.to,
+  ).length;
+  const incompleteDataTradeCount = rejectedTerminalExitSessionDates.filter(
     (sessionDate) => sessionDate >= phase.from && sessionDate <= phase.to,
   ).length;
   const active: ActivePosition[] = [];
@@ -875,11 +917,17 @@ function summarizePhase(
   if (totalCommissionRub === 0 && trades.length > 0) {
     warnings.push('Commission is zero; this understates broker costs');
   }
+  if (incompleteDataTradeCount > 0) {
+    warnings.push(
+      `${incompleteDataTradeCount} approved signal(s) were excluded because the archive had no observable terminal exit`,
+    );
+  }
 
   return {
     phase,
-    signalCount: phaseCandidates.length + skipped.invalidTradePlan,
-    planApprovedCount: phaseCandidates.length,
+    signalCount: phaseCandidates.length + skipped.invalidTradePlan + incompleteDataTradeCount,
+    planApprovedCount: phaseCandidates.length + incompleteDataTradeCount,
+    incompleteDataTradeCount,
     executedTradeCount: trades.length,
     skipped,
     startingCapitalRub: round(parameters.startingCapitalRub),
@@ -916,6 +964,7 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
   const seenInstrumentIds = new Set<string>();
   const allCandidates: Candidate[] = [];
   const rejectedPlanSessionDates: string[] = [];
+  const rejectedTerminalExitSessionDates: string[] = [];
   const data = input.instruments.map(({ instrument, candles }) => {
     if (seenInstrumentIds.has(instrument.instrumentId)) {
       throw new Error(`Replay input contains duplicate instrument ${instrument.instrumentId}`);
@@ -924,6 +973,7 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
     const built = buildCandidates(instrument, candles, parameters);
     allCandidates.push(...built.candidates);
     rejectedPlanSessionDates.push(...built.rejectedPlanSessionDates);
+    rejectedTerminalExitSessionDates.push(...built.rejectedTerminalExitSessionDates);
     return {
       ticker: instrument.ticker,
       instrumentId: instrument.instrumentId,
@@ -934,7 +984,13 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
   });
 
   const phaseReports = phases.map((phase) =>
-    summarizePhase(phase, allCandidates, rejectedPlanSessionDates, parameters),
+    summarizePhase(
+      phase,
+      allCandidates,
+      rejectedPlanSessionDates,
+      rejectedTerminalExitSessionDates,
+      parameters,
+    ),
   );
   const warnings = [
     'The archive has OHLCV candles, not bid/ask quotes or actual fills; adverse per-side slippage is a model, not a measurement.',
