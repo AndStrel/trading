@@ -229,6 +229,51 @@ describe('replayVwapPullback', () => {
     expect(report.phases[0]!.executedTradeCount).toBe(0);
   });
 
+  it('reports a signal whose following-minute entry candle is absent', () => {
+    const candles = syntheticArchive().filter((candle) => candle.time !== '2025-01-21T11:15:00.000Z');
+
+    const report = replayVwapPullback({
+      instruments: [{ instrument, candles }],
+      phases: [{ id: 'out_of_sample', label: 'synthetic holdout', from: '2025-01-21', to: '2025-01-21' }],
+      parameters: replayParameters(),
+    });
+
+    expect(report.phases[0]!.executedTradeCount).toBe(0);
+    expect(report.phases[0]!.missingEntryDataCount).toBe(1);
+    expect(report.phases[0]!.signalCount).toBe(1);
+    expect(report.phases[0]!.planApprovedCount).toBe(0);
+  });
+
+  it('keeps drawdown invariant to ticker ordering for simultaneous exits', () => {
+    const secondInstrument = { ...instrument, instrumentId: 'second-instrument', ticker: 'ZZZ' };
+    const secondCandles = syntheticArchive().map((candle) => ({
+      ...candle,
+      instrumentId: secondInstrument.instrumentId,
+    }));
+    const phase = [{ id: 'out_of_sample' as const, label: 'synthetic holdout', from: '2025-01-21', to: '2025-01-21' }];
+    const parameters = replayParameters();
+    const firstOrder = replayVwapPullback({
+      instruments: [
+        { instrument, candles: syntheticArchive() },
+        { instrument: secondInstrument, candles: secondCandles },
+      ],
+      phases: phase,
+      parameters,
+    });
+    const reversedOrder = replayVwapPullback({
+      instruments: [
+        { instrument: secondInstrument, candles: secondCandles },
+        { instrument, candles: syntheticArchive() },
+      ],
+      phases: phase,
+      parameters,
+    });
+
+    expect(firstOrder.phases[0]!.executedTradeCount).toBe(2);
+    expect(reversedOrder.phases[0]!.executedTradeCount).toBe(2);
+    expect(firstOrder.phases[0]!.realizedMaxDrawdownRub).toBe(reversedOrder.phases[0]!.realizedMaxDrawdownRub);
+  });
+
   it('rejects duplicate minute timestamps instead of silently choosing a price', () => {
     const candles = syntheticArchive();
     candles.push({ ...candles[0]! });

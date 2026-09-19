@@ -141,6 +141,10 @@ export type ReplayPhaseReport = {
   planApprovedCount: number;
   /** Approved signals omitted because the archive ends before a terminal exit is observable. */
   incompleteDataTradeCount: number;
+  /** Signals whose next executable minute is absent from the archive. */
+  missingEntryDataCount: number;
+  /** Earliest incomplete entry; results after this point are intentionally not scheduled. */
+  portfolioTruncatedAt: string | null;
   executedTradeCount: number;
   skipped: ReplaySkippedCandidates;
   startingCapitalRub: number;
@@ -220,7 +224,8 @@ type Candidate = {
 type CandidateBuildResult = {
   candidates: Candidate[];
   rejectedPlanSessionDates: string[];
-  rejectedTerminalExitSessionDates: string[];
+  incompleteCandidates: Array<{ sessionDate: string; entryAt: string }>;
+  missingEntrySessionDates: string[];
 };
 
 type ActivePosition = {
@@ -556,7 +561,8 @@ function buildCandidates(
   const historicalVolumes = new Map<number, number[]>();
   const candidates: Candidate[] = [];
   const rejectedPlanSessionDates: string[] = [];
-  const rejectedTerminalExitSessionDates: string[] = [];
+  const incompleteCandidates: Array<{ sessionDate: string; entryAt: string }> = [];
+  const missingEntrySessionDates: string[] = [];
   let resetGlobalClosesAtSessionStart = false;
 
   for (const [, session] of sessions) {
@@ -640,6 +646,7 @@ function buildCandidates(
       const entryEpochMs = Date.parse(bar.endAt) + MINUTE_MS;
       const entryIndex = minuteIndexByEpoch.get(entryEpochMs);
       if (entryIndex === undefined) {
+        missingEntrySessionDates.push(bar.sessionDate);
         previousVwap = vwap;
         continue;
       }
@@ -691,7 +698,7 @@ function buildCandidates(
         parameters,
       });
       if (!exit) {
-        rejectedTerminalExitSessionDates.push(bar.sessionDate);
+        incompleteCandidates.push({ sessionDate: bar.sessionDate, entryAt: entryCandle.time });
         previousVwap = vwap;
         continue;
       }
@@ -720,7 +727,7 @@ function buildCandidates(
     addSessionVolumes(historicalVolumes, bars);
   }
 
-  return { candidates, rejectedPlanSessionDates, rejectedTerminalExitSessionDates };
+  return { candidates, rejectedPlanSessionDates, incompleteCandidates, missingEntrySessionDates };
 }
 
 function materializeTrade(candidate: Candidate, parameters: ReplayParameters): {
@@ -790,11 +797,19 @@ function summarizePhase(
   phase: ReplayPhase,
   candidates: Candidate[],
   rejectedPlanSessionDates: readonly string[],
-  rejectedTerminalExitSessionDates: readonly string[],
+  incompleteCandidates: readonly { sessionDate: string; entryAt: string }[],
+  missingEntrySessionDates: readonly string[],
   parameters: ReplayParameters,
 ): ReplayPhaseReport {
-  const phaseCandidates = candidates
-    .filter((candidate) => inPhase(candidate, phase))
+  const phaseIncompleteCandidates = incompleteCandidates
+    .filter((candidate) => candidate.sessionDate >= phase.from && candidate.sessionDate <= phase.to)
+    .sort((left, right) => left.entryAt.localeCompare(right.entryAt));
+  const portfolioTruncatedAt = phaseIncompleteCandidates[0]?.entryAt ?? null;
+  const allPhaseCandidates = candidates.filter((candidate) => inPhase(candidate, phase));
+  const phaseCandidates = allPhaseCandidates
+    // An unresolved position has unknown cash/slot lifetime. Do not schedule any later
+    // candidate, and do not let same-minute ticker ordering decide the result.
+    .filter((candidate) => portfolioTruncatedAt === null || candidate.entryAt < portfolioTruncatedAt)
     .sort(
       (left, right) =>
         left.entryAt.localeCompare(right.entryAt) || left.ticker.localeCompare(right.ticker),
@@ -803,7 +818,8 @@ function summarizePhase(
   skipped.invalidTradePlan = rejectedPlanSessionDates.filter(
     (sessionDate) => sessionDate >= phase.from && sessionDate <= phase.to,
   ).length;
-  const incompleteDataTradeCount = rejectedTerminalExitSessionDates.filter(
+  const incompleteDataTradeCount = phaseIncompleteCandidates.length;
+  const missingEntryDataCount = missingEntrySessionDates.filter(
     (sessionDate) => sessionDate >= phase.from && sessionDate <= phase.to,
   ).length;
   const active: ActivePosition[] = [];
@@ -874,10 +890,12 @@ function summarizePhase(
   let equity = parameters.startingCapitalRub;
   let peakEquity = equity;
   let realizedMaxDrawdownRub = 0;
-  for (const trade of [...trades].sort(
-    (left, right) => left.exitAt.localeCompare(right.exitAt) || left.ticker.localeCompare(right.ticker),
-  )) {
-    equity += trade.netPnlRub;
+  const pnlByExitAt = new Map<string, number>();
+  for (const trade of trades) {
+    pnlByExitAt.set(trade.exitAt, (pnlByExitAt.get(trade.exitAt) ?? 0) + trade.netPnlRub);
+  }
+  for (const [exitAt, netPnlRubAtTime] of [...pnlByExitAt.entries()].sort(([left], [right]) => left.localeCompare(right))) {
+    equity += netPnlRubAtTime;
     peakEquity = Math.max(peakEquity, equity);
     realizedMaxDrawdownRub = Math.max(realizedMaxDrawdownRub, peakEquity - equity);
   }
@@ -919,15 +937,21 @@ function summarizePhase(
   }
   if (incompleteDataTradeCount > 0) {
     warnings.push(
-      `${incompleteDataTradeCount} approved signal(s) were excluded because the archive had no observable terminal exit`,
+      `${incompleteDataTradeCount} approved signal(s) were excluded because the archive had no observable terminal exit; portfolio scheduling stops at ${portfolioTruncatedAt}`,
     );
+  }
+  if (missingEntryDataCount > 0) {
+    warnings.push(`${missingEntryDataCount} signal(s) had no observable following-minute entry`);
   }
 
   return {
     phase,
-    signalCount: phaseCandidates.length + skipped.invalidTradePlan + incompleteDataTradeCount,
-    planApprovedCount: phaseCandidates.length + incompleteDataTradeCount,
+    signalCount:
+      allPhaseCandidates.length + skipped.invalidTradePlan + incompleteDataTradeCount + missingEntryDataCount,
+    planApprovedCount: allPhaseCandidates.length + incompleteDataTradeCount,
     incompleteDataTradeCount,
+    missingEntryDataCount,
+    portfolioTruncatedAt,
     executedTradeCount: trades.length,
     skipped,
     startingCapitalRub: round(parameters.startingCapitalRub),
@@ -964,6 +988,8 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
   const seenInstrumentIds = new Set<string>();
   const allCandidates: Candidate[] = [];
   const rejectedPlanSessionDates: string[] = [];
+  const incompleteCandidates: Array<{ sessionDate: string; entryAt: string }> = [];
+  const missingEntrySessionDates: string[] = [];
   const rejectedTerminalExitSessionDates: string[] = [];
   const data = input.instruments.map(({ instrument, candles }) => {
     if (seenInstrumentIds.has(instrument.instrumentId)) {
@@ -973,7 +999,8 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
     const built = buildCandidates(instrument, candles, parameters);
     allCandidates.push(...built.candidates);
     rejectedPlanSessionDates.push(...built.rejectedPlanSessionDates);
-    rejectedTerminalExitSessionDates.push(...built.rejectedTerminalExitSessionDates);
+    incompleteCandidates.push(...built.incompleteCandidates);
+    missingEntrySessionDates.push(...built.missingEntrySessionDates);
     return {
       ticker: instrument.ticker,
       instrumentId: instrument.instrumentId,
@@ -988,7 +1015,8 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
       phase,
       allCandidates,
       rejectedPlanSessionDates,
-      rejectedTerminalExitSessionDates,
+      incompleteCandidates,
+      missingEntrySessionDates,
       parameters,
     ),
   );
