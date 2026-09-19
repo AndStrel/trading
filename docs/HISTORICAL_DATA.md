@@ -80,6 +80,19 @@ docker compose run --rm telegram-service node dist/history-import.js --year 2025
 
 Перед массовым импортом нужна резервная копия Docker volume. Команда `docker compose down -v` удаляет и журнал, и историческую базу.
 
+## Первый импорт 2025 без ручного SSH
+
+В репозитории есть одноразовый workflow **Bootstrap 2025 historical data**. После merge PR, который добавляет или меняет именно этот workflow, он использует уже существующие deploy Secrets, ждёт освобождения того же deploy-lock и запускает импорт на VPS. Токен T-Invest остаётся только в серверном `.env`.
+
+В этот первый прогон входит фиксированная `liquid-20` выборка из основной intraday-вселенной:
+
+```text
+SBER, SBERP, GAZP, LKOH, ROSN, NVTK, TATN, TATNP, SNGS, SNGSP,
+GMKN, PLZL, CHMF, NLMK, MTSS, MGNT, MOEX, AFLT, ALRS, HYDR
+```
+
+Перед скачиванием workflow требует минимум 4 GiB свободного места на разделе `/opt/andstrel/trading`. Обычные последующие deploy не повторяют импорт: workflow реагирует только на изменение собственного YAML-файла. Результат и число загруженных свечей видны в GitHub Actions log.
+
 ## Граница текущего этапа
 
 Импорт создаёт качественный набор входных минутных данных, но ещё не является backtest и не доказывает доходность стратегии. Следом будут реализованы воспроизводимый replay, учёт комиссий/проскальзывания и walk-forward проверка без заглядывания в будущее.
