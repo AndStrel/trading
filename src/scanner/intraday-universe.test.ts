@@ -20,7 +20,7 @@ describe('TInvestIntradayUniverseProvider', () => {
         return {
           instruments: [
             {
-              uid: 'sber-uid', ticker: 'SBER', name: 'Сбербанк', classCode: 'TQBR', currency: 'rub',
+              uid: 'sber-uid', figi: 'BBG004730N88', ticker: 'SBER', name: 'Сбербанк', classCode: 'TQBR', currency: 'rub',
               lot: 10, minPriceIncrement: quotation(0.01), apiTradeAvailableFlag: true,
               forQualInvestorFlag: false, otcFlag: false, blockedTcaFlag: false,
             },
@@ -44,7 +44,13 @@ describe('TInvestIntradayUniverseProvider', () => {
 
     expect(requests).toBe(1);
     expect(first.instruments).toEqual([
-      expect.objectContaining({ instrumentId: 'sber-uid', ticker: 'SBER', lotSize: 10, priceStep: 0.01 }),
+      expect.objectContaining({
+        instrumentId: 'sber-uid',
+        figi: 'BBG004730N88',
+        ticker: 'SBER',
+        lotSize: 10,
+        priceStep: 0.01,
+      }),
       expect.objectContaining({ instrumentId: 'gazp-uid', ticker: 'GAZP', lotSize: 10, priceStep: 0.01 }),
     ]);
     expect(first.missingTickers).toEqual(['ILLQ']);

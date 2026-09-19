@@ -1,12 +1,10 @@
 name: Replay 2025 historical data
 
-# This is a one-off job. It runs only when this file changes on main, after the archive bootstrap
-# has populated the existing Docker volume. It does not send a token or data archive to GitHub.
+# This is a one-off job. Run it manually only after Bootstrap 2025 historical data has
+# completed successfully and populated the existing Docker volume. It does not send a token
+# or data archive to GitHub.
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/replay-backtest-2025.yml
+  workflow_dispatch:
 
 permissions:
   contents: read

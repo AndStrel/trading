@@ -36,6 +36,8 @@ export const DEFAULT_MOEX_LIQUID_TICKERS = [
 
 export type ResolvedIntradayInstrument = IntradayWatchlistItem & {
   ticker: string;
+  /** FIGI is used for the annual history archive endpoint; UID remains the runtime API key. */
+  figi?: string;
   name?: string;
 };
 
@@ -53,6 +55,7 @@ export type IntradayUniverseProvider = {
 
 type SharePayload = {
   uid?: unknown;
+  figi?: unknown;
   ticker?: unknown;
   name?: unknown;
   classCode?: unknown;
@@ -82,6 +85,7 @@ function parseShares(payload: unknown): SharePayload[] {
 
 function toResolvedInstrument(share: SharePayload): ResolvedIntradayInstrument | null {
   const uid = typeof share.uid === 'string' ? share.uid.trim() : '';
+  const figi = typeof share.figi === 'string' ? share.figi.trim() : '';
   const ticker = typeof share.ticker === 'string' ? share.ticker.trim().toUpperCase() : '';
   const classCode = typeof share.classCode === 'string' ? share.classCode.trim().toUpperCase() : '';
   const currency = typeof share.currency === 'string' ? share.currency.trim().toUpperCase() : '';
@@ -110,6 +114,7 @@ function toResolvedInstrument(share: SharePayload): ResolvedIntradayInstrument |
     instrumentId: uid,
     label: ticker,
     ticker,
+    ...(figi ? { figi } : {}),
     ...(name ? { name } : {}),
     lotSize,
     priceStep,

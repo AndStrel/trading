@@ -103,7 +103,9 @@ async function main(): Promise<void> {
     for (const instrument of instruments) {
       try {
         const archive = await historyClient.getMinuteCandleArchive({
-          instrumentId: instrument.instrumentId,
+          ...(instrument.figi
+            ? { figi: instrument.figi }
+            : { instrumentId: instrument.instrumentId }),
           year,
         });
         const parsed = parseHistoryMinuteArchive(archive, {

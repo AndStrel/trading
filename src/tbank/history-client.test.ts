@@ -36,6 +36,24 @@ describe('TInvestHistoryClient', () => {
     );
   });
 
+  it('uses FIGI for the annual archive endpoint when it is available', async () => {
+    const archive = new Uint8Array([80, 75, 3, 4]);
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(archive, { status: 200, headers: { 'Content-Type': 'application/zip' } }),
+    );
+    const client = new TInvestHistoryClient('read-secret', 'https://example.test/history-data', {
+      fetchImpl: fetchMock,
+    });
+
+    await expect(client.getMinuteCandleArchive({ figi: 'BBG004730N88', year: 2025 })).resolves.toEqual(
+      archive,
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://example.test/history-data?figi=BBG004730N88&year=2025',
+      expect.objectContaining({ method: 'GET' }),
+    );
+  });
+
   it('uses system curl only when configured', async () => {
     const curlGetArchive = vi.fn<CurlGetArchive>().mockResolvedValue({
       status: 200,
@@ -84,6 +102,21 @@ describe('TInvestHistoryClient', () => {
     await expect(client.getMinuteCandleArchive({ instrumentId: 'uid', year: 1999 })).rejects.toThrow(
       'History archive year',
     );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('requires exactly one archive identifier', async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    const client = new TInvestHistoryClient('read-secret', 'https://example.test/history-data', {
+      fetchImpl: fetchMock,
+    });
+
+    await expect(client.getMinuteCandleArchive({ year: 2025 })).rejects.toThrow(
+      'exactly one of figi or instrumentId',
+    );
+    await expect(
+      client.getMinuteCandleArchive({ figi: 'BBG004730N88', instrumentId: 'uid', year: 2025 }),
+    ).rejects.toThrow('exactly one of figi or instrumentId');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

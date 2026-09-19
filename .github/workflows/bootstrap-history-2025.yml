@@ -1,13 +1,18 @@
 name: Bootstrap 2025 historical data
 
-# This one-off workflow is intentionally triggered only when this file changes on main.
-# It lets the initial import use the existing deploy SSH secrets without ever copying a
-# broker token into GitHub. Future application deploys do not re-download the archive.
+# This one-off workflow is safe to rerun: the importer is idempotent and keeps the broker
+# token on the VPS. It runs automatically when the archive-import contract changes and can
+# also be started manually after a failed or interrupted bootstrap.
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
       - .github/workflows/bootstrap-history-2025.yml
+      - src/history-import.ts
+      - src/history/**
+      - src/scanner/intraday-universe.ts
+      - src/tbank/history-client.ts
 
 permissions:
   contents: read
