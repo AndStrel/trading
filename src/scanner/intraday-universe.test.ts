@@ -57,21 +57,21 @@ describe('TInvestIntradayUniverseProvider', () => {
     expect(second).toBe(first);
   });
 
-  it('keeps explicit instruments only when legacy watchlist mode is selected', async () => {
+  it('resolves explicit watchlist UIDs to FIGIs before importing history', async () => {
     const config = loadConfig({
       T_INVEST_INTRADAY_UNIVERSE: 'watchlist',
       T_INVEST_INTRADAY_WATCHLIST:
         '[{"instrumentId":"sber-id","label":"SBER","lotSize":10,"priceStep":0.01}]',
     });
     const provider = new TInvestIntradayUniverseProvider(config, {
-      getShares: async () => {
-        throw new Error('must not request API instrument list in watchlist mode');
-      },
+      getShares: async () => ({
+        instruments: [{ uid: 'sber-id', figi: 'BBG004730N88' }],
+      }),
     });
 
     await expect(provider.getSnapshot(new Date())).resolves.toMatchObject({
       source: 'watchlist',
-      instruments: [expect.objectContaining({ instrumentId: 'sber-id', ticker: 'SBER' })],
+      instruments: [expect.objectContaining({ instrumentId: 'sber-id', ticker: 'SBER', figi: 'BBG004730N88' })],
     });
   });
 });

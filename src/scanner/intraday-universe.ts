@@ -121,16 +121,32 @@ function toResolvedInstrument(share: SharePayload): ResolvedIntradayInstrument |
   };
 }
 
-function watchlistSnapshot(config: AppConfig, now: Date): IntradayUniverseSnapshot {
+async function watchlistSnapshot(
+  config: AppConfig,
+  now: Date,
+  client: Pick<TInvestClient, 'getShares'>,
+): Promise<IntradayUniverseSnapshot> {
+  const shares = parseShares(await client.getShares());
+  const figiByUid = new Map<string, string>();
+  for (const share of shares) {
+    const uid = typeof share.uid === 'string' ? share.uid.trim() : '';
+    const figi = typeof share.figi === 'string' ? share.figi.trim() : '';
+    if (uid && figi) figiByUid.set(uid, figi);
+  }
+  const requestedTickers = config.scanner.intradayWatchlist.map((item) => item.label ?? item.instrumentId);
+  const instruments = config.scanner.intradayWatchlist
+    .map((item) => {
+      const figi = figiByUid.get(item.instrumentId);
+      return figi ? { ...item, ticker: item.label ?? item.instrumentId, figi } : null;
+    })
+    .filter((instrument): instrument is NonNullable<typeof instrument> => instrument !== null);
+  const presentTickers = new Set(instruments.map((instrument) => instrument.label ?? instrument.instrumentId));
   return {
     source: 'watchlist',
     refreshedAt: now.toISOString(),
-    requestedTickers: config.scanner.intradayWatchlist.map((item) => item.label ?? item.instrumentId),
-    missingTickers: [],
-    instruments: config.scanner.intradayWatchlist.map((item) => ({
-      ...item,
-      ticker: item.label ?? item.instrumentId,
-    })),
+    requestedTickers,
+    missingTickers: requestedTickers.filter((ticker) => !presentTickers.has(ticker)),
+    instruments,
   };
 }
 
@@ -144,7 +160,7 @@ export class TInvestIntradayUniverseProvider implements IntradayUniverseProvider
 
   async getSnapshot(now: Date): Promise<IntradayUniverseSnapshot> {
     if (this.config.scanner.universeMode === 'watchlist') {
-      return watchlistSnapshot(this.config, now);
+      return watchlistSnapshot(this.config, now, this.client);
     }
 
     const refreshAgeMs = this.config.scanner.universeRefreshMinutes * 60_000;

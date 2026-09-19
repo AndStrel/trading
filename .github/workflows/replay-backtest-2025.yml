@@ -65,10 +65,12 @@ jobs:
               cd "$deployment_path"
               git fetch --depth=1 origin main
               git checkout --detach origin/main
+              source_commit="$(git rev-parse HEAD)"
               chmod 600 .env
               docker compose up -d --build --remove-orphans
 
               docker compose run --rm --no-deps telegram-service \
+                -e REPLAY_SOURCE_COMMIT="$source_commit" \
                 sh -ceu '
                   umask 077
                   report_path="/app/data/backtests/replay-2025-liquid-20.json"
@@ -88,6 +90,7 @@ jobs:
                   console.log(JSON.stringify({
                     reportPath: "/app/data/backtests/replay-2025-liquid-20.json",
                     year: replay.year,
+                    sourceCommit: replay.sourceCommit,
                     requestedTickers: replay.requestedTickers,
                     phases: replay.report.phases.map((phase) => ({
                       phase: phase.phase.id,

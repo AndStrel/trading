@@ -202,6 +202,7 @@ async function main(): Promise<void> {
       status: 'ok',
       year: options.year,
       requestedTickers,
+      sourceCommit: process.env.REPLAY_SOURCE_COMMIT?.trim() || process.env.GITHUB_SHA?.trim() || null,
       archives,
       report,
     }),

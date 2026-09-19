@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import type { HistoricalMinuteCandle } from '../history/market-data-store.js';
 import {
   DEFAULT_REPLAY_PARAMETERS,
+  roundDownToStep,
+  roundUpToStep,
   replayVwapPullback,
   type ReplayParameters,
 } from './replay.js';
@@ -85,6 +87,12 @@ function syntheticArchive(): HistoricalMinuteCandle[] {
 }
 
 describe('replayVwapPullback', () => {
+  it('keeps mathematically exact tick boundaries stable despite binary floating point', () => {
+    expect(roundDownToStep(2.4000000000000004, 0.1)).toBe(2.4);
+    expect(roundUpToStep(2.4000000000000004, 0.1)).toBe(2.4);
+    expect(roundDownToStep(2.3999999999999995, 0.1)).toBe(2.4);
+    expect(roundUpToStep(2.3999999999999995, 0.1)).toBe(2.4);
+  });
   it('enters only at the following minute open and subtracts adverse slippage and both commissions', () => {
     const report = replayVwapPullback({
       instruments: [{ instrument, candles: syntheticArchive() }],

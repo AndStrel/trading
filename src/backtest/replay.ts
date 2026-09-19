@@ -457,12 +457,20 @@ function averageTrueRange(
   return average(ranges);
 }
 
-function roundDownToStep(value: number, step: number): number {
-  return Math.floor((value + Number.EPSILON) / step) * step;
+function normalizeTickPrice(ticks: number, step: number): number {
+  return Number((ticks * step).toPrecision(15));
 }
 
-function roundUpToStep(value: number, step: number): number {
-  return Math.ceil((value - Number.EPSILON) / step) * step;
+export function roundDownToStep(value: number, step: number): number {
+  const quotient = value / step;
+  const tolerance = Number.EPSILON * Math.max(1, Math.abs(quotient)) * 8;
+  return normalizeTickPrice(Math.floor(quotient + tolerance), step);
+}
+
+export function roundUpToStep(value: number, step: number): number {
+  const quotient = value / step;
+  const tolerance = Number.EPSILON * Math.max(1, Math.abs(quotient)) * 8;
+  return normalizeTickPrice(Math.ceil(quotient - tolerance), step);
 }
 
 function volumeReference(history: Map<number, number[]>, minuteOfDay: number): number | null {
