@@ -1,0 +1,94 @@
+import { strToU8, zipSync } from 'fflate';
+import { describe, expect, it } from 'vitest';
+
+import { archiveSha256, parseHistoryMinuteArchive } from './history-archive.js';
+
+function archive(csv: string): Uint8Array {
+  return zipSync({ 'candles.csv': strToU8(csv) });
+}
+
+function multiFileArchive(files: Record<string, string>): Uint8Array {
+  return zipSync(Object.fromEntries(Object.entries(files).map(([name, contents]) => [name, strToU8(contents)])));
+}
+
+describe('parseHistoryMinuteArchive', () => {
+  it('parses a T-Invest minute archive, normalizes time and rejects invalid rows', () => {
+    const parsed = parseHistoryMinuteArchive(
+      archive(`UID;UTC;open;close;high;low;volume\nuid-1;2025-01-02 07:00:00;100,00;100,50;101,00;99,00;20\nuid-1;2025-01-02T07:01:00Z;100,50;101,50;102,00;100,00;30\nother-uid;2025-01-02T07:02:00Z;100;101;102;99;1\nuid-1;2025-01-02T07:03:00Z;100;103;102;99;1\n`),
+      { instrumentId: 'uid-1', year: 2025 },
+    );
+
+    expect(parsed).toEqual({
+      candles: [
+        {
+          instrumentId: 'uid-1',
+          time: '2025-01-02T07:00:00.000Z',
+          open: 100,
+          high: 101,
+          low: 99,
+          close: 100.5,
+          volume: 20,
+        },
+        {
+          instrumentId: 'uid-1',
+          time: '2025-01-02T07:01:00.000Z',
+          open: 100.5,
+          high: 102,
+          low: 100,
+          close: 101.5,
+          volume: 30,
+        },
+      ],
+      rawRowCount: 4,
+      invalidRowCount: 2,
+      duplicateRowCount: 0,
+    });
+  });
+
+  it('keeps the last occurrence of a duplicate timestamp and reports it', () => {
+    const parsed = parseHistoryMinuteArchive(
+      archive(`UID,UTC,open,close,high,low,volume\nuid-1,2025-01-02T07:00:00Z,100,100,101,99,20\nuid-1,2025-01-02T07:00:00Z,100,100.7,101,99,22\n`),
+      { instrumentId: 'uid-1', year: 2025 },
+    );
+
+    expect(parsed.duplicateRowCount).toBe(1);
+    expect(parsed.candles).toEqual([
+      {
+        instrumentId: 'uid-1',
+        time: '2025-01-02T07:00:00.000Z',
+        open: 100,
+        high: 101,
+        low: 99,
+        close: 100.7,
+        volume: 22,
+      },
+    ]);
+  });
+
+  it('refuses an archive that does not have the documented columns', () => {
+    expect(() =>
+      parseHistoryMinuteArchive(archive('UID,UTC,close\nuid-1,2025-01-02T07:00:00Z,100\n'), {
+        instrumentId: 'uid-1',
+        year: 2025,
+      }),
+    ).toThrow('missing open column');
+  });
+
+  it('refuses an archive with files other than its one candle CSV', () => {
+    expect(() =>
+      parseHistoryMinuteArchive(
+        multiFileArchive({
+          'candles.csv': 'UID,UTC,open,close,high,low,volume\nuid-1,2025-01-02T07:00:00Z,100,100,101,99,20\n',
+          'notes.txt': 'not market data',
+        }),
+        { instrumentId: 'uid-1', year: 2025 },
+      ),
+    ).toThrow('must not contain files other than its CSV');
+  });
+
+  it('creates a stable archive checksum for import provenance', () => {
+    const bytes = archive('UID,UTC,open,close,high,low,volume\n');
+    expect(archiveSha256(bytes)).toMatch(/^[a-f0-9]{64}$/);
+    expect(archiveSha256(bytes)).toBe(archiveSha256(bytes));
+  });
+});

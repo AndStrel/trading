@@ -9,6 +9,7 @@ services:
       - .env
     environment:
       T_INVEST_JOURNAL_PATH: /app/data/journal.sqlite
+      T_INVEST_MARKET_DATA_PATH: /app/data/market-data.sqlite
     volumes:
       - trading-journal:/app/data
     restart: unless-stopped

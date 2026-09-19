@@ -7,6 +7,8 @@ describe('loadConfig', () => {
     const config = loadConfig({});
 
     expect(config.journalPath).toBe('.trading/journal.sqlite');
+    expect(config.marketDataPath).toBe('.trading/market-data.sqlite');
+    expect(config.historyDataUrl).toBe('https://invest-public-api.tbank.ru/history-data');
     expect(config.scanner.intervalSeconds).toBe(300);
     expect(config.scanner.slippageRate).toBe(0.0005);
     expect(config.scanner.universeMode).toBe('moex-liquid');
@@ -73,6 +75,12 @@ describe('loadConfig', () => {
   it('rejects malformed Telegram chat IDs', () => {
     expect(() => loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: 'not-a-chat-id' })).toThrow(
       'TELEGRAM_ALLOWED_CHAT_IDS',
+    );
+  });
+
+  it('requires an HTTPS history archive endpoint', () => {
+    expect(() => loadConfig({ T_INVEST_HISTORY_DATA_URL: 'http://example.test/history-data' })).toThrow(
+      'T_INVEST_HISTORY_DATA_URL',
     );
   });
 

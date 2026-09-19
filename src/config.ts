@@ -56,9 +56,11 @@ export type StrategyLimits = {
 export type AppConfig = {
   token?: string;
   baseUrl: string;
+  historyDataUrl: string;
   transport: TInvestTransport;
   commissionRate: number;
   journalPath: string;
+  marketDataPath: string;
   scanner: ScannerConfig;
   telegram: TelegramConfig;
   execution: ExecutionConfig;
@@ -118,9 +120,15 @@ function parseTelegramAllowedChatIds(raw: string): string[] {
 const envSchema = z.object({
   T_INVEST_TOKEN: optionalNonEmpty,
   T_INVEST_BASE_URL: z.string().url().default('https://invest-public-api.tbank.ru/rest'),
+  T_INVEST_HISTORY_DATA_URL: z
+    .string()
+    .url()
+    .refine((value) => new URL(value).protocol === 'https:', 'T_INVEST_HISTORY_DATA_URL must use HTTPS')
+    .default('https://invest-public-api.tbank.ru/history-data'),
   T_INVEST_TRANSPORT: z.enum(['fetch', 'system-curl']).default('fetch'),
   T_INVEST_COMMISSION_RATE: z.coerce.number().min(0).max(0.1).default(0.0005),
   T_INVEST_JOURNAL_PATH: z.string().trim().min(1).default('.trading/journal.sqlite'),
+  T_INVEST_MARKET_DATA_PATH: z.string().trim().min(1).default('.trading/market-data.sqlite'),
   T_INVEST_INTRADAY_WATCHLIST: z.string().default('[]'),
   T_INVEST_INTRADAY_UNIVERSE: z.enum(['moex-liquid', 'watchlist']).default('moex-liquid'),
   T_INVEST_INTRADAY_UNIVERSE_TICKERS: z.string().default(''),
@@ -165,9 +173,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   return {
     ...(parsed.T_INVEST_TOKEN ? { token: parsed.T_INVEST_TOKEN } : {}),
     baseUrl: parsed.T_INVEST_BASE_URL.replace(/\/$/, ''),
+    historyDataUrl: parsed.T_INVEST_HISTORY_DATA_URL,
     transport: parsed.T_INVEST_TRANSPORT,
     commissionRate: parsed.T_INVEST_COMMISSION_RATE,
     journalPath: parsed.T_INVEST_JOURNAL_PATH,
+    marketDataPath: parsed.T_INVEST_MARKET_DATA_PATH,
     scanner: {
       intervalSeconds: parsed.T_INVEST_SCANNER_INTERVAL_SECONDS,
       lookbackMinutes: parsed.T_INVEST_SCANNER_LOOKBACK_MINUTES,

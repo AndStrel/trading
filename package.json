@@ -16,6 +16,7 @@
     "smoke:tinvest": "node --env-file=.env dist/smoke.js",
     "smoke:tinvest:ci": "node dist/smoke.js",
     "scan:intraday": "node --env-file=.env dist/intraday-scanner.js",
+    "history:import": "node --env-file=.env dist/history-import.js",
     "service:telegram": "node --env-file=.env dist/telegram-service.js",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -23,6 +24,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
+    "fflate": "0.8.2",
     "zod": "^4.6.5"
   },
   "devDependencies": {
