@@ -68,18 +68,18 @@ jobs:
               chmod 600 .env
               docker compose up -d --build --remove-orphans
 
-              report_path="/app/data/backtests/replay-2025-liquid-20.json"
-              report_tmp="${report_path}.tmp.$$"
-              trap 'rm -f "$report_tmp"' EXIT
               docker compose run --rm --no-deps telegram-service \
-                sh -ceu "
+                sh -ceu '
                   umask 077
+                  report_path="/app/data/backtests/replay-2025-liquid-20.json"
+                  report_tmp="${report_path}.tmp.$$"
+                  trap "rm -f \"$report_tmp\"" EXIT
                   mkdir -p /app/data/backtests
-                  node dist/backtest-replay.js --year 2025 > '$report_tmp'
-                  test -s '$report_tmp'
-                "
-              mv -f "$report_tmp" "$report_path"
-              trap - EXIT
+                  node dist/backtest-replay.js --year 2025 > "$report_tmp"
+                  test -s "$report_tmp"
+                  mv -f "$report_tmp" "$report_path"
+                  trap - EXIT
+                '
 
               docker compose run --rm --no-deps telegram-service \
                 node --input-type=module -e '
