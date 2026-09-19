@@ -13,6 +13,7 @@ describe('parseReplayArgs', () => {
   });
 
   it('does not accept accidental parameter searches through repeatable years', () => {
+    expect(() => parseReplayArgs(['--year', '2014'])).toThrow('from 2015');
     expect(() => parseReplayArgs(['--year', '2025', '--year', '2024'])).toThrow('--year may be provided only once');
     expect(() => parseReplayArgs(['--ticker', 'SBER;GAZP'])).toThrow('--ticker');
     expect(() => parseReplayArgs(['--year', String(new Date().getUTCFullYear())])).toThrow('--year');

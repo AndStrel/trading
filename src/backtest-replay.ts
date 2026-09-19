@@ -4,6 +4,7 @@ import { loadConfig } from './config.js';
 import {
   DEFAULT_REPLAY_PARAMETERS,
   DEFAULT_REPLAY_PHASES,
+  MIN_SUPPORTED_REPLAY_YEAR,
   replayVwapPullback,
   type ReplayInstrument,
 } from './backtest/replay.js';
@@ -31,8 +32,8 @@ dropping a requested ticker that lacks an imported archive.`;
 function parseYear(value: string): number {
   const year = Number(value.trim());
   const latestCompleteYear = new Date().getUTCFullYear() - 1;
-  if (!Number.isInteger(year) || year < 2000 || year > latestCompleteYear) {
-    throw new Error(`--year must be an integer from 2000 through ${latestCompleteYear}`);
+  if (!Number.isInteger(year) || year < MIN_SUPPORTED_REPLAY_YEAR || year > latestCompleteYear) {
+    throw new Error(`--year must be an integer from ${MIN_SUPPORTED_REPLAY_YEAR} through ${latestCompleteYear}`);
   }
   return year;
 }

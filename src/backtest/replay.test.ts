@@ -145,6 +145,26 @@ describe('replayVwapPullback', () => {
     expect(trade.exitFillPrice).toBeLessThan(stopPrice);
   });
 
+  it('honors a target reached at the candle open before a later stop touch', () => {
+    const baseline = replayVwapPullback({
+      instruments: [{ instrument, candles: syntheticArchive() }],
+      phases: [{ id: 'out_of_sample', label: 'synthetic holdout', from: '2025-01-21', to: '2025-01-21' }],
+      parameters: replayParameters(),
+    });
+    const baselineTrade = baseline.phases[0]!.trades[0]!;
+    const candles = syntheticArchive();
+    const index = candles.findIndex((candle) => candle.time === '2025-01-21T11:16:00.000Z');
+    candles[index] = { ...candles[index]!, open: baselineTrade.targetPrice + 1, high: baselineTrade.targetPrice + 1, low: baselineTrade.stopPrice - 10, close: baselineTrade.targetPrice };
+
+    const report = replayVwapPullback({
+      instruments: [{ instrument, candles }],
+      phases: [{ id: 'out_of_sample', label: 'synthetic holdout', from: '2025-01-21', to: '2025-01-21' }],
+      parameters: replayParameters(),
+    });
+    expect(report.phases[0]!.trades[0]!.exitReason).toBe('target');
+    expect(report.phases[0]!.trades[0]!.exitMarketPrice).toBe(baselineTrade.targetPrice);
+  });
+
   it('exits a data gap at the next observable open rather than the prior close', () => {
     const candles = syntheticArchive().filter((candle) => candle.time !== '2025-01-21T11:16:00.000Z');
     const nextCandleIndex = candles.findIndex((candle) => candle.time === '2025-01-21T11:17:00.000Z');

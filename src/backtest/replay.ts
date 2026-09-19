@@ -239,6 +239,7 @@ type ActivePosition = {
 const MINUTE_MS = 60_000;
 const FIVE_MINUTE_MS = 5 * MINUTE_MS;
 const MOSCOW_OFFSET_MS = 3 * 60 * MINUTE_MS;
+export const MIN_SUPPORTED_REPLAY_YEAR = 2015;
 
 function round(value: number, decimals = 2): number {
   const multiplier = 10 ** decimals;
@@ -333,6 +334,12 @@ function prepareMinutes(candles: HistoricalMinuteCandle[], instrumentId: string)
     const epochMs = Date.parse(candle.time);
     if (!Number.isFinite(epochMs) || epochMs % MINUTE_MS !== 0) {
       throw new Error(`Historical candle timestamp is invalid for ${instrumentId}`);
+    }
+    if (new Date(epochMs).getUTCFullYear() < MIN_SUPPORTED_REPLAY_YEAR) {
+      throw new Error(
+        `Historical replay supports years from ${MIN_SUPPORTED_REPLAY_YEAR}; ` +
+          'older archives require historical Europe/Moscow timezone rules',
+      );
     }
     const moscow = moscowParts(epochMs);
     return { ...candle, epochMs, sessionDate: moscow.date, minuteOfDayMoscow: moscow.minuteOfDay };
@@ -512,6 +519,12 @@ function simulateExit(input: {
 
     const stopTouched = candle.low <= input.stopPrice;
     const targetTouched = candle.high >= input.targetPrice;
+    if (candle.open >= input.targetPrice) {
+      return { exitAt: candle.time, exitReason: 'target', exitMarketPrice: input.targetPrice };
+    }
+    if (candle.open <= input.stopPrice) {
+      return { exitAt: candle.time, exitReason: 'stop', exitMarketPrice: candle.open };
+    }
     // OHLC does not reveal the intrabar path. If both levels were touched in one minute,
     // deliberately assume the adverse stop happened first. This keeps the replay conservative.
     if (stopTouched) {
