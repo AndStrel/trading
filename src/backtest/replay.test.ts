@@ -274,6 +274,31 @@ describe('replayVwapPullback', () => {
     expect(firstOrder.phases[0]!.realizedMaxDrawdownRub).toBe(reversedOrder.phases[0]!.realizedMaxDrawdownRub);
   });
 
+  it('does not truncate the phase when an incomplete candidate fails portfolio constraints', () => {
+    const blockedInstrument = { ...instrument, instrumentId: 'blocked-instrument', ticker: 'ZZZ' };
+    const blockedCandles = syntheticArchive().map((candle) => ({
+      ...candle,
+      instrumentId: blockedInstrument.instrumentId,
+      ...(candle.time >= '2025-01-21T11:15:00.000Z'
+        ? { open: 124, high: 124, low: 124, close: 124 }
+        : {}),
+    }));
+    const parameters = { ...replayParameters(), maxConcurrentPositions: 1 };
+
+    const report = replayVwapPullback({
+      instruments: [
+        { instrument, candles: syntheticArchive() },
+        { instrument: blockedInstrument, candles: blockedCandles },
+      ],
+      phases: [{ id: 'out_of_sample', label: 'synthetic holdout', from: '2025-01-21', to: '2025-01-21' }],
+      parameters,
+    });
+
+    expect(report.phases[0]!.incompleteDataTradeCount).toBe(1);
+    expect(report.phases[0]!.portfolioTruncatedAt).toBeNull();
+    expect(report.phases[0]!.executedTradeCount).toBe(1);
+  });
+
   it('rejects duplicate minute timestamps instead of silently choosing a price', () => {
     const candles = syntheticArchive();
     candles.push({ ...candles[0]! });

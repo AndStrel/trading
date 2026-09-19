@@ -221,10 +221,12 @@ type Candidate = {
   exitMarketPrice: number;
 };
 
+type IncompleteCandidate = Omit<Candidate, 'exitAt' | 'exitReason' | 'exitMarketPrice'>;
+
 type CandidateBuildResult = {
   candidates: Candidate[];
   rejectedPlanSessionDates: string[];
-  incompleteCandidates: Array<{ sessionDate: string; entryAt: string }>;
+  incompleteCandidates: IncompleteCandidate[];
   missingEntrySessionDates: string[];
 };
 
@@ -561,7 +563,7 @@ function buildCandidates(
   const historicalVolumes = new Map<number, number[]>();
   const candidates: Candidate[] = [];
   const rejectedPlanSessionDates: string[] = [];
-  const incompleteCandidates: Array<{ sessionDate: string; entryAt: string }> = [];
+  const incompleteCandidates: IncompleteCandidate[] = [];
   const missingEntrySessionDates: string[] = [];
   let resetGlobalClosesAtSessionStart = false;
 
@@ -697,26 +699,29 @@ function buildCandidates(
         targetPrice,
         parameters,
       });
-      if (!exit) {
-        incompleteCandidates.push({ sessionDate: bar.sessionDate, entryAt: entryCandle.time });
-        previousVwap = vwap;
-        continue;
-      }
-
-      candidates.push({
+      const candidateBase: IncompleteCandidate = {
         ticker: instrument.ticker,
         instrumentId: instrument.instrumentId,
         sessionDate: bar.sessionDate,
         signalAt: bar.endAt,
         entryAt: entryCandle.time,
-        exitAt: exit.exitAt,
-        exitReason: exit.exitReason,
         lotSize: instrument.lotSize,
         lots: plan.lots,
         units: plan.units,
         entryMarketPrice,
         stopPrice,
         targetPrice,
+      };
+      if (!exit) {
+        incompleteCandidates.push(candidateBase);
+        previousVwap = vwap;
+        continue;
+      }
+
+      candidates.push({
+        ...candidateBase,
+        exitAt: exit.exitAt,
+        exitReason: exit.exitReason,
         exitMarketPrice: exit.exitMarketPrice,
       });
       previousVwap = vwap;
@@ -779,6 +784,16 @@ function materializeTrade(candidate: Candidate, parameters: ReplayParameters): {
   };
 }
 
+function entryDebitForCandidate(
+  candidate: Pick<Candidate, 'entryMarketPrice' | 'units'>,
+  parameters: ReplayParameters,
+): number {
+  const entryFillPrice = candidate.entryMarketPrice * (1 + parameters.slippageRate);
+  const entryNotionalRub = round(entryFillPrice * candidate.units);
+  const entryCommissionRub = round(entryNotionalRub * parameters.commissionRate);
+  return round(entryNotionalRub + entryCommissionRub);
+}
+
 function emptySkippedCandidates(): ReplaySkippedCandidates {
   return {
     invalidTradePlan: 0,
@@ -797,23 +812,29 @@ function summarizePhase(
   phase: ReplayPhase,
   candidates: Candidate[],
   rejectedPlanSessionDates: readonly string[],
-  incompleteCandidates: readonly { sessionDate: string; entryAt: string }[],
+  incompleteCandidates: readonly IncompleteCandidate[],
   missingEntrySessionDates: readonly string[],
   parameters: ReplayParameters,
 ): ReplayPhaseReport {
   const phaseIncompleteCandidates = incompleteCandidates
     .filter((candidate) => candidate.sessionDate >= phase.from && candidate.sessionDate <= phase.to)
     .sort((left, right) => left.entryAt.localeCompare(right.entryAt));
-  const portfolioTruncatedAt = phaseIncompleteCandidates[0]?.entryAt ?? null;
   const allPhaseCandidates = candidates.filter((candidate) => inPhase(candidate, phase));
-  const phaseCandidates = allPhaseCandidates
-    // An unresolved position has unknown cash/slot lifetime. Do not schedule any later
-    // candidate, and do not let same-minute ticker ordering decide the result.
-    .filter((candidate) => portfolioTruncatedAt === null || candidate.entryAt < portfolioTruncatedAt)
-    .sort(
-      (left, right) =>
-        left.entryAt.localeCompare(right.entryAt) || left.ticker.localeCompare(right.ticker),
-    );
+  const phaseCandidates = allPhaseCandidates.sort(
+    (left, right) => left.entryAt.localeCompare(right.entryAt) || left.ticker.localeCompare(right.ticker),
+  );
+  const portfolioEvents: Array<
+    | { kind: 'complete'; candidate: Candidate }
+    | { kind: 'incomplete'; candidate: IncompleteCandidate }
+  > = [
+    ...phaseCandidates.map((candidate) => ({ kind: 'complete' as const, candidate })),
+    ...phaseIncompleteCandidates.map((candidate) => ({ kind: 'incomplete' as const, candidate })),
+  ].sort(
+    (left, right) =>
+      left.candidate.entryAt.localeCompare(right.candidate.entryAt) ||
+      left.candidate.ticker.localeCompare(right.candidate.ticker) ||
+      left.kind.localeCompare(right.kind),
+  );
   const skipped = emptySkippedCandidates();
   skipped.invalidTradePlan = rejectedPlanSessionDates.filter(
     (sessionDate) => sessionDate >= phase.from && sessionDate <= phase.to,
@@ -826,6 +847,7 @@ function summarizePhase(
   const trades: ReplayTrade[] = [];
   const tradedSessions = new Set<string>();
   let availableCash = parameters.startingCapitalRub;
+  let portfolioTruncatedAt: string | null = null;
 
   const settleBefore = (entryAt: string): void => {
     const settled = active.filter((position) => position.candidate.exitAt < entryAt);
@@ -837,7 +859,8 @@ function summarizePhase(
     }
   };
 
-  for (const candidate of phaseCandidates) {
+  for (const event of portfolioEvents) {
+    const candidate = event.candidate;
     settleBefore(candidate.entryAt);
     const sessionKey = `${candidate.ticker}:${candidate.sessionDate}`;
     if (tradedSessions.has(sessionKey)) {
@@ -853,14 +876,23 @@ function summarizePhase(
       continue;
     }
 
-    const materialized = materializeTrade(candidate, parameters);
-    if (materialized.entryDebitRub > availableCash + 1e-8) {
+    const entryDebitRub = entryDebitForCandidate(candidate, parameters);
+    if (entryDebitRub > availableCash + 1e-8) {
       skipped.insufficientCash += 1;
       continue;
     }
+    if (event.kind === 'incomplete') {
+      // This candidate passed the same portfolio constraints as an executable trade, but its
+      // exit is unknowable. Stop the phase here instead of allowing later trades to use future
+      // knowledge or cash that may still be locked in this position.
+      portfolioTruncatedAt = candidate.entryAt;
+      break;
+    }
+    const completeCandidate = event.candidate;
+    const materialized = materializeTrade(completeCandidate, parameters);
     availableCash -= materialized.entryDebitRub;
     active.push({
-      candidate,
+      candidate: completeCandidate,
       trade: materialized.trade,
       releaseCashRub: materialized.releaseCashRub,
     });
@@ -937,7 +969,9 @@ function summarizePhase(
   }
   if (incompleteDataTradeCount > 0) {
     warnings.push(
-      `${incompleteDataTradeCount} approved signal(s) were excluded because the archive had no observable terminal exit; portfolio scheduling stops at ${portfolioTruncatedAt}`,
+      portfolioTruncatedAt === null
+        ? `${incompleteDataTradeCount} approved signal(s) had no observable terminal exit but were rejected by portfolio constraints`
+        : `${incompleteDataTradeCount} approved signal(s) had no observable terminal exit; portfolio scheduling stops at ${portfolioTruncatedAt}`,
     );
   }
   if (missingEntryDataCount > 0) {
@@ -988,9 +1022,8 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
   const seenInstrumentIds = new Set<string>();
   const allCandidates: Candidate[] = [];
   const rejectedPlanSessionDates: string[] = [];
-  const incompleteCandidates: Array<{ sessionDate: string; entryAt: string }> = [];
+  const incompleteCandidates: IncompleteCandidate[] = [];
   const missingEntrySessionDates: string[] = [];
-  const rejectedTerminalExitSessionDates: string[] = [];
   const data = input.instruments.map(({ instrument, candles }) => {
     if (seenInstrumentIds.has(instrument.instrumentId)) {
       throw new Error(`Replay input contains duplicate instrument ${instrument.instrumentId}`);
