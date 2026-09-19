@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -25,6 +26,8 @@ describe('MarketDataStore', () => {
       instrumentId: 'instrument-uid',
       year: 2025,
       archiveSha256: 'a'.repeat(64),
+      lotSize: 10,
+      priceStep: 0.01,
       rawRowCount: 3,
       invalidRowCount: 1,
       candles: [
@@ -69,6 +72,8 @@ describe('MarketDataStore', () => {
       storedCandleCount: 2,
       rawRowCount: 3,
       invalidRowCount: 1,
+      lotSize: 10,
+      priceStep: 0.01,
     });
     expect(store.getArchiveImport('instrument-uid', 2024)).toBeNull();
     expect(
@@ -104,6 +109,8 @@ describe('MarketDataStore', () => {
     const input = {
       instrumentId: 'instrument-uid',
       year: 2025,
+      lotSize: 10,
+      priceStep: 0.01,
       rawRowCount: 1,
       invalidRowCount: 0,
       candles: [
@@ -136,6 +143,50 @@ describe('MarketDataStore', () => {
     ).toMatchObject([{ close: 100.7, high: 100.7 }]);
   });
 
+  it('migrates legacy archive provenance before storing replay metadata', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'andstrel-market-data-test-'));
+    directories.push(directory);
+    const databasePath = join(directory, 'market-data.sqlite');
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec(`
+      CREATE TABLE historical_archive_imports (
+        instrument_id TEXT NOT NULL,
+        source_year INTEGER NOT NULL CHECK(source_year >= 2000),
+        archive_sha256 TEXT NOT NULL,
+        raw_row_count INTEGER NOT NULL CHECK(raw_row_count >= 0),
+        invalid_row_count INTEGER NOT NULL CHECK(invalid_row_count >= 0),
+        stored_candle_count INTEGER NOT NULL CHECK(stored_candle_count >= 0),
+        imported_at TEXT NOT NULL,
+        PRIMARY KEY (instrument_id, source_year)
+      ) STRICT, WITHOUT ROWID;
+    `);
+    legacy.close();
+
+    const store = new MarketDataStore(databasePath);
+    store.importMinuteArchive({
+      instrumentId: 'instrument-uid',
+      year: 2025,
+      archiveSha256: 'a'.repeat(64),
+      lotSize: 10,
+      priceStep: 0.01,
+      rawRowCount: 1,
+      invalidRowCount: 0,
+      candles: [
+        {
+          instrumentId: 'instrument-uid',
+          time: '2025-01-02T07:00:00.000Z',
+          open: 100,
+          high: 101,
+          low: 99,
+          close: 100,
+          volume: 20,
+        },
+      ],
+    });
+
+    expect(store.getArchiveImport('instrument-uid', 2025)).toMatchObject({ lotSize: 10, priceStep: 0.01 });
+  });
+
   it('removes stale candles when a renewed annual archive no longer contains them', async () => {
     const store = await storeForTest();
     const firstCandle = {
@@ -161,6 +212,8 @@ describe('MarketDataStore', () => {
       instrumentId: 'instrument-uid',
       year: 2025,
       archiveSha256: 'a'.repeat(64),
+      lotSize: 10,
+      priceStep: 0.01,
       rawRowCount: 2,
       invalidRowCount: 0,
       candles: [firstCandle, secondCandle],
@@ -169,6 +222,8 @@ describe('MarketDataStore', () => {
       instrumentId: 'instrument-uid',
       year: 2025,
       archiveSha256: 'b'.repeat(64),
+      lotSize: 10,
+      priceStep: 0.01,
       rawRowCount: 1,
       invalidRowCount: 0,
       candles: [{ ...firstCandle, close: 100.2 }],
@@ -192,6 +247,8 @@ describe('MarketDataStore', () => {
         instrumentId: 'instrument-uid',
         year: 2025,
         archiveSha256: 'a'.repeat(64),
+        lotSize: 10,
+        priceStep: 0.01,
         rawRowCount: 1,
         invalidRowCount: 0,
         candles: [

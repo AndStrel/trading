@@ -16,6 +16,9 @@ export type HistoricalArchiveImport = {
   instrumentId: string;
   year: number;
   archiveSha256: string;
+  /** Instrument properties captured together with the archive for deterministic replay. */
+  lotSize: number;
+  priceStep: number;
   candles: HistoricalMinuteCandle[];
   rawRowCount: number;
   invalidRowCount: number;
@@ -32,6 +35,10 @@ export type HistoricalImportResult = {
 
 export type HistoricalArchiveProvenance = HistoricalImportResult & {
   archiveSha256: string;
+  /** Null only for archives imported before replay metadata was introduced. */
+  lotSize: number | null;
+  /** Null only for archives imported before replay metadata was introduced. */
+  priceStep: number | null;
 };
 
 export type HistoricalCoverage = {
@@ -66,6 +73,8 @@ const schema = `
     raw_row_count INTEGER NOT NULL CHECK(raw_row_count >= 0),
     invalid_row_count INTEGER NOT NULL CHECK(invalid_row_count >= 0),
     stored_candle_count INTEGER NOT NULL CHECK(stored_candle_count >= 0),
+    lot_size INTEGER CHECK(lot_size > 0),
+    price_step REAL CHECK(price_step > 0),
     imported_at TEXT NOT NULL,
     PRIMARY KEY (instrument_id, source_year)
   ) STRICT, WITHOUT ROWID;
@@ -85,11 +94,29 @@ type ArchiveImportRow = {
   stored_candle_count: number | bigint;
   raw_row_count: number | bigint;
   invalid_row_count: number | bigint;
+  lot_size: number | bigint | null;
+  price_step: number | null;
   imported_at: string;
+};
+
+type TableInfoRow = {
+  name: string;
 };
 
 function assertFiniteNumber(value: number, name: string): void {
   if (!Number.isFinite(value)) throw new Error(`${name} must be finite`);
+}
+
+function ensureArchiveMetadataColumns(database: DatabaseSync): void {
+  const columns = new Set(
+    (database.prepare('PRAGMA table_info(historical_archive_imports)').all() as TableInfoRow[]).map((row) => row.name),
+  );
+  if (!columns.has('lot_size')) {
+    database.exec('ALTER TABLE historical_archive_imports ADD COLUMN lot_size INTEGER CHECK(lot_size > 0)');
+  }
+  if (!columns.has('price_step')) {
+    database.exec('ALTER TABLE historical_archive_imports ADD COLUMN price_step REAL CHECK(price_step > 0)');
+  }
 }
 
 function assertCandle(candle: HistoricalMinuteCandle, instrumentId: string): void {
@@ -132,6 +159,11 @@ export class MarketDataStore {
     if (!/^[a-f0-9]{64}$/i.test(input.archiveSha256)) {
       throw new Error('Historical archive SHA-256 is invalid');
     }
+    if (!Number.isInteger(input.lotSize) || input.lotSize <= 0) {
+      throw new Error('Historical archive lot size is invalid');
+    }
+    assertFiniteNumber(input.priceStep, 'Historical archive price step');
+    if (input.priceStep <= 0) throw new Error('Historical archive price step is invalid');
     if (!Number.isSafeInteger(input.rawRowCount) || input.rawRowCount < 0) {
       throw new Error('Historical archive raw row count is invalid');
     }
@@ -162,13 +194,15 @@ export class MarketDataStore {
       const insertImport = database.prepare(
         `INSERT INTO historical_archive_imports (
           instrument_id, source_year, archive_sha256, raw_row_count, invalid_row_count,
-          stored_candle_count, imported_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          stored_candle_count, lot_size, price_step, imported_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(instrument_id, source_year) DO UPDATE SET
           archive_sha256 = excluded.archive_sha256,
           raw_row_count = excluded.raw_row_count,
           invalid_row_count = excluded.invalid_row_count,
           stored_candle_count = excluded.stored_candle_count,
+          lot_size = excluded.lot_size,
+          price_step = excluded.price_step,
           imported_at = excluded.imported_at`,
       );
       const deletePriorArchive = database.prepare(
@@ -203,6 +237,8 @@ export class MarketDataStore {
         input.rawRowCount,
         input.invalidRowCount,
         input.candles.length,
+        input.lotSize,
+        input.priceStep,
         importedAt,
       );
       database.exec('COMMIT');
@@ -277,6 +313,8 @@ export class MarketDataStore {
              stored_candle_count,
              raw_row_count,
              invalid_row_count,
+             lot_size,
+             price_step,
              imported_at
            FROM historical_archive_imports
            WHERE instrument_id = ?
@@ -292,6 +330,8 @@ export class MarketDataStore {
             storedCandleCount: Number(row.stored_candle_count),
             rawRowCount: Number(row.raw_row_count),
             invalidRowCount: Number(row.invalid_row_count),
+            lotSize: row.lot_size === null ? null : Number(row.lot_size),
+            priceStep: row.price_step,
             importedAt: row.imported_at,
           }
         : null;
@@ -346,6 +386,7 @@ export class MarketDataStore {
     chmodSync(this.databasePath, 0o600);
     database.exec('PRAGMA journal_mode = WAL;');
     database.exec(schema);
+    ensureArchiveMetadataColumns(database);
     return database;
   }
 }

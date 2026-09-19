@@ -162,6 +162,8 @@ export type ReplayPhaseReport = {
 export type ReplayReport = {
   strategyId: typeof REPLAY_STRATEGY_ID;
   strategyRules: string[];
+  /** Full validated input set needed to reproduce this report. */
+  parameters: ReplayParameters;
   costModel: {
     commissionRatePerSide: number;
     slippageRatePerSide: number;
@@ -465,7 +467,9 @@ function simulateExit(input: {
       return {
         exitAt: candle.time,
         exitReason: 'stop',
-        exitMarketPrice: Math.min(input.stopPrice, candle.low),
+        // A gap below the stop fills at the opening price. Otherwise the level was crossed
+        // intrabar, so use the stop itself; adverse slippage is applied separately later.
+        exitMarketPrice: candle.open <= input.stopPrice ? candle.open : input.stopPrice,
       };
     }
     if (targetTouched) {
@@ -869,7 +873,8 @@ function summarizePhase(
 }
 
 export function replayVwapPullback(input: ReplayInput): ReplayReport {
-  validateParameters(input.parameters);
+  const parameters = { ...input.parameters };
+  validateParameters(parameters);
   const phases = input.phases ?? DEFAULT_REPLAY_PHASES;
   if (phases.length === 0) throw new Error('At least one replay phase is required');
   for (const phase of phases) {
@@ -886,7 +891,7 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
       throw new Error(`Replay input contains duplicate instrument ${instrument.instrumentId}`);
     }
     seenInstrumentIds.add(instrument.instrumentId);
-    const built = buildCandidates(instrument, candles, input.parameters);
+    const built = buildCandidates(instrument, candles, parameters);
     allCandidates.push(...built.candidates);
     rejectedPlanSessionDates.push(...built.rejectedPlanSessionDates);
     return {
@@ -899,7 +904,7 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
   });
 
   const phaseReports = phases.map((phase) =>
-    summarizePhase(phase, allCandidates, rejectedPlanSessionDates, input.parameters),
+    summarizePhase(phase, allCandidates, rejectedPlanSessionDates, parameters),
   );
   const warnings = [
     'The archive has OHLCV candles, not bid/ask quotes or actual fills; adverse per-side slippage is a model, not a measurement.',
@@ -918,10 +923,11 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
       'Entry is next 1m open; stop uses max(1.5 ATR14, 0.1%); target preserves 2.5R before costs.',
       'When one OHLC minute touches both stop and target, replay assigns the adverse stop first.',
     ],
+    parameters,
     costModel: {
-      commissionRatePerSide: input.parameters.commissionRate,
-      slippageRatePerSide: input.parameters.slippageRate,
-      roundTripCostRate: round(input.parameters.commissionRate * 2 + input.parameters.slippageRate * 2, 6),
+      commissionRatePerSide: parameters.commissionRate,
+      slippageRatePerSide: parameters.slippageRate,
+      roundTripCostRate: round(parameters.commissionRate * 2 + parameters.slippageRate * 2, 6),
     },
     data,
     phases: phaseReports,

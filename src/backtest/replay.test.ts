@@ -100,6 +100,7 @@ describe('replayVwapPullback', () => {
     });
 
     const phase = report.phases[0]!;
+    expect(report.parameters).toEqual(replayParameters());
     expect(phase.executedTradeCount).toBe(1);
     const trade = phase.trades[0]!;
     expect(trade.signalAt).toBe('2025-01-21T11:14:00.000Z');
@@ -112,6 +113,36 @@ describe('replayVwapPullback', () => {
     expect(trade.marketPnlRub).toBeGreaterThan(trade.pnlAfterSlippageRub);
     expect(trade.pnlAfterSlippageRub).toBeGreaterThan(trade.netPnlRub);
     expect(trade.exitReason).toBe('target');
+  });
+
+  it('fills an intrabar stop crossing at the stop price before adverse slippage', () => {
+    const baseline = replayVwapPullback({
+      instruments: [{ instrument, candles: syntheticArchive() }],
+      phases: [{ id: 'out_of_sample', label: 'synthetic holdout', from: '2025-01-21', to: '2025-01-21' }],
+      parameters: replayParameters(),
+    });
+    const stopPrice = baseline.phases[0]!.trades[0]!.stopPrice;
+    const candles = syntheticArchive();
+    const crossingIndex = candles.findIndex((candle) => candle.time === '2025-01-21T11:16:00.000Z');
+    expect(crossingIndex).toBeGreaterThanOrEqual(0);
+    candles[crossingIndex] = {
+      ...candles[crossingIndex]!,
+      open: stopPrice + 1,
+      high: stopPrice + 1,
+      low: stopPrice - 10,
+      close: stopPrice + 0.5,
+    };
+
+    const report = replayVwapPullback({
+      instruments: [{ instrument, candles }],
+      phases: [{ id: 'out_of_sample', label: 'synthetic holdout', from: '2025-01-21', to: '2025-01-21' }],
+      parameters: replayParameters(),
+    });
+    const trade = report.phases[0]!.trades[0]!;
+
+    expect(trade.exitReason).toBe('stop');
+    expect(trade.exitMarketPrice).toBe(stopPrice);
+    expect(trade.exitFillPrice).toBeLessThan(stopPrice);
   });
 
   it('rejects duplicate minute timestamps instead of silently choosing a price', () => {

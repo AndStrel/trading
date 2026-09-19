@@ -123,12 +123,19 @@ async function main(): Promise<void> {
     archiveSha256: string;
     storedCandleCount: number;
     invalidRowCount: number;
+    lotSize: number | null;
+    priceStep: number | null;
     importedAt: string;
   }> = [];
+  const missingArchiveMetadata: string[] = [];
   for (const resolved of snapshot.instruments) {
     const archive = store.getArchiveImport(resolved.instrumentId, options.year);
     if (!archive || archive.storedCandleCount === 0) {
       missingArchives.push(resolved.ticker);
+      continue;
+    }
+    if (archive.lotSize === null || archive.priceStep === null) {
+      missingArchiveMetadata.push(resolved.ticker);
       continue;
     }
     const candles = store.listMinuteCandles({
@@ -144,8 +151,8 @@ async function main(): Promise<void> {
       instrument: {
         instrumentId: resolved.instrumentId,
         ticker: resolved.ticker,
-        lotSize: resolved.lotSize,
-        priceStep: resolved.priceStep,
+        lotSize: archive.lotSize,
+        priceStep: archive.priceStep,
       },
       candles,
     });
@@ -155,6 +162,8 @@ async function main(): Promise<void> {
       archiveSha256: archive.archiveSha256,
       storedCandleCount: archive.storedCandleCount,
       invalidRowCount: archive.invalidRowCount,
+      lotSize: archive.lotSize,
+      priceStep: archive.priceStep,
       importedAt: archive.importedAt,
     });
   }
@@ -162,6 +171,12 @@ async function main(): Promise<void> {
     throw new Error(
       `Historical archive for ${options.year} is missing or empty for: ${missingArchives.join(', ')}. ` +
         'Import the full requested universe before comparing results.',
+    );
+  }
+  if (missingArchiveMetadata.length > 0) {
+    throw new Error(
+      `Historical replay metadata is missing for: ${missingArchiveMetadata.join(', ')}. ` +
+        'Re-import the requested archive so its lot size and price step are captured with the archive.',
     );
   }
 

@@ -116,6 +116,8 @@ async function main(): Promise<void> {
           instrumentId: instrument.instrumentId,
           year,
           archiveSha256: archiveSha256(archive),
+          lotSize: instrument.lotSize,
+          priceStep: instrument.priceStep,
           candles: parsed.candles,
           rawRowCount: parsed.rawRowCount,
           invalidRowCount: parsed.invalidRowCount,
