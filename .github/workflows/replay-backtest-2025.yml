@@ -1,0 +1,96 @@
+name: Replay 2025 historical data
+
+# This is a one-off job. It runs only when this file changes on main, after the archive bootstrap
+# has populated the existing Docker volume. It does not send a token or data archive to GitHub.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/replay-backtest-2025.yml
+
+permissions:
+  contents: read
+
+# Serialize against deploy and archive bootstrap. The remote part also builds the current main
+# image itself, so it is correct regardless of which workflow acquires the lock first.
+concurrency:
+  group: trading-telegram-production
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DEPLOY_HOST: ${{ vars.TRADING_DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.TRADING_DEPLOY_USER }}
+      DEPLOY_PATH: ${{ vars.TRADING_DEPLOY_PATH }}
+      DEPLOY_SSH_KEY: ${{ secrets.TRADING_DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.TRADING_DEPLOY_KNOWN_HOSTS }}
+    steps:
+      - name: Validate deployment configuration
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test "$DEPLOY_PATH" = "/opt/andstrel/trading"
+
+      - name: Configure verified SSH access
+        run: |
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Build current main and replay liquid-20
+        run: |
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+              set -Eeuo pipefail
+
+              deployment_path="/opt/andstrel/trading"
+
+              test -d "$deployment_path/.git"
+              test -f "$deployment_path/.env"
+              command -v git >/dev/null
+              command -v docker >/dev/null
+              docker compose version >/dev/null
+
+              cd "$deployment_path"
+              git fetch --depth=1 origin main
+              git checkout --detach origin/main
+              chmod 600 .env
+              docker compose up -d --build --remove-orphans
+
+              docker compose run --rm --no-deps telegram-service \
+                sh -ceu '
+                  umask 077
+                  mkdir -p /app/data/backtests
+                  node dist/backtest-replay.js --year 2025 > /app/data/backtests/replay-2025-liquid-20.json
+                '
+
+              docker compose run --rm --no-deps telegram-service \
+                node --input-type=module -e '
+                  import { readFile } from "node:fs/promises";
+                  const replay = JSON.parse(await readFile("/app/data/backtests/replay-2025-liquid-20.json", "utf8"));
+                  console.log(JSON.stringify({
+                    reportPath: "/app/data/backtests/replay-2025-liquid-20.json",
+                    year: replay.year,
+                    requestedTickers: replay.requestedTickers,
+                    phases: replay.report.phases.map((phase) => ({
+                      phase: phase.phase.id,
+                      trades: phase.executedTradeCount,
+                      netPnlRub: phase.netPnlRub,
+                      returnPct: phase.returnPct,
+                      profitFactor: phase.profitFactor,
+                      warnings: phase.warnings,
+                    })),
+                  }));
+                '
+          REMOTE

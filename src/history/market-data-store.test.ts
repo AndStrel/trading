@@ -62,6 +62,15 @@ describe('MarketDataStore', () => {
       firstCandleAt: '2025-01-02T07:00:00.000Z',
       lastCandleAt: '2025-01-02T07:01:00.000Z',
     });
+    expect(store.getArchiveImport('instrument-uid', 2025)).toMatchObject({
+      instrumentId: 'instrument-uid',
+      year: 2025,
+      archiveSha256: 'a'.repeat(64),
+      storedCandleCount: 2,
+      rawRowCount: 3,
+      invalidRowCount: 1,
+    });
+    expect(store.getArchiveImport('instrument-uid', 2024)).toBeNull();
     expect(
       store.listMinuteCandles({
         instrumentId: 'instrument-uid',
