@@ -391,8 +391,13 @@ function tailAverage(values: readonly number[], period: number): number | null {
   return values.length < period ? null : average(values.slice(-period));
 }
 
-function averageTrueRange(sessionBars: readonly FiveMinuteBar[], index: number, period = 14): number | null {
-  if (index < period) return null;
+function averageTrueRange(
+  sessionBars: readonly FiveMinuteBar[],
+  index: number,
+  period = 14,
+  segmentStartIndex = 0,
+): number | null {
+  if (index - segmentStartIndex < period) return null;
   const ranges: number[] = [];
   for (let cursor = index - period + 1; cursor <= index; cursor += 1) {
     const current = sessionBars[cursor]!;
@@ -443,6 +448,12 @@ function simulateExit(input: {
   );
   if (forcedExitIndex < input.entryIndex) return null;
 
+  const entry = input.session[input.entryIndex]!;
+  const terminalEpochMs = entry.epochMs + Math.min(
+    input.parameters.maxHoldingMinutes - 1,
+    input.parameters.forceExitMinuteMoscow - entry.minuteOfDayMoscow,
+  ) * MINUTE_MS;
+
   const endIndex = Math.min(
     forcedExitIndex,
     input.entryIndex + input.parameters.maxHoldingMinutes - 1,
@@ -486,6 +497,9 @@ function simulateExit(input: {
   }
 
   const ending = input.session[endIndex]!;
+  // A final stored candle is not proof that the position could be closed there. If the
+  // requested time/session exit is absent, drop the candidate instead of inventing a fill.
+  if (ending.epochMs < terminalEpochMs) return null;
   return {
     exitAt: ending.time,
     exitReason: endIndex === forcedExitIndex ? 'session_exit' : 'time_exit',
@@ -523,11 +537,24 @@ function buildCandidates(
     let cumulativeTypicalVolume = 0;
     let cumulativeVolume = 0;
     let previousVwap: number | null = null;
+    let segmentStartIndex = 0;
     const minuteIndexByEpoch = new Map(session.map((candle, index) => [candle.epochMs, index]));
 
     for (let index = 0; index < bars.length; index += 1) {
       const bar = bars[index]!;
-      const previousBar = index > 0 ? bars[index - 1]! : null;
+      const lastBar = index > 0 ? bars[index - 1]! : null;
+      const hasGapBeforeBar =
+        lastBar !== null && Date.parse(bar.startAt) !== Date.parse(lastBar.startAt) + FIVE_MINUTE_MS;
+      if (hasGapBeforeBar) {
+        // `toFiveMinuteBars` deliberately omits incomplete buckets. Do not let its retained
+        // neighbours become artificial indicator neighbours across that missing interval.
+        segmentStartIndex = index;
+        cumulativeTypicalVolume = 0;
+        cumulativeVolume = 0;
+        previousVwap = null;
+        globalCloses.length = 0;
+      }
+      const previousBar = index > segmentStartIndex ? lastBar : null;
       const typicalPrice = (bar.high + bar.low + bar.close) / 3;
       cumulativeTypicalVolume += typicalPrice * bar.volume;
       cumulativeVolume += bar.volume;
@@ -538,16 +565,16 @@ function buildCandidates(
       globalCloses.push(bar.close);
       const sma20 = tailAverage(globalCloses, 20);
       const sma50 = tailAverage(globalCloses, 50);
-      const atr14 = averageTrueRange(bars, index);
+      const atr14 = averageTrueRange(bars, index, 14, segmentStartIndex);
       const averageTurnover = average(
         bars
-          .slice(Math.max(0, index - 20), index)
+          .slice(Math.max(segmentStartIndex, index - 20), index)
           .map((previous) => previous.volume * previous.close * instrument.lotSize),
       );
 
       const signalReady =
         previousBar !== null &&
-        index >= 20 &&
+        index - segmentStartIndex >= 20 &&
         vwap !== null &&
         sma20 !== null &&
         sma50 !== null &&

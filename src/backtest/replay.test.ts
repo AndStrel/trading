@@ -170,6 +170,41 @@ describe('replayVwapPullback', () => {
     expect(trade.exitFillPrice).toBeLessThan(120);
   });
 
+  it('rejects a position when the archive ends before an observable time or session exit', () => {
+    const candles = syntheticArchive().map((candle) =>
+      candle.time >= '2025-01-21T11:15:00.000Z'
+        ? { ...candle, open: 124, high: 124, low: 124, close: 124 }
+        : candle,
+    );
+
+    const report = replayVwapPullback({
+      instruments: [{ instrument, candles }],
+      phases: [{ id: 'out_of_sample', label: 'synthetic holdout', from: '2025-01-21', to: '2025-01-21' }],
+      parameters: replayParameters(),
+    });
+
+    expect(report.phases[0]!.executedTradeCount).toBe(0);
+  });
+
+  it('resets indicators after an incomplete five-minute bucket', () => {
+    const omittedBucket = new Set([
+      '2025-01-21T07:30:00.000Z',
+      '2025-01-21T07:31:00.000Z',
+      '2025-01-21T07:32:00.000Z',
+      '2025-01-21T07:33:00.000Z',
+      '2025-01-21T07:34:00.000Z',
+    ]);
+    const candles = syntheticArchive().filter((candle) => !omittedBucket.has(candle.time));
+
+    const report = replayVwapPullback({
+      instruments: [{ instrument, candles }],
+      phases: [{ id: 'out_of_sample', label: 'synthetic holdout', from: '2025-01-21', to: '2025-01-21' }],
+      parameters: replayParameters(),
+    });
+
+    expect(report.phases[0]!.executedTradeCount).toBe(0);
+  });
+
   it('rejects duplicate minute timestamps instead of silently choosing a price', () => {
     const candles = syntheticArchive();
     candles.push({ ...candles[0]! });
