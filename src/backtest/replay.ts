@@ -453,9 +453,12 @@ function simulateExit(input: {
     const candle = input.session[index]!;
     if (index > input.entryIndex && candle.epochMs !== previous.epochMs + MINUTE_MS) {
       return {
-        exitAt: previous.time,
+        // A missing minute makes the previous close unobservable as an exit decision.
+        // Close at the first price we can actually observe after the gap; slippage is
+        // still applied by the execution model below.
+        exitAt: candle.time,
         exitReason: 'data_gap',
-        exitMarketPrice: previous.close,
+        exitMarketPrice: candle.open,
       };
     }
 

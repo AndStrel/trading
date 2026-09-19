@@ -145,6 +145,31 @@ describe('replayVwapPullback', () => {
     expect(trade.exitFillPrice).toBeLessThan(stopPrice);
   });
 
+  it('exits a data gap at the next observable open rather than the prior close', () => {
+    const candles = syntheticArchive().filter((candle) => candle.time !== '2025-01-21T11:16:00.000Z');
+    const nextCandleIndex = candles.findIndex((candle) => candle.time === '2025-01-21T11:17:00.000Z');
+    expect(nextCandleIndex).toBeGreaterThanOrEqual(0);
+    candles[nextCandleIndex] = {
+      ...candles[nextCandleIndex]!,
+      open: 120,
+      high: 120,
+      low: 120,
+      close: 120,
+    };
+
+    const report = replayVwapPullback({
+      instruments: [{ instrument, candles }],
+      phases: [{ id: 'out_of_sample', label: 'synthetic holdout', from: '2025-01-21', to: '2025-01-21' }],
+      parameters: replayParameters(),
+    });
+    const trade = report.phases[0]!.trades[0]!;
+
+    expect(trade.exitReason).toBe('data_gap');
+    expect(trade.exitAt).toBe('2025-01-21T11:17:00.000Z');
+    expect(trade.exitMarketPrice).toBe(120);
+    expect(trade.exitFillPrice).toBeLessThan(120);
+  });
+
   it('rejects duplicate minute timestamps instead of silently choosing a price', () => {
     const candles = syntheticArchive();
     candles.push({ ...candles[0]! });

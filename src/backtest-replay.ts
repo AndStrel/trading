@@ -10,9 +10,7 @@ import {
 import { MarketDataStore } from './history/market-data-store.js';
 import {
   DEFAULT_MOEX_LIQUID_TICKERS,
-  TInvestIntradayUniverseProvider,
 } from './scanner/intraday-universe.js';
-import { TInvestClient } from './tbank/client.js';
 
 export const DEFAULT_REPLAY_TICKERS = DEFAULT_MOEX_LIQUID_TICKERS.slice(0, 20);
 
@@ -97,22 +95,6 @@ async function main(): Promise<void> {
 
   const config = loadConfig();
   const requestedTickers = options.tickers.length > 0 ? options.tickers : [...DEFAULT_REPLAY_TICKERS];
-  const universeConfig = {
-    ...config,
-    scanner: {
-      ...config.scanner,
-      universeMode: 'moex-liquid' as const,
-      universeTickers: requestedTickers,
-      maxInstruments: requestedTickers.length,
-    },
-  };
-  const client = new TInvestClient(config.token, config.baseUrl, { transport: config.transport });
-  const snapshot = await new TInvestIntradayUniverseProvider(universeConfig, client).getSnapshot(new Date());
-  if (snapshot.missingTickers.length > 0 || snapshot.instruments.length !== requestedTickers.length) {
-    const missing = snapshot.missingTickers.length > 0 ? snapshot.missingTickers : requestedTickers;
-    throw new Error(`Could not resolve all requested TQBR/RUB instruments: ${missing.join(', ')}`);
-  }
-
   const store = new MarketDataStore(config.marketDataPath);
   const range = archiveRange(options.year);
   const missingArchives: string[] = [];
@@ -128,37 +110,46 @@ async function main(): Promise<void> {
     importedAt: string;
   }> = [];
   const missingArchiveMetadata: string[] = [];
-  for (const resolved of snapshot.instruments) {
-    const archive = store.getArchiveImport(resolved.instrumentId, options.year);
+  const archivesByTicker = new Map<string, ReturnType<MarketDataStore['listArchiveImports']>[number]>();
+  for (const archive of store.listArchiveImports(options.year)) {
+    if (archive.ticker === null) continue;
+    if (archivesByTicker.has(archive.ticker)) {
+      throw new Error(`Historical archive provenance is ambiguous for ticker: ${archive.ticker}`);
+    }
+    archivesByTicker.set(archive.ticker, archive);
+  }
+
+  for (const ticker of requestedTickers) {
+    const archive = archivesByTicker.get(ticker);
     if (!archive || archive.storedCandleCount === 0) {
-      missingArchives.push(resolved.ticker);
+      missingArchives.push(ticker);
       continue;
     }
     if (archive.lotSize === null || archive.priceStep === null) {
-      missingArchiveMetadata.push(resolved.ticker);
+      missingArchiveMetadata.push(ticker);
       continue;
     }
     const candles = store.listMinuteCandles({
-      instrumentId: resolved.instrumentId,
+      instrumentId: archive.instrumentId,
       from: range.from,
       to: range.to,
     });
     if (candles.length === 0) {
-      missingArchives.push(resolved.ticker);
+      missingArchives.push(ticker);
       continue;
     }
     instruments.push({
       instrument: {
-        instrumentId: resolved.instrumentId,
-        ticker: resolved.ticker,
+        instrumentId: archive.instrumentId,
+        ticker,
         lotSize: archive.lotSize,
         priceStep: archive.priceStep,
       },
       candles,
     });
     archives.push({
-      ticker: resolved.ticker,
-      instrumentId: resolved.instrumentId,
+      ticker,
+      instrumentId: archive.instrumentId,
       archiveSha256: archive.archiveSha256,
       storedCandleCount: archive.storedCandleCount,
       invalidRowCount: archive.invalidRowCount,
@@ -170,13 +161,13 @@ async function main(): Promise<void> {
   if (missingArchives.length > 0) {
     throw new Error(
       `Historical archive for ${options.year} is missing or empty for: ${missingArchives.join(', ')}. ` +
-        'Import the full requested universe before comparing results.',
+        'Import the requested ticker with current archive provenance before comparing results.',
     );
   }
   if (missingArchiveMetadata.length > 0) {
     throw new Error(
       `Historical replay metadata is missing for: ${missingArchiveMetadata.join(', ')}. ` +
-        'Re-import the requested archive so its lot size and price step are captured with the archive.',
+        'Re-import the requested archive so its ticker, lot size and price step are captured with the archive.',
     );
   }
 
@@ -210,7 +201,6 @@ async function main(): Promise<void> {
       status: 'ok',
       year: options.year,
       requestedTickers,
-      resolvedAt: snapshot.refreshedAt,
       archives,
       report,
     }),

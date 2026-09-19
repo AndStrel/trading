@@ -114,6 +114,7 @@ async function main(): Promise<void> {
         });
         const imported = store.importMinuteArchive({
           instrumentId: instrument.instrumentId,
+          ticker: instrument.ticker,
           year,
           archiveSha256: archiveSha256(archive),
           lotSize: instrument.lotSize,
