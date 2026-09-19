@@ -74,16 +74,29 @@ describe('parseHistoryMinuteArchive', () => {
     ).toThrow('missing open column');
   });
 
-  it('refuses an archive with files other than its one candle CSV', () => {
+  it('selects the candle CSV and ignores auxiliary external-provider files', () => {
+    const parsed = parseHistoryMinuteArchive(
+      multiFileArchive({
+        'candles.csv': 'UID,UTC,open,close,high,low,volume\nuid-1,2025-01-02T07:00:00Z,100,100,101,99,20\n',
+        'manifest.json': '{"source":"history-data"}',
+        'readme.csv': 'generated_at,description\n2026-09-19,metadata\n',
+      }),
+      { instrumentId: 'uid-1', year: 2025 },
+    );
+
+    expect(parsed.candles).toHaveLength(1);
+  });
+
+  it('refuses an archive with ambiguous candle CSV files', () => {
     expect(() =>
       parseHistoryMinuteArchive(
         multiFileArchive({
-          'candles.csv': 'UID,UTC,open,close,high,low,volume\nuid-1,2025-01-02T07:00:00Z,100,100,101,99,20\n',
-          'notes.txt': 'not market data',
+          'candles-a.csv': 'UID,UTC,open,close,high,low,volume\nuid-1,2025-01-02T07:00:00Z,100,100,101,99,20\n',
+          'candles-b.csv': 'UID,UTC,open,close,high,low,volume\nuid-1,2025-01-02T07:01:00Z,100,100,101,99,20\n',
         }),
         { instrumentId: 'uid-1', year: 2025 },
       ),
-    ).toThrow('must not contain files other than its CSV');
+    ).toThrow('multiple candle CSV files');
   });
 
   it('creates a stable archive checksum for import provenance', () => {

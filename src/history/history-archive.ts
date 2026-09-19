@@ -6,6 +6,8 @@ import type { HistoricalMinuteCandle } from './market-data-store.js';
 
 const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const MAX_CSV_BYTES = 256 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES = 32;
+const MAX_CSV_ENTRIES = 4;
 
 export type ParsedHistoryArchive = {
   candles: HistoricalMinuteCandle[];
@@ -92,6 +94,34 @@ function getColumnIndex(headers: string[], aliases: string[], label: string): nu
   return index;
 }
 
+function isCandleCsv(csv: string): boolean {
+  const header = csv.split(/\r?\n/, 1)[0];
+  if (!header?.trim()) return false;
+
+  try {
+    const delimiter = detectDelimiter(header);
+    const headers = splitCsvLine(header, delimiter);
+    return [
+      ['uid', 'instrumentuid'],
+      ['utc', 'time', 'timestamp'],
+      ['open'],
+      ['close'],
+      ['high'],
+      ['low'],
+      ['volume'],
+    ].every((aliases) => headers.some((value) => aliases.includes(normalizeHeader(value))));
+  } catch {
+    return false;
+  }
+}
+
+function describeEntries(entries: Array<{ name: string; originalSize: number }>): string {
+  if (entries.length === 0) return 'none';
+  return entries
+    .map(({ name, originalSize }) => `${name.replace(/[\r\n\t]/g, ' ')} (${originalSize} bytes)`)
+    .join(', ');
+}
+
 function readCell(row: string[], index: number): string | null {
   const value = row[index];
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -123,20 +153,23 @@ function readCsvFromZip(archive: Uint8Array): string {
 
   let files: Record<string, Uint8Array>;
   const csvEntries: Array<{ name: string; originalSize: number }> = [];
-  const unexpectedEntries: string[] = [];
   let csvExceedsSafetyLimit = false;
+  let archiveExceedsEntryLimit = false;
+  let archiveEntryCount = 0;
   try {
     files = unzipSync(archive, {
-      // Do not decompress arbitrary extra files from an archive. The documented response
-      // contains one CSV; the filter also prevents a ZIP bomb in a rejected entry.
+      // Only CSV candidates are decompressed. Auxiliary files are expected from external
+      // providers and stay untouched, which also prevents a ZIP bomb in those entries.
       filter(file) {
-        if (file.name.endsWith('/')) return false;
-        if (!file.name.toLowerCase().endsWith('.csv')) {
-          unexpectedEntries.push(file.name);
+        archiveEntryCount += 1;
+        if (archiveEntryCount > MAX_ARCHIVE_ENTRIES) {
+          archiveExceedsEntryLimit = true;
           return false;
         }
+        if (file.name.endsWith('/')) return false;
+        if (!file.name.toLowerCase().endsWith('.csv')) return false;
         csvEntries.push({ name: file.name, originalSize: file.originalSize });
-        if (file.originalSize > MAX_CSV_BYTES) {
+        if (csvEntries.length > MAX_CSV_ENTRIES || file.originalSize > MAX_CSV_BYTES) {
           csvExceedsSafetyLimit = true;
           return false;
         }
@@ -148,19 +181,36 @@ function readCsvFromZip(archive: Uint8Array): string {
     throw new Error(`Historical archive ZIP cannot be read: ${detail}`);
   }
 
-  if (csvEntries.length !== 1) {
-    throw new Error('Historical archive must contain exactly one CSV file');
-  }
-  if (unexpectedEntries.length > 0) {
-    throw new Error('Historical archive must not contain files other than its CSV');
-  }
+  if (archiveExceedsEntryLimit) throw new Error(`Historical archive exceeds ${MAX_ARCHIVE_ENTRIES} entry safety limit`);
   if (csvExceedsSafetyLimit) {
-    throw new Error(`Historical archive CSV exceeds ${MAX_CSV_BYTES} byte safety limit`);
+    throw new Error(`Historical archive has too many CSV files or a CSV exceeds ${MAX_CSV_BYTES} byte safety limit`);
+  }
+  if (csvEntries.length === 0) throw new Error('Historical archive does not contain a CSV file');
+
+  if (csvEntries.length === 1) {
+    const entry = csvEntries[0]!;
+    const bytes = files[entry.name];
+    if (!bytes || bytes.byteLength !== entry.originalSize) {
+      throw new Error(`Historical archive CSV cannot be read: ${entry.name}`);
+    }
+    return strFromU8(bytes);
   }
 
-  const entry = csvEntries[0]!;
+  const candleEntries = csvEntries.filter((entry) => {
+    const bytes = files[entry.name];
+    return Boolean(bytes && bytes.byteLength === entry.originalSize && isCandleCsv(strFromU8(bytes)));
+  });
+
+  if (candleEntries.length === 0) {
+    throw new Error(`Historical archive has no candle CSV with required columns; CSV entries: ${describeEntries(csvEntries)}`);
+  }
+  if (candleEntries.length > 1) {
+    throw new Error(`Historical archive has multiple candle CSV files; candidates: ${describeEntries(candleEntries)}`);
+  }
+
+  const entry = candleEntries[0]!;
   const bytes = files[entry.name];
-  if (!bytes || bytes.byteLength !== entry.originalSize) throw new Error('Historical archive CSV cannot be read');
+  if (!bytes || bytes.byteLength !== entry.originalSize) throw new Error(`Historical archive CSV cannot be read: ${entry.name}`);
   return strFromU8(bytes);
 }
 
