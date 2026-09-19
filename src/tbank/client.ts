@@ -193,6 +193,12 @@ export class TInvestClient {
     });
   }
 
+  public async getShares(): Promise<unknown> {
+    return this.post('tinkoff.public.invest.api.contract.v1.InstrumentsService/Shares', {
+      instrumentStatus: 'INSTRUMENT_STATUS_BASE',
+    });
+  }
+
   public async getLastPrices(instrumentIds: string[]): Promise<unknown> {
     return this.post('tinkoff.public.invest.api.contract.v1.MarketDataService/GetLastPrices', {
       instrumentId: instrumentIds,

@@ -79,10 +79,13 @@ function run(command: string, args: string[]): Promise<void> {
 }
 
 export function buildCandidateCardSvg(record: JournalScenarioRecord, config: AppConfig): string {
+  const snapshot = asRecord(record.snapshot);
+  const snapshotInstrument = asRecord(snapshot?.instrument);
+  const snapshotLabel = snapshotInstrument?.label ?? snapshotInstrument?.ticker;
   const instrument =
+    (typeof snapshotLabel === 'string' && snapshotLabel.trim() ? snapshotLabel.trim() : null) ??
     config.scanner.intradayWatchlist.find((item) => item.instrumentId === record.instrumentId)?.label ??
     record.instrumentId;
-  const snapshot = asRecord(record.snapshot);
   const plan = asRecord(snapshot?.tradePlan);
   const market = asRecord(snapshot?.market);
   const candle = asRecord(snapshot?.candleAnalysis);

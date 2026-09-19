@@ -67,6 +67,65 @@ describe('TelegramTradingBot', () => {
     expect(sent[1]?.text).toContain('Сканер: пауза');
   });
 
+  it('returns the last market scan with counts and ranked near-misses', async () => {
+    const journal = createJournal();
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      TELEGRAM_ALLOWED_CHAT_IDS: '42',
+    });
+    const sent: string[] = [];
+    const client: TelegramClient = {
+      getUpdates: async () => [{ update_id: 1, message: { chat: { id: 42 }, text: '/market' } }],
+      sendMessage: async (_chatId, text) => {
+        sent.push(text);
+      },
+      sendPhoto: async () => undefined,
+    };
+    const scanner = {
+      isPaused: () => false,
+      pause: () => undefined,
+      resume: () => undefined,
+      getLatestReport: () => ({
+        observedAt: '2026-09-19T10:00:00.000Z',
+        universe: {
+          source: 'moex-liquid' as const,
+          refreshedAt: '2026-09-19T09:00:00.000Z',
+          requested: 26,
+          active: 25,
+          missingTickers: ['TRNFP'],
+        },
+        scanned: 25,
+        liquid: 22,
+        trendUp: 5,
+        volumeConfirmed: 3,
+        readyForMarketCheck: 2,
+        marketCandidates: 1,
+        recordedCandidates: 1,
+        errors: 0,
+        topRanked: [
+          {
+            ticker: 'SBER',
+            instrumentId: 'sber',
+            score: 87,
+            trend: 'up' as const,
+            relativeVolume: 1.4,
+            averageCandleTurnoverRub: 12_000_000,
+            candidateReady: true,
+            reasons: [],
+          },
+        ],
+      }),
+    };
+    const bot = new TelegramTradingBot(config, client, scanner, journal, () => undefined);
+
+    await bot.pollOnce();
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain('Проверено: 25');
+    expect(sent[0]).toContain('SBER — 87/100');
+    expect(sent[0]).toContain('TRNFP');
+  });
+
   it('sends a rendered candidate card only to authorized chats', async () => {
     const journal = createJournal();
     const config = loadConfig({

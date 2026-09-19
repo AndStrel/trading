@@ -5,7 +5,7 @@ Workflow **Deploy Telegram service** запускается только вру�
 ## Что делает workflow
 
 1. Проверяет обязательные GitHub Secrets и Variables.
-2. Подключается к `root@151.241.228.136` только по SSH-ключу и проверенному `known_hosts`.
+2. Подключается к серверу только по значениям `DEPLOY_HOST` и `DEPLOY_USER`, SSH-ключу и проверенному `known_hosts` из GitHub Secrets.
 3. Клонирует или обновляет проект в `/opt/andstrel/trading`.
 4. Останавливается, если `/opt/andstrel/trading/.env` отсутствует.
 5. Собирает и запускает `docker compose`, не открывая порты.
@@ -20,7 +20,12 @@ Workflow **Deploy Telegram service** запускается только вру�
 T_INVEST_TOKEN=отдельный-read-only-токен
 T_INVEST_TRANSPORT=system-curl
 T_INVEST_JOURNAL_PATH=/app/data/journal.sqlite
-T_INVEST_INTRADAY_WATCHLIST='[{"instrumentId":"e6123145-9665-43e0-8413-cd61b8aa9b13","label":"SBER","lotSize":1,"priceStep":0.01}]'
+T_INVEST_INTRADAY_UNIVERSE=moex-liquid
+T_INVEST_SCANNER_UNIVERSE_REFRESH_MINUTES=1440
+T_INVEST_SCANNER_MAX_INSTRUMENTS=30
+T_INVEST_SCANNER_MAX_CONCURRENT_REQUESTS=2
+T_INVEST_SCANNER_MIN_AVERAGE_CANDLE_TURNOVER_RUB=1000000
+T_INVEST_SCANNER_MAX_CANDIDATES_PER_SCAN=3
 T_INVEST_SCANNER_INTERVAL_SECONDS=300
 T_INVEST_SCANNER_LOOKBACK_MINUTES=360
 T_INVEST_SCANNER_CANDIDATE_COOLDOWN_MINUTES=30

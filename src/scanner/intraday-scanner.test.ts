@@ -48,6 +48,8 @@ describe('IntradayScanner', () => {
   it('records one candidate from a qualifying long setup and then applies cooldown', async () => {
     const config = loadConfig({
       T_INVEST_TOKEN: 'test-token',
+      T_INVEST_INTRADAY_UNIVERSE: 'watchlist',
+      T_INVEST_SCANNER_MIN_AVERAGE_CANDLE_TURNOVER_RUB: '1000',
       T_INVEST_INTRADAY_WATCHLIST:
         '[{"instrumentId":"sber","lotSize":1,"priceStep":0.01}]',
     });
@@ -75,5 +77,14 @@ describe('IntradayScanner', () => {
     expect(first[0]).toMatchObject({ status: 'candidate-recorded', instrumentId: 'sber' });
     expect(second[0]).toMatchObject({ status: 'candidate-suppressed', instrumentId: 'sber' });
     expect(journal.list(10, 'intraday')).toHaveLength(1);
+    expect(scanner.getLatestReport()).toMatchObject({
+      scanned: 1,
+      liquid: 1,
+      trendUp: 1,
+      volumeConfirmed: 1,
+      marketCandidates: 1,
+      recordedCandidates: 0,
+      topRanked: [expect.objectContaining({ ticker: 'sber', candidateReady: true })],
+    });
   });
 });

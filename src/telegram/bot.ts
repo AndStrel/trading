@@ -4,11 +4,16 @@ import {
   type JournalScenarioRecord,
   ScenarioJournal,
 } from '../journal/scenario-journal.js';
-import type { IntradayScanEvent, IntradayScanner } from '../scanner/intraday-scanner.js';
+import type {
+  IntradayScanEvent,
+  IntradayScanner,
+  IntradayScanReport,
+} from '../scanner/intraday-scanner.js';
 import { buildCandidateCardSvg, renderCandidateCardPng } from './candidate-card.js';
 import type { TelegramClient, TelegramUpdate } from './client.js';
 
-type ScannerControl = Pick<IntradayScanner, 'isPaused' | 'pause' | 'resume'>;
+type ScannerControl = Pick<IntradayScanner, 'isPaused' | 'pause' | 'resume'> &
+  Partial<Pick<IntradayScanner, 'getLatestReport'>>;
 type ExecutionControl = Pick<
   ExecutionService,
   | 'mode'
@@ -39,8 +44,50 @@ function formatDate(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
 }
 
+function formatTurnover(value: number | null): string {
+  if (value === null) return '—';
+  if (value >= 1_000_000) return `${formatNumber(value / 1_000_000)} млн ₽`;
+  if (value >= 1_000) return `${formatNumber(value / 1_000)} тыс. ₽`;
+  return `${formatNumber(value)} ₽`;
+}
+
+function snapshotInstrumentLabel(record: JournalScenarioRecord): string | null {
+  if (typeof record.snapshot !== 'object' || record.snapshot === null) return null;
+  const snapshot = record.snapshot as Record<string, unknown>;
+  if (typeof snapshot.instrument !== 'object' || snapshot.instrument === null) return null;
+  const instrument = snapshot.instrument as Record<string, unknown>;
+  const label = instrument.label ?? instrument.ticker;
+  return typeof label === 'string' && label.trim() ? label.trim() : null;
+}
+
+function formatMarketReport(report: IntradayScanReport): string {
+  const top = report.topRanked.length
+    ? report.topRanked.map((item, index) => {
+        const state = item.candidateReady ? 'готов к проверке рынка' : 'наблюдение';
+        const trend = item.trend === 'up' ? '↑' : item.trend === 'down' ? '↓' : '→';
+        const volume = item.relativeVolume === null ? '—' : `${formatNumber(item.relativeVolume)}x`;
+        return `${index + 1}. ${item.ticker} — ${item.score}/100 · ${trend} · объём ${volume} · оборот ${formatTurnover(item.averageCandleTurnoverRub)} · ${state}`;
+      })
+    : ['нет данных для ранжирования'];
+  const missing = report.universe.missingTickers.length
+    ? `\nНе найдены/недоступны: ${report.universe.missingTickers.join(', ')}`
+    : '';
+
+  return [
+    `Рынок · ${formatDate(report.observedAt)}`,
+    `Вселенная: ${report.universe.active}/${report.universe.requested} акций (${report.universe.source})`,
+    `Проверено: ${report.scanned} · ликвидны: ${report.liquid} · тренд ↑: ${report.trendUp} · объём ≥1.0: ${report.volumeConfirmed}`,
+    `До стакана допущено: ${report.readyForMarketCheck} · кандидатов рынка: ${report.marketCandidates} · сохранено: ${report.recordedCandidates}`,
+    report.errors ? `Ошибки запросов: ${report.errors}` : 'Ошибки запросов: нет',
+    '',
+    'Топ ситуаций:',
+    ...top,
+  ].join('\n') + missing;
+}
+
 function instrumentLabel(record: JournalScenarioRecord, config: AppConfig): string {
   return (
+    snapshotInstrumentLabel(record) ??
     config.scanner.intradayWatchlist.find((item) => item.instrumentId === record.instrumentId)?.label ??
     record.instrumentId
   );
@@ -102,6 +149,7 @@ function helpText(): string {
   return [
     'Команды:',
     '/status — состояние сканера',
+    '/market — последний проход, фильтры и лучшие ситуации',
     '/candidates — последние кандидаты',
     '/preview — тестовая карточка без запроса рынка',
     '/pause — поставить сканер на паузу',
@@ -226,6 +274,10 @@ export class TelegramTradingBot {
 
     if (command === '/candidates') {
       await this.sendRecentCandidates(normalizedChatId);
+      return;
+    }
+    if (command === '/market') {
+      await this.client.sendMessage(normalizedChatId, this.marketText());
       return;
     }
     if (command === '/preview') {
@@ -357,17 +409,29 @@ export class TelegramTradingBot {
   }
 
   private statusText(): string {
-    const watchlist = this.config.scanner.intradayWatchlist
-      .map((item) => item.label ?? item.instrumentId)
-      .join(', ');
+    const universe =
+      this.config.scanner.universeMode === 'moex-liquid'
+        ? `MOEX liquid, до ${this.config.scanner.maxInstruments} акций`
+        : this.config.scanner.intradayWatchlist.map((item) => item.label ?? item.instrumentId).join(', ') ||
+          'не задан';
+    const report = this.scanner.getLatestReport?.();
 
     return [
       `Сканер: ${this.scanner.isPaused() ? 'пауза' : 'активен'}`,
       `Интервал: ${this.config.scanner.intervalSeconds / 60} мин.`,
-      `Watchlist: ${watchlist || 'не задан'}`,
+      `Вселенная: ${universe}`,
+      report ? `Последний проход: ${formatDate(report.observedAt)}` : 'Последний проход: ещё не завершён',
       `Cooldown кандидатов: ${this.config.scanner.candidateCooldownMinutes} мин.`,
       this.executionText(),
     ].join('\n');
+  }
+
+  private marketText(): string {
+    const report = this.scanner.getLatestReport?.();
+    if (!report) {
+      return 'Первый проход рынка ещё не завершён. Повторите /market через 1–2 минуты.';
+    }
+    return formatMarketReport(report);
   }
 
   private executionText(): string {
