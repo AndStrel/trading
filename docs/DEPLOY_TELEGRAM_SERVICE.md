@@ -1,6 +1,9 @@
-# Ручной deploy Telegram-сервиса
+# Автоматический deploy Telegram-сервиса
 
-Workflow **Deploy Telegram service** запускается только вручную из ветки `main`. Он не получает T-Invest или Telegram токены из GitHub и не перезаписывает серверный `.env`.
+Workflow **Deploy Telegram service** запускается после каждого push в `main` —
+то есть после merge PR. Ручной запуск сохранён для повторного deploy или отката.
+Он не получает T-Invest или Telegram токены из GitHub и не перезаписывает
+серверный `.env`.
 
 ## Что делает workflow
 
@@ -53,7 +56,11 @@ TELEGRAM_POLLING_TIMEOUT_SECONDS=25
 
 ## Запуск
 
-GitHub → **Actions** → **Deploy Telegram service** → **Run workflow**. Выбирайте только `main`.
+После merge PR в `main` deploy запускается сам. Его статус виден в GitHub →
+**Actions** → **Deploy Telegram service**.
+
+Для повторного deploy или отката: GitHub → **Actions** → **Deploy Telegram
+service** → **Run workflow**. Выбирайте только `main`.
 
 После первого deploy подтвердите в GitHub log, что сервис запущен, затем проверьте:
 
