@@ -21,7 +21,7 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run build
-      - run: docker build --tag andstrel/trading:ci .
+      - run: docker build --build-arg INSTALL_TINVEST_CA=false --tag andstrel/trading:ci .
       - name: Verify PNG rendering in the hardened runtime
         run: |
           docker run --rm --network none --read-only \
