@@ -56,6 +56,14 @@ TELEGRAM_POLLING_TIMEOUT_SECONDS=25
 
 ## Запуск
 
+Перед первым запуском создайте GitHub Environment `production` и настройте для него
+deployment branch policy только на `main`. Перенесите в этот Environment Secrets
+`TRADING_DEPLOY_SSH_KEY` и `TRADING_DEPLOY_KNOWN_HOSTS`, затем удалите их копии из
+repository-level Secrets. Это важно: ручной workflow читает YAML из выбранной ветки,
+поэтому одной проверки `github.ref` внутри изменяемого workflow недостаточно. Все три
+workflow с SSH-доступом (`Deploy`, `Bootstrap` и `Replay`) привязаны к Environment
+`production`; при необходимости добавьте required reviewer.
+
 После merge PR в `main` deploy запускается сам. Его статус виден в GitHub →
 **Actions** → **Deploy Telegram service**.
 
@@ -70,7 +78,13 @@ service** → **Run workflow**. Выбирайте только `main`.
 
 ## Одноразовый импорт исторических данных
 
-Для первичной загрузки 2025 года используется отдельный workflow **Bootstrap 2025 historical data**. Он запускается только при изменении собственного workflow-файла в `main`, использует те же ограниченные deploy Secrets и не получает токен T-Invest из GitHub. Он ждёт тот же concurrency-lock, что и deploy, проверяет минимум 4 GiB свободного места и выполняет импорт `liquid-20` в существующий Docker volume. Подробности и точный список бумаг: [исторические данные](HISTORICAL_DATA.md).
+Для первичной загрузки 2025 года используется отдельный workflow **Bootstrap 2025 historical data**. Он запускается после изменений, относящихся к архивному импортеру, либо вручную; использует те же ограниченные deploy Secrets и не получает токен T-Invest из GitHub. Он ждёт тот же concurrency-lock, что и deploy, проверяет минимум 4 GiB свободного места и выполняет импорт `liquid-20` в существующий Docker volume. Подробности и точный список бумаг: [исторические данные](HISTORICAL_DATA.md).
+
+## Одноразовый replay 2025
+
+После успешного импорта архива отдельный workflow **Replay 2025 historical data** запускается вручную из GitHub Actions. Он сам синхронизирует и собирает текущий `main` на VPS, затем запускает `backtest:replay -- --year 2025` внутри того же Docker volume. Job остановится, если хотя бы один архив liquid-20 отсутствует — частичный результат не будет выдан за результат всей вселенной.
+
+Полный JSON-отчёт остаётся на сервере в Docker volume: `/app/data/backtests/replay-2025-liquid-20.json`; Actions log показывает только компактную сводку фаз и не содержит токенов. Модель затрат и границы результата описаны в [документе backtest](BACKTEST.md).
 
 ## Откат
 

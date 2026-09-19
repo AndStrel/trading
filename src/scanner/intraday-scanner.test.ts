@@ -54,6 +54,7 @@ describe('IntradayScanner', () => {
         '[{"instrumentId":"sber","lotSize":1,"priceStep":0.01}]',
     });
     const client = {
+      getShares: async () => ({ instruments: [{ uid: 'sber', figi: 'BBG004730N88' }] }),
       getCandles: async () => candles(),
       getOrderBook: async () => ({
         isConsistent: true,

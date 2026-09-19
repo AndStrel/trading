@@ -36,6 +36,8 @@ export const DEFAULT_MOEX_LIQUID_TICKERS = [
 
 export type ResolvedIntradayInstrument = IntradayWatchlistItem & {
   ticker: string;
+  /** FIGI is used for the annual history archive endpoint; UID remains the runtime API key. */
+  figi?: string;
   name?: string;
 };
 
@@ -53,6 +55,7 @@ export type IntradayUniverseProvider = {
 
 type SharePayload = {
   uid?: unknown;
+  figi?: unknown;
   ticker?: unknown;
   name?: unknown;
   classCode?: unknown;
@@ -82,6 +85,7 @@ function parseShares(payload: unknown): SharePayload[] {
 
 function toResolvedInstrument(share: SharePayload): ResolvedIntradayInstrument | null {
   const uid = typeof share.uid === 'string' ? share.uid.trim() : '';
+  const figi = typeof share.figi === 'string' ? share.figi.trim() : '';
   const ticker = typeof share.ticker === 'string' ? share.ticker.trim().toUpperCase() : '';
   const classCode = typeof share.classCode === 'string' ? share.classCode.trim().toUpperCase() : '';
   const currency = typeof share.currency === 'string' ? share.currency.trim().toUpperCase() : '';
@@ -110,22 +114,39 @@ function toResolvedInstrument(share: SharePayload): ResolvedIntradayInstrument |
     instrumentId: uid,
     label: ticker,
     ticker,
+    ...(figi ? { figi } : {}),
     ...(name ? { name } : {}),
     lotSize,
     priceStep,
   };
 }
 
-function watchlistSnapshot(config: AppConfig, now: Date): IntradayUniverseSnapshot {
+async function watchlistSnapshot(
+  config: AppConfig,
+  now: Date,
+  client: Pick<TInvestClient, 'getShares'>,
+): Promise<IntradayUniverseSnapshot> {
+  const shares = parseShares(await client.getShares());
+  const figiByUid = new Map<string, string>();
+  for (const share of shares) {
+    const uid = typeof share.uid === 'string' ? share.uid.trim() : '';
+    const figi = typeof share.figi === 'string' ? share.figi.trim() : '';
+    if (uid && figi) figiByUid.set(uid, figi);
+  }
+  const requestedTickers = config.scanner.intradayWatchlist.map((item) => item.label ?? item.instrumentId);
+  const instruments = config.scanner.intradayWatchlist
+    .map((item) => {
+      const figi = figiByUid.get(item.instrumentId);
+      return figi ? { ...item, ticker: item.label ?? item.instrumentId, figi } : null;
+    })
+    .filter((instrument): instrument is NonNullable<typeof instrument> => instrument !== null);
+  const presentTickers = new Set(instruments.map((instrument) => instrument.label ?? instrument.instrumentId));
   return {
     source: 'watchlist',
     refreshedAt: now.toISOString(),
-    requestedTickers: config.scanner.intradayWatchlist.map((item) => item.label ?? item.instrumentId),
-    missingTickers: [],
-    instruments: config.scanner.intradayWatchlist.map((item) => ({
-      ...item,
-      ticker: item.label ?? item.instrumentId,
-    })),
+    requestedTickers,
+    missingTickers: requestedTickers.filter((ticker) => !presentTickers.has(ticker)),
+    instruments,
   };
 }
 
@@ -139,7 +160,7 @@ export class TInvestIntradayUniverseProvider implements IntradayUniverseProvider
 
   async getSnapshot(now: Date): Promise<IntradayUniverseSnapshot> {
     if (this.config.scanner.universeMode === 'watchlist') {
-      return watchlistSnapshot(this.config, now);
+      return watchlistSnapshot(this.config, now, this.client);
     }
 
     const refreshAgeMs = this.config.scanner.universeRefreshMinutes * 60_000;

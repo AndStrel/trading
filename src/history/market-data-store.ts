@@ -14,8 +14,13 @@ export type HistoricalMinuteCandle = {
 
 export type HistoricalArchiveImport = {
   instrumentId: string;
+  /** Exchange ticker captured with the archive so replay does not query today's universe. */
+  ticker: string;
   year: number;
   archiveSha256: string;
+  /** Instrument properties captured together with the archive for deterministic replay. */
+  lotSize: number;
+  priceStep: number;
   candles: HistoricalMinuteCandle[];
   rawRowCount: number;
   invalidRowCount: number;
@@ -28,6 +33,16 @@ export type HistoricalImportResult = {
   rawRowCount: number;
   invalidRowCount: number;
   importedAt: string;
+};
+
+export type HistoricalArchiveProvenance = HistoricalImportResult & {
+  archiveSha256: string;
+  /** Null only for archives imported before ticker provenance was introduced. */
+  ticker: string | null;
+  /** Null only for archives imported before replay metadata was introduced. */
+  lotSize: number | null;
+  /** Null only for archives imported before replay metadata was introduced. */
+  priceStep: number | null;
 };
 
 export type HistoricalCoverage = {
@@ -57,11 +72,14 @@ const schema = `
 
   CREATE TABLE IF NOT EXISTS historical_archive_imports (
     instrument_id TEXT NOT NULL,
+    ticker TEXT NOT NULL CHECK(ticker GLOB '[A-Z0-9.-]*'),
     source_year INTEGER NOT NULL CHECK(source_year >= 2000),
     archive_sha256 TEXT NOT NULL,
     raw_row_count INTEGER NOT NULL CHECK(raw_row_count >= 0),
     invalid_row_count INTEGER NOT NULL CHECK(invalid_row_count >= 0),
     stored_candle_count INTEGER NOT NULL CHECK(stored_candle_count >= 0),
+    lot_size INTEGER CHECK(lot_size > 0),
+    price_step REAL CHECK(price_step > 0),
     imported_at TEXT NOT NULL,
     PRIMARY KEY (instrument_id, source_year)
   ) STRICT, WITHOUT ROWID;
@@ -74,8 +92,40 @@ type CoverageRow = {
   last_candle_at: string | null;
 };
 
+type ArchiveImportRow = {
+  instrument_id: string;
+  ticker: string | null;
+  source_year: number | bigint;
+  archive_sha256: string;
+  stored_candle_count: number | bigint;
+  raw_row_count: number | bigint;
+  invalid_row_count: number | bigint;
+  lot_size: number | bigint | null;
+  price_step: number | null;
+  imported_at: string;
+};
+
+type TableInfoRow = {
+  name: string;
+};
+
 function assertFiniteNumber(value: number, name: string): void {
   if (!Number.isFinite(value)) throw new Error(`${name} must be finite`);
+}
+
+function ensureArchiveMetadataColumns(database: DatabaseSync): void {
+  const columns = new Set(
+    (database.prepare('PRAGMA table_info(historical_archive_imports)').all() as TableInfoRow[]).map((row) => row.name),
+  );
+  if (!columns.has('lot_size')) {
+    database.exec('ALTER TABLE historical_archive_imports ADD COLUMN lot_size INTEGER CHECK(lot_size > 0)');
+  }
+  if (!columns.has('ticker')) {
+    database.exec('ALTER TABLE historical_archive_imports ADD COLUMN ticker TEXT');
+  }
+  if (!columns.has('price_step')) {
+    database.exec('ALTER TABLE historical_archive_imports ADD COLUMN price_step REAL CHECK(price_step > 0)');
+  }
 }
 
 function assertCandle(candle: HistoricalMinuteCandle, instrumentId: string): void {
@@ -112,12 +162,20 @@ export class MarketDataStore {
 
   importMinuteArchive(input: HistoricalArchiveImport): HistoricalImportResult {
     if (!input.instrumentId.trim()) throw new Error('Historical archive instrumentId is required');
+    if (!/^[A-Z0-9.-]{1,16}$/.test(input.ticker)) {
+      throw new Error('Historical archive ticker is invalid');
+    }
     if (!Number.isInteger(input.year) || input.year < 2000) {
       throw new Error('Historical archive year is invalid');
     }
     if (!/^[a-f0-9]{64}$/i.test(input.archiveSha256)) {
       throw new Error('Historical archive SHA-256 is invalid');
     }
+    if (!Number.isInteger(input.lotSize) || input.lotSize <= 0) {
+      throw new Error('Historical archive lot size is invalid');
+    }
+    assertFiniteNumber(input.priceStep, 'Historical archive price step');
+    if (input.priceStep <= 0) throw new Error('Historical archive price step is invalid');
     if (!Number.isSafeInteger(input.rawRowCount) || input.rawRowCount < 0) {
       throw new Error('Historical archive raw row count is invalid');
     }
@@ -147,14 +205,34 @@ export class MarketDataStore {
       );
       const insertImport = database.prepare(
         `INSERT INTO historical_archive_imports (
-          instrument_id, source_year, archive_sha256, raw_row_count, invalid_row_count,
-          stored_candle_count, imported_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          instrument_id, ticker, source_year, archive_sha256, raw_row_count, invalid_row_count,
+          stored_candle_count, lot_size, price_step, imported_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(instrument_id, source_year) DO UPDATE SET
+          ticker = CASE
+            WHEN historical_archive_imports.archive_sha256 = excluded.archive_sha256
+              AND historical_archive_imports.ticker IS NOT NULL
+            THEN historical_archive_imports.ticker
+            ELSE excluded.ticker
+          END,
           archive_sha256 = excluded.archive_sha256,
           raw_row_count = excluded.raw_row_count,
           invalid_row_count = excluded.invalid_row_count,
           stored_candle_count = excluded.stored_candle_count,
+          -- Archive SHA identifies the market data. Keep the first captured instrument
+          -- contract for an unchanged archive so a later import cannot rewrite a replay.
+          lot_size = CASE
+            WHEN historical_archive_imports.archive_sha256 = excluded.archive_sha256
+              AND historical_archive_imports.lot_size IS NOT NULL
+            THEN historical_archive_imports.lot_size
+            ELSE excluded.lot_size
+          END,
+          price_step = CASE
+            WHEN historical_archive_imports.archive_sha256 = excluded.archive_sha256
+              AND historical_archive_imports.price_step IS NOT NULL
+            THEN historical_archive_imports.price_step
+            ELSE excluded.price_step
+          END,
           imported_at = excluded.imported_at`,
       );
       const deletePriorArchive = database.prepare(
@@ -184,11 +262,14 @@ export class MarketDataStore {
       }
       insertImport.run(
         input.instrumentId,
+        input.ticker,
         input.year,
         input.archiveSha256,
         input.rawRowCount,
         input.invalidRowCount,
         input.candles.length,
+        input.lotSize,
+        input.priceStep,
         importedAt,
       );
       database.exec('COMMIT');
@@ -248,6 +329,66 @@ export class MarketDataStore {
     }
   }
 
+  getArchiveImport(instrumentId: string, year: number): HistoricalArchiveProvenance | null {
+    if (!instrumentId.trim()) throw new Error('Historical archive instrumentId is required');
+    if (!Number.isInteger(year) || year < 2000) throw new Error('Historical archive year is invalid');
+
+    const database = this.open();
+    try {
+      const row = database
+        .prepare(
+          `SELECT
+             instrument_id,
+             ticker,
+             source_year,
+             archive_sha256,
+             stored_candle_count,
+             raw_row_count,
+             invalid_row_count,
+             lot_size,
+             price_step,
+             imported_at
+           FROM historical_archive_imports
+           WHERE instrument_id = ?
+             AND source_year = ?`,
+        )
+        .get(instrumentId, year) as ArchiveImportRow | undefined;
+
+      return row ? toArchiveProvenance(row) : null;
+    } finally {
+      database.close();
+    }
+  }
+
+  listArchiveImports(year: number): HistoricalArchiveProvenance[] {
+    if (!Number.isInteger(year) || year < 2000) throw new Error('Historical archive year is invalid');
+
+    const database = this.open();
+    try {
+      const rows = database
+        .prepare(
+          `SELECT
+             instrument_id,
+             ticker,
+             source_year,
+             archive_sha256,
+             stored_candle_count,
+             raw_row_count,
+             invalid_row_count,
+             lot_size,
+             price_step,
+             imported_at
+           FROM historical_archive_imports
+           WHERE source_year = ?
+           ORDER BY ticker ASC, instrument_id ASC`,
+        )
+        .all(year) as ArchiveImportRow[];
+      return rows.map(toArchiveProvenance);
+    } finally {
+      database.close();
+    }
+  }
+
   listMinuteCandles(input: { instrumentId: string; from: string; to: string }): HistoricalMinuteCandle[] {
     const database = this.open();
 
@@ -294,6 +435,22 @@ export class MarketDataStore {
     chmodSync(this.databasePath, 0o600);
     database.exec('PRAGMA journal_mode = WAL;');
     database.exec(schema);
+    ensureArchiveMetadataColumns(database);
     return database;
   }
+}
+
+function toArchiveProvenance(row: ArchiveImportRow): HistoricalArchiveProvenance {
+  return {
+    instrumentId: row.instrument_id,
+    ticker: row.ticker,
+    year: Number(row.source_year),
+    archiveSha256: row.archive_sha256,
+    storedCandleCount: Number(row.stored_candle_count),
+    rawRowCount: Number(row.raw_row_count),
+    invalidRowCount: Number(row.invalid_row_count),
+    lotSize: row.lot_size === null ? null : Number(row.lot_size),
+    priceStep: row.price_step,
+    importedAt: row.imported_at,
+  };
 }

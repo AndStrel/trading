@@ -44,6 +44,11 @@ export type ExecutionConfig = {
   sandboxInitialBalanceRub: number;
 };
 
+export type BacktestConfig = {
+  startingCapitalRub: number;
+  maxConcurrentPositions: number;
+};
+
 export type StrategyLimits = {
   accountId?: string;
   maxRiskRub: number;
@@ -64,6 +69,7 @@ export type AppConfig = {
   scanner: ScannerConfig;
   telegram: TelegramConfig;
   execution: ExecutionConfig;
+  backtest: BacktestConfig;
   strategies: Record<Strategy, StrategyLimits>;
 };
 
@@ -154,6 +160,8 @@ const envSchema = z.object({
   T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB: z.coerce.number().positive().max(10_000).default(1_000),
   T_INVEST_EXECUTION_CANDIDATE_MAX_AGE_MINUTES: z.coerce.number().int().min(1).max(60).default(10),
   T_INVEST_SANDBOX_INITIAL_BALANCE_RUB: z.coerce.number().positive().max(1_000_000).default(100_000),
+  T_INVEST_BACKTEST_STARTING_CAPITAL_RUB: z.coerce.number().positive().max(1_000_000).default(100_000),
+  T_INVEST_BACKTEST_MAX_CONCURRENT_POSITIONS: z.coerce.number().int().min(1).max(5).default(2),
   T_INVEST_INTRADAY_ACCOUNT_ID: optionalNonEmpty,
   T_INVEST_SWING_ACCOUNT_ID: optionalNonEmpty,
   INTRADAY_MAX_RISK_RUB: z.coerce.number().positive().default(500),
@@ -208,6 +216,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       maxDailyRiskRub: parsed.T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB,
       candidateMaxAgeMinutes: parsed.T_INVEST_EXECUTION_CANDIDATE_MAX_AGE_MINUTES,
       sandboxInitialBalanceRub: parsed.T_INVEST_SANDBOX_INITIAL_BALANCE_RUB,
+    },
+    backtest: {
+      startingCapitalRub: parsed.T_INVEST_BACKTEST_STARTING_CAPITAL_RUB,
+      maxConcurrentPositions: parsed.T_INVEST_BACKTEST_MAX_CONCURRENT_POSITIONS,
     },
     strategies: {
       intraday: {

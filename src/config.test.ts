@@ -23,6 +23,7 @@ describe('loadConfig', () => {
       candidateMaxAgeMinutes: 10,
       sandboxInitialBalanceRub: 100_000,
     });
+    expect(config.backtest).toEqual({ startingCapitalRub: 100_000, maxConcurrentPositions: 2 });
     expect(config.strategies.intraday.maxSpreadPct).toBe(0.3);
     expect(config.strategies.intraday.maxEntryDeviationPct).toBe(0.5);
     expect(config.strategies.intraday.allowShort).toBe(false);

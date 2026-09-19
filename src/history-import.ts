@@ -103,7 +103,9 @@ async function main(): Promise<void> {
     for (const instrument of instruments) {
       try {
         const archive = await historyClient.getMinuteCandleArchive({
-          instrumentId: instrument.instrumentId,
+          ...(instrument.figi
+            ? { figi: instrument.figi }
+            : { instrumentId: instrument.instrumentId }),
           year,
         });
         const parsed = parseHistoryMinuteArchive(archive, {
@@ -112,8 +114,11 @@ async function main(): Promise<void> {
         });
         const imported = store.importMinuteArchive({
           instrumentId: instrument.instrumentId,
+          ticker: instrument.ticker,
           year,
           archiveSha256: archiveSha256(archive),
+          lotSize: instrument.lotSize,
+          priceStep: instrument.priceStep,
           candles: parsed.candles,
           rawRowCount: parsed.rawRowCount,
           invalidRowCount: parsed.invalidRowCount,

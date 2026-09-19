@@ -6,7 +6,10 @@ import { join } from 'node:path';
 import type { FetchLike, TInvestTransport } from './client.js';
 
 export type HistoryArchiveRequest = {
-  instrumentId: string;
+  /** UID is retained as a fallback for explicit legacy callers. */
+  instrumentId?: string;
+  /** Prefer FIGI for the annual archive endpoint. */
+  figi?: string;
   year: number;
 };
 
@@ -172,7 +175,11 @@ function isSuccessStatus(status: number): boolean {
 }
 
 function validateRequest(request: HistoryArchiveRequest): void {
-  if (!request.instrumentId.trim()) throw new Error('History archive instrumentId is required');
+  const instrumentId = request.instrumentId?.trim() ?? '';
+  const figi = request.figi?.trim() ?? '';
+  if ((instrumentId.length > 0 ? 1 : 0) + (figi.length > 0 ? 1 : 0) !== 1) {
+    throw new Error('History archive requires exactly one of figi or instrumentId');
+  }
   const currentYear = new Date().getUTCFullYear();
   if (!Number.isInteger(request.year) || request.year < 2000 || request.year > currentYear) {
     throw new Error(`History archive year must be an integer from 2000 through ${currentYear}`);
@@ -202,7 +209,8 @@ export class TInvestHistoryClient {
 
     const url = new URL(this.historyDataUrl);
     if (url.protocol !== 'https:') throw new Error('History archive URL must use HTTPS');
-    url.searchParams.set('instrument_id', request.instrumentId);
+    if (request.figi?.trim()) url.searchParams.set('figi', request.figi.trim());
+    else url.searchParams.set('instrument_id', request.instrumentId!.trim());
     url.searchParams.set('year', String(request.year));
 
     let status: number;

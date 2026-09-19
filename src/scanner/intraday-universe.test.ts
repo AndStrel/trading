@@ -20,7 +20,7 @@ describe('TInvestIntradayUniverseProvider', () => {
         return {
           instruments: [
             {
-              uid: 'sber-uid', ticker: 'SBER', name: 'Сбербанк', classCode: 'TQBR', currency: 'rub',
+              uid: 'sber-uid', figi: 'BBG004730N88', ticker: 'SBER', name: 'Сбербанк', classCode: 'TQBR', currency: 'rub',
               lot: 10, minPriceIncrement: quotation(0.01), apiTradeAvailableFlag: true,
               forQualInvestorFlag: false, otcFlag: false, blockedTcaFlag: false,
             },
@@ -44,28 +44,34 @@ describe('TInvestIntradayUniverseProvider', () => {
 
     expect(requests).toBe(1);
     expect(first.instruments).toEqual([
-      expect.objectContaining({ instrumentId: 'sber-uid', ticker: 'SBER', lotSize: 10, priceStep: 0.01 }),
+      expect.objectContaining({
+        instrumentId: 'sber-uid',
+        figi: 'BBG004730N88',
+        ticker: 'SBER',
+        lotSize: 10,
+        priceStep: 0.01,
+      }),
       expect.objectContaining({ instrumentId: 'gazp-uid', ticker: 'GAZP', lotSize: 10, priceStep: 0.01 }),
     ]);
     expect(first.missingTickers).toEqual(['ILLQ']);
     expect(second).toBe(first);
   });
 
-  it('keeps explicit instruments only when legacy watchlist mode is selected', async () => {
+  it('resolves explicit watchlist UIDs to FIGIs before importing history', async () => {
     const config = loadConfig({
       T_INVEST_INTRADAY_UNIVERSE: 'watchlist',
       T_INVEST_INTRADAY_WATCHLIST:
         '[{"instrumentId":"sber-id","label":"SBER","lotSize":10,"priceStep":0.01}]',
     });
     const provider = new TInvestIntradayUniverseProvider(config, {
-      getShares: async () => {
-        throw new Error('must not request API instrument list in watchlist mode');
-      },
+      getShares: async () => ({
+        instruments: [{ uid: 'sber-id', figi: 'BBG004730N88' }],
+      }),
     });
 
     await expect(provider.getSnapshot(new Date())).resolves.toMatchObject({
       source: 'watchlist',
-      instruments: [expect.objectContaining({ instrumentId: 'sber-id', ticker: 'SBER' })],
+      instruments: [expect.objectContaining({ instrumentId: 'sber-id', ticker: 'SBER', figi: 'BBG004730N88' })],
     });
   });
 });
