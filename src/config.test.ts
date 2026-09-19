@@ -9,6 +9,9 @@ describe('loadConfig', () => {
     expect(config.journalPath).toBe('.trading/journal.sqlite');
     expect(config.scanner.intervalSeconds).toBe(300);
     expect(config.scanner.slippageRate).toBe(0.0005);
+    expect(config.scanner.universeMode).toBe('moex-liquid');
+    expect(config.scanner.maxInstruments).toBe(30);
+    expect(config.scanner.minAverageCandleTurnoverRub).toBe(1_000_000);
     expect(config.scanner.intradayWatchlist).toEqual([]);
     expect(config.telegram).toEqual({ allowedChatIds: [], pollingTimeoutSeconds: 25 });
     expect(config.execution).toEqual({
@@ -24,6 +27,18 @@ describe('loadConfig', () => {
     expect(config.strategies.swing.maxSpreadPct).toBe(0.5);
     expect(config.strategies.swing.maxEntryDeviationPct).toBe(1);
     expect(config.strategies.swing.allowShort).toBe(false);
+  });
+
+  it('supports an API-resolved MOEX ticker universe and a legacy explicit watchlist mode', () => {
+    const config = loadConfig({
+      T_INVEST_INTRADAY_UNIVERSE: 'watchlist',
+      T_INVEST_INTRADAY_UNIVERSE_TICKERS: 'sber, gazp, SBER',
+      T_INVEST_SCANNER_MAX_INSTRUMENTS: '20',
+    });
+
+    expect(config.scanner.universeMode).toBe('watchlist');
+    expect(config.scanner.universeTickers).toEqual(['SBER', 'GAZP']);
+    expect(config.scanner.maxInstruments).toBe(20);
   });
 
   it('parses an explicit intraday scanner watchlist', () => {

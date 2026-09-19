@@ -193,9 +193,9 @@ describe('ExecutionService', () => {
   it('blocks a second order after the configured daily limit is consumed', async () => {
     const journal = createJournal();
     const config = createConfig({ T_INVEST_EXECUTION_MAX_ORDERS_PER_DAY: '1' });
-    const now = new Date('2026-09-15T07:05:00.000Z');
-    const first = recordCandidate(journal, '2026-09-15T07:00:00.000Z');
-    const second = recordCandidate(journal, '2026-09-15T07:01:00.000Z');
+    const now = new Date();
+    const first = recordCandidate(journal, new Date(now.getTime() - 5 * 60_000).toISOString());
+    const second = recordCandidate(journal, new Date(now.getTime() - 4 * 60_000).toISOString());
     const postLimitOrder = vi.fn().mockResolvedValue({
       brokerOrderId: 'broker-order',
       executionStatus: 'EXECUTION_REPORT_STATUS_FILL',

@@ -63,6 +63,7 @@ describe('TInvestClient', () => {
     const client = new TInvestClient('secret', 'https://example.test/rest', { fetchImpl: fetchMock });
 
     await client.findInstrument('SBER');
+    await client.getShares();
     await client.getOrderBook('instrument-id', 20);
     await client.getTradingStatus('instrument-id');
     await client.getCandles({
@@ -81,20 +82,27 @@ describe('TInvestClient', () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
+      'https://example.test/rest/tinkoff.public.invest.api.contract.v1.InstrumentsService/Shares',
+      expect.objectContaining({
+        body: JSON.stringify({ instrumentStatus: 'INSTRUMENT_STATUS_BASE' }),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
       'https://example.test/rest/tinkoff.public.invest.api.contract.v1.MarketDataService/GetOrderBook',
       expect.objectContaining({
         body: JSON.stringify({ instrumentId: 'instrument-id', depth: 20 }),
       }),
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
-      3,
+      4,
       'https://example.test/rest/tinkoff.public.invest.api.contract.v1.MarketDataService/GetTradingStatus',
       expect.objectContaining({
         body: JSON.stringify({ instrumentId: 'instrument-id' }),
       }),
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
-      4,
+      5,
       'https://example.test/rest/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles',
       expect.objectContaining({
         body: JSON.stringify({
