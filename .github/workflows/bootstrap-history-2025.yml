@@ -1,0 +1,81 @@
+name: Bootstrap 2025 historical data
+
+# This one-off workflow is intentionally triggered only when this file changes on main.
+# It lets the initial import use the existing deploy SSH secrets without ever copying a
+# broker token into GitHub. Future application deploys do not re-download the archive.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/bootstrap-history-2025.yml
+
+permissions:
+  contents: read
+
+# Reuse the deploy lock so the one-off Compose container cannot race a production deploy.
+concurrency:
+  group: trading-telegram-production
+  cancel-in-progress: false
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DEPLOY_HOST: ${{ vars.TRADING_DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.TRADING_DEPLOY_USER }}
+      DEPLOY_PATH: ${{ vars.TRADING_DEPLOY_PATH }}
+      DEPLOY_SSH_KEY: ${{ secrets.TRADING_DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.TRADING_DEPLOY_KNOWN_HOSTS }}
+    steps:
+      - name: Validate deployment configuration
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test "$DEPLOY_PATH" = "/opt/andstrel/trading"
+
+      - name: Configure verified SSH access
+        run: |
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Import 2025 minute candles for liquid-20
+        run: |
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+              set -Eeuo pipefail
+
+              deployment_path="/opt/andstrel/trading"
+              history_year="2025"
+              # First 20 symbols of the reviewed DEFAULT_MOEX_LIQUID_TICKERS universe.
+              history_tickers="SBER,SBERP,GAZP,LKOH,ROSN,NVTK,TATN,TATNP,SNGS,SNGSP,GMKN,PLZL,CHMF,NLMK,MTSS,MGNT,MOEX,AFLT,ALRS,HYDR"
+              required_free_kb=4194304
+
+              test -d "$deployment_path/.git"
+              test -f "$deployment_path/.env"
+              command -v docker >/dev/null
+              docker compose version >/dev/null
+
+              available_kb="$(df -Pk "$deployment_path" | awk 'NR == 2 { print $4 }')"
+              test -n "$available_kb"
+              if [ "$available_kb" -lt "$required_free_kb" ]; then
+                echo "Need at least 4 GiB free for historical SQLite data; found ${available_kb} KiB." >&2
+                exit 1
+              fi
+
+              cd "$deployment_path"
+              chmod 600 .env
+              docker compose run --rm --no-deps telegram-service \
+                node dist/history-import.js \
+                --year "$history_year" \
+                --ticker "$history_tickers"
+          REMOTE
