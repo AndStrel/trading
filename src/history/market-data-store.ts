@@ -30,6 +30,10 @@ export type HistoricalImportResult = {
   importedAt: string;
 };
 
+export type HistoricalArchiveProvenance = HistoricalImportResult & {
+  archiveSha256: string;
+};
+
 export type HistoricalCoverage = {
   instrumentId: string;
   candleCount: number;
@@ -72,6 +76,16 @@ type CoverageRow = {
   candle_count: number | bigint;
   first_candle_at: string | null;
   last_candle_at: string | null;
+};
+
+type ArchiveImportRow = {
+  instrument_id: string;
+  source_year: number | bigint;
+  archive_sha256: string;
+  stored_candle_count: number | bigint;
+  raw_row_count: number | bigint;
+  invalid_row_count: number | bigint;
+  imported_at: string;
 };
 
 function assertFiniteNumber(value: number, name: string): void {
@@ -243,6 +257,44 @@ export class MarketDataStore {
             firstCandleAt: null,
             lastCandleAt: null,
           };
+    } finally {
+      database.close();
+    }
+  }
+
+  getArchiveImport(instrumentId: string, year: number): HistoricalArchiveProvenance | null {
+    if (!instrumentId.trim()) throw new Error('Historical archive instrumentId is required');
+    if (!Number.isInteger(year) || year < 2000) throw new Error('Historical archive year is invalid');
+
+    const database = this.open();
+    try {
+      const row = database
+        .prepare(
+          `SELECT
+             instrument_id,
+             source_year,
+             archive_sha256,
+             stored_candle_count,
+             raw_row_count,
+             invalid_row_count,
+             imported_at
+           FROM historical_archive_imports
+           WHERE instrument_id = ?
+             AND source_year = ?`,
+        )
+        .get(instrumentId, year) as ArchiveImportRow | undefined;
+
+      return row
+        ? {
+            instrumentId: row.instrument_id,
+            year: Number(row.source_year),
+            archiveSha256: row.archive_sha256,
+            storedCandleCount: Number(row.stored_candle_count),
+            rawRowCount: Number(row.raw_row_count),
+            invalidRowCount: Number(row.invalid_row_count),
+            importedAt: row.imported_at,
+          }
+        : null;
     } finally {
       database.close();
     }

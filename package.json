@@ -17,6 +17,7 @@
     "smoke:tinvest:ci": "node dist/smoke.js",
     "scan:intraday": "node --env-file=.env dist/intraday-scanner.js",
     "history:import": "node --env-file=.env dist/history-import.js",
+    "backtest:replay": "node --env-file=.env dist/backtest-replay.js",
     "service:telegram": "node --env-file=.env dist/telegram-service.js",
     "test": "vitest run",
     "test:watch": "vitest",
