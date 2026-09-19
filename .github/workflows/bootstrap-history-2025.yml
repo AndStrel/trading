@@ -27,6 +27,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    environment: production
     env:
       DEPLOY_HOST: ${{ vars.TRADING_DEPLOY_HOST }}
       DEPLOY_USER: ${{ vars.TRADING_DEPLOY_USER }}
@@ -79,7 +80,11 @@ jobs:
               fi
 
               cd "$deployment_path"
+              git fetch --depth=1 origin main
+              git checkout --detach origin/main
               chmod 600 .env
+              docker compose up -d --build --remove-orphans
+
               docker compose run --rm --no-deps telegram-service \
                 node dist/history-import.js \
                 --year "$history_year" \

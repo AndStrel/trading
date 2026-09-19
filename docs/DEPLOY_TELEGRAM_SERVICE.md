@@ -56,6 +56,14 @@ TELEGRAM_POLLING_TIMEOUT_SECONDS=25
 
 ## Запуск
 
+Перед первым запуском создайте GitHub Environment `production` и настройте для него
+deployment branch policy только на `main`. Перенесите в этот Environment Secrets
+`TRADING_DEPLOY_SSH_KEY` и `TRADING_DEPLOY_KNOWN_HOSTS`, затем удалите их копии из
+repository-level Secrets. Это важно: ручной workflow читает YAML из выбранной ветки,
+поэтому одной проверки `github.ref` внутри изменяемого workflow недостаточно. Все три
+workflow с SSH-доступом (`Deploy`, `Bootstrap` и `Replay`) привязаны к Environment
+`production`; при необходимости добавьте required reviewer.
+
 После merge PR в `main` deploy запускается сам. Его статус виден в GitHub →
 **Actions** → **Deploy Telegram service**.
 

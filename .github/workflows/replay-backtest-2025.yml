@@ -20,6 +20,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    environment: production
     env:
       DEPLOY_HOST: ${{ vars.TRADING_DEPLOY_HOST }}
       DEPLOY_USER: ${{ vars.TRADING_DEPLOY_USER }}

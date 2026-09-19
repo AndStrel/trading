@@ -82,7 +82,7 @@ docker compose run --rm telegram-service node dist/history-import.js --year 2025
 
 ## Первый импорт 2025 без ручного SSH
 
-В репозитории есть workflow **Bootstrap 2025 historical data**. После merge изменений в workflow или в коде архивного импортера он использует уже существующие deploy Secrets, ждёт освобождения того же deploy-lock и запускает импорт на VPS. Его также можно запустить вручную после неудачного или прерванного прогона. Токен T-Invest остаётся только в серверном `.env`.
+В репозитории есть workflow **Bootstrap 2025 historical data**. После merge изменений в workflow или в коде архивного импортера он использует deploy Secrets из защищённого GitHub Environment `production`, ждёт освобождения того же deploy-lock и запускает импорт на VPS. Его также можно запустить вручную после неудачного или прерванного прогона, выбирая только `main`. Токен T-Invest остаётся только в серверном `.env`.
 
 В этот первый прогон входит фиксированная `liquid-20` выборка из основной intraday-вселенной:
 
