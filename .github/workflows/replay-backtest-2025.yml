@@ -135,7 +135,7 @@ jobs:
             echo
             echo "| Phase | Trades | Net PnL, ₽ | Return | Profit factor |"
             echo "|---|---:|---:|---:|---:|"
-            jq -r '.report.phases[] | "| \(.phase.id) | \(.executedTradeCount) | \(.netPnlRub) | \(.returnPct)% | \(.profitFactor // \"—\") |"' "$report_path"
+            jq -r '.report.phases[] | "| \(.phase.id) | \(.executedTradeCount) | \(.netPnlRub) | \(.returnPct)% | \(.profitFactor // "—") |"' "$report_path"
             echo
             echo "### Warnings"
             jq -r '.report.warnings[]?, .report.phases[]?.warnings[]?' "$report_path" | sed 's/^/- /'
