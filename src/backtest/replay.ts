@@ -119,6 +119,11 @@ export type ReplayTrade = {
   targetPrice: number;
   exitMarketPrice: number;
   exitFillPrice: number;
+  /** Market-price excursion before the modeled exit, excluding fees and slippage. */
+  maxAdverseExcursionRub: number;
+  maxFavorableExcursionRub: number;
+  maxAdverseExcursionR: number;
+  maxFavorableExcursionR: number;
   marketPnlRub: number;
   totalSlippageRub: number;
   totalCommissionRub: number;
@@ -137,8 +142,22 @@ export type ReplaySkippedCandidates = {
 export type ReplayTickerSummary = {
   ticker: string;
   tradeCount: number;
+  marketPnlRub: number;
   netPnlRub: number;
   winRate: number | null;
+  averageMaeR: number | null;
+  averageMfeR: number | null;
+};
+
+export type ReplayPeriodSummary = {
+  period: string;
+  tradeCount: number;
+  marketPnlRub: number;
+  netPnlRub: number;
+  winRate: number | null;
+  profitFactor: number | null;
+  averageMaeR: number | null;
+  averageMfeR: number | null;
 };
 
 export type ReplayPhaseReport = {
@@ -161,11 +180,14 @@ export type ReplayPhaseReport = {
   totalSlippageRub: number;
   totalCommissionRub: number;
   netPnlRub: number;
+  averageMaeR: number | null;
+  averageMfeR: number | null;
   winRate: number | null;
   profitFactor: number | null;
   realizedMaxDrawdownRub: number;
   exitReasons: Record<ReplayExitReason, number>;
   tickerResults: ReplayTickerSummary[];
+  monthlyResults: ReplayPeriodSummary[];
   /** Complete deterministic ledger for audit/recalculation; it never contains credentials. */
   trades: ReplayTrade[];
   warnings: string[];
@@ -225,9 +247,18 @@ type Candidate = {
   stopPrice: number;
   targetPrice: number;
   exitMarketPrice: number;
+  maxAdverseExcursionPrice: number;
+  maxFavorableExcursionPrice: number;
 };
 
-type IncompleteCandidate = Omit<Candidate, 'exitAt' | 'exitReason' | 'exitMarketPrice'>;
+type IncompleteCandidate = Omit<
+  Candidate,
+  | 'exitAt'
+  | 'exitReason'
+  | 'exitMarketPrice'
+  | 'maxAdverseExcursionPrice'
+  | 'maxFavorableExcursionPrice'
+>;
 
 type CandidateBuildResult = {
   candidates: Candidate[];
@@ -504,7 +535,7 @@ function simulateExit(input: {
   stopPrice: number;
   targetPrice: number;
   parameters: ReplayParameters;
-}): { exitAt: string; exitReason: ReplayExitReason; exitMarketPrice: number } | null {
+}): { exitAt: string; exitReason: ReplayExitReason; exitMarketPrice: number; exitIndex: number } | null {
   const forcedExitIndex = input.session.findLastIndex(
     (candle) => candle.minuteOfDayMoscow <= input.parameters.forceExitMinuteMoscow,
   );
@@ -532,16 +563,17 @@ function simulateExit(input: {
         exitAt: candle.time,
         exitReason: 'data_gap',
         exitMarketPrice: candle.open,
+        exitIndex: index,
       };
     }
 
     const stopTouched = candle.low <= input.stopPrice;
     const targetTouched = candle.high >= input.targetPrice;
     if (candle.open >= input.targetPrice) {
-      return { exitAt: candle.time, exitReason: 'target', exitMarketPrice: input.targetPrice };
+      return { exitAt: candle.time, exitReason: 'target', exitMarketPrice: input.targetPrice, exitIndex: index };
     }
     if (candle.open <= input.stopPrice) {
-      return { exitAt: candle.time, exitReason: 'stop', exitMarketPrice: candle.open };
+      return { exitAt: candle.time, exitReason: 'stop', exitMarketPrice: candle.open, exitIndex: index };
     }
     // OHLC does not reveal the intrabar path. If both levels were touched in one minute,
     // deliberately assume the adverse stop happened first. This keeps the replay conservative.
@@ -552,6 +584,7 @@ function simulateExit(input: {
         // A gap below the stop fills at the opening price. Otherwise the level was crossed
         // intrabar, so use the stop itself; adverse slippage is applied separately later.
         exitMarketPrice: candle.open <= input.stopPrice ? candle.open : input.stopPrice,
+        exitIndex: index,
       };
     }
     if (targetTouched) {
@@ -559,6 +592,7 @@ function simulateExit(input: {
         exitAt: candle.time,
         exitReason: 'target',
         exitMarketPrice: input.targetPrice,
+        exitIndex: index,
       };
     }
     previous = candle;
@@ -572,7 +606,30 @@ function simulateExit(input: {
     exitAt: ending.time,
     exitReason: endIndex === forcedExitIndex ? 'session_exit' : 'time_exit',
     exitMarketPrice: ending.close,
+    exitIndex: endIndex,
   };
+}
+
+function calculateExcursions(input: {
+  entryIndex: number;
+  exitIndex: number;
+  session: readonly PreparedMinuteCandle[];
+  entryMarketPrice: number;
+}): { maxAdverseExcursionPrice: number; maxFavorableExcursionPrice: number } {
+  let maxAdverseExcursionPrice = 0;
+  let maxFavorableExcursionPrice = 0;
+  for (let index = input.entryIndex; index <= input.exitIndex; index += 1) {
+    const candle = input.session[index]!;
+    maxAdverseExcursionPrice = Math.max(
+      maxAdverseExcursionPrice,
+      input.entryMarketPrice - candle.low,
+    );
+    maxFavorableExcursionPrice = Math.max(
+      maxFavorableExcursionPrice,
+      candle.high - input.entryMarketPrice,
+    );
+  }
+  return { maxAdverseExcursionPrice, maxFavorableExcursionPrice };
 }
 
 function buildCandidates(
@@ -752,11 +809,19 @@ function buildCandidates(
         continue;
       }
 
+      const excursions = calculateExcursions({
+        entryIndex,
+        exitIndex: exit.exitIndex,
+        session,
+        entryMarketPrice,
+      });
+
       candidates.push({
         ...candidateBase,
         exitAt: exit.exitAt,
         exitReason: exit.exitReason,
         exitMarketPrice: exit.exitMarketPrice,
+        ...excursions,
       });
       previousVwap = vwap;
     }
@@ -789,6 +854,9 @@ function materializeTrade(candidate: Candidate, parameters: ReplayParameters): {
   const entryDebitRub = round(entryNotionalRub + entryCommissionRub);
   const releaseCashRub = round(exitNotionalRub - exitCommissionRub);
   const netPnlRub = round(releaseCashRub - entryDebitRub);
+  const riskPerUnit = candidate.entryMarketPrice - candidate.stopPrice;
+  const maxAdverseExcursionRub = round(candidate.maxAdverseExcursionPrice * candidate.units);
+  const maxFavorableExcursionRub = round(candidate.maxFavorableExcursionPrice * candidate.units);
 
   return {
     trade: {
@@ -807,6 +875,10 @@ function materializeTrade(candidate: Candidate, parameters: ReplayParameters): {
       targetPrice: round(candidate.targetPrice, 6),
       exitMarketPrice: round(candidate.exitMarketPrice, 6),
       exitFillPrice: round(exitFillPrice, 6),
+      maxAdverseExcursionRub,
+      maxFavorableExcursionRub,
+      maxAdverseExcursionR: round(candidate.maxAdverseExcursionPrice / riskPerUnit, 4),
+      maxFavorableExcursionR: round(candidate.maxFavorableExcursionPrice / riskPerUnit, 4),
       marketPnlRub,
       totalSlippageRub,
       totalCommissionRub,
@@ -840,6 +912,26 @@ function emptySkippedCandidates(): ReplaySkippedCandidates {
 
 function inPhase(candidate: Candidate, phase: ReplayPhase): boolean {
   return candidate.sessionDate >= phase.from && candidate.sessionDate <= phase.to;
+}
+
+function summarizeTradeGroup(period: string, trades: readonly ReplayTrade[]): ReplayPeriodSummary {
+  const wins = trades.filter((trade) => trade.netPnlRub > 0);
+  const losses = trades.filter((trade) => trade.netPnlRub < 0);
+  const grossWins = wins.reduce((total, trade) => total + trade.netPnlRub, 0);
+  const grossLosses = losses.reduce((total, trade) => total + Math.abs(trade.netPnlRub), 0);
+  const average = (values: readonly number[]): number | null =>
+    values.length === 0 ? null : round(values.reduce((total, value) => total + value, 0) / values.length, 4);
+
+  return {
+    period,
+    tradeCount: trades.length,
+    marketPnlRub: round(trades.reduce((total, trade) => total + trade.marketPnlRub, 0)),
+    netPnlRub: round(trades.reduce((total, trade) => total + trade.netPnlRub, 0)),
+    winRate: trades.length > 0 ? round(wins.length / trades.length, 4) : null,
+    profitFactor: grossLosses > 0 ? round(grossWins / grossLosses, 4) : null,
+    averageMaeR: average(trades.map((trade) => trade.maxAdverseExcursionR)),
+    averageMfeR: average(trades.map((trade) => trade.maxFavorableExcursionR)),
+  };
 }
 
 function summarizePhase(
@@ -978,15 +1070,21 @@ function summarizePhase(
   const tickerResults = [...new Set(trades.map((trade) => trade.ticker))]
     .map((ticker) => {
       const tickerTrades = trades.filter((trade) => trade.ticker === ticker);
-      const tickerWins = tickerTrades.filter((trade) => trade.netPnlRub > 0).length;
+      const summary = summarizeTradeGroup(ticker, tickerTrades);
       return {
         ticker,
         tradeCount: tickerTrades.length,
-        netPnlRub: round(tickerTrades.reduce((total, trade) => total + trade.netPnlRub, 0)),
-        winRate: tickerTrades.length > 0 ? round(tickerWins / tickerTrades.length, 4) : null,
+        marketPnlRub: summary.marketPnlRub,
+        netPnlRub: summary.netPnlRub,
+        winRate: summary.winRate,
+        averageMaeR: summary.averageMaeR,
+        averageMfeR: summary.averageMfeR,
       };
     })
     .sort((left, right) => right.netPnlRub - left.netPnlRub || left.ticker.localeCompare(right.ticker));
+  const monthlyResults = [...new Set(trades.map((trade) => trade.sessionDate.slice(0, 7)))]
+    .map((month) => summarizeTradeGroup(month, trades.filter((trade) => trade.sessionDate.startsWith(month))))
+    .sort((left, right) => left.period.localeCompare(right.period));
 
   const warnings: string[] = [];
   if (trades.length < 20) {
@@ -1030,11 +1128,18 @@ function summarizePhase(
     totalSlippageRub: round(totalSlippageRub),
     totalCommissionRub: round(totalCommissionRub),
     netPnlRub: round(netPnlRub),
+    averageMaeR: trades.length > 0
+      ? round(trades.reduce((total, trade) => total + trade.maxAdverseExcursionR, 0) / trades.length, 4)
+      : null,
+    averageMfeR: trades.length > 0
+      ? round(trades.reduce((total, trade) => total + trade.maxFavorableExcursionR, 0) / trades.length, 4)
+      : null,
     winRate: trades.length > 0 ? round(wins.length / trades.length, 4) : null,
     profitFactor: profitFactor === null ? null : round(profitFactor, 4),
     realizedMaxDrawdownRub: round(realizedMaxDrawdownRub),
     exitReasons,
     tickerResults,
+    monthlyResults,
     trades: [...trades].sort(
       (left, right) => left.entryAt.localeCompare(right.entryAt) || left.ticker.localeCompare(right.ticker),
     ),
