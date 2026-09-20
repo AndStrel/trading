@@ -87,7 +87,7 @@ export const DEFAULT_REPLAY_PARAMETERS: Omit<
 };
 
 export type ReplayInput = {
-  instruments: Array<{
+  instruments: Iterable<{
     instrument: ReplayInstrument;
     candles: HistoricalMinuteCandle[];
   }>;
@@ -1045,7 +1045,8 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
   const rejectedPlanSessionDates: string[] = [];
   const incompleteCandidates: IncompleteCandidate[] = [];
   const missingEntrySessionDates: string[] = [];
-  const data = input.instruments.map(({ instrument, candles }) => {
+  const data: ReplayReport['data'] = [];
+  for (const { instrument, candles } of input.instruments) {
     if (seenInstrumentIds.has(instrument.instrumentId)) {
       throw new Error(`Replay input contains duplicate instrument ${instrument.instrumentId}`);
     }
@@ -1055,14 +1056,14 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
     rejectedPlanSessionDates.push(...built.rejectedPlanSessionDates);
     incompleteCandidates.push(...built.incompleteCandidates);
     missingEntrySessionDates.push(...built.missingEntrySessionDates);
-    return {
+    data.push({
       ticker: instrument.ticker,
       instrumentId: instrument.instrumentId,
       minuteCandleCount: candles.length,
       firstCandleAt: candles.length > 0 ? candles[0]!.time : null,
       lastCandleAt: candles.length > 0 ? candles.at(-1)!.time : null,
-    };
-  });
+    });
+  }
 
   const phaseReports = phases.map((phase) =>
     summarizePhase(
