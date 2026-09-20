@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { DEFAULT_REPLAY_TICKERS, parseReplayArgs } from './backtest-replay.js';
+import { REPLAY_DIAGNOSTIC_CASES, runReplayDiagnostics } from './backtest-replay-diagnostics.js';
 import { parseReplaySweepArgs } from './backtest-replay-sweep.js';
 
 describe('parseReplayArgs', () => {
@@ -50,5 +51,18 @@ describe('parseReplayArgs', () => {
     expect(() =>
       parseReplaySweepArgs(['--year', '2025', '--target-risk-multiple', '1,not-a-number']),
     ).toThrow('positive comma-separated numbers');
+  });
+
+  it('keeps diagnostics as four fixed research-only cases', () => {
+    expect(runReplayDiagnostics).toBeTypeOf('function');
+    expect(REPLAY_DIAGNOSTIC_CASES.map(({ id }) => id)).toEqual([
+      'baseline',
+      'zero-cost',
+      'relaxed-portfolio',
+      'zero-cost-relaxed-portfolio',
+    ]);
+    expect(REPLAY_DIAGNOSTIC_CASES[0]!.overrides?.targetRiskMultiple).toBe(1);
+    expect(REPLAY_DIAGNOSTIC_CASES[1]!.overrides?.commissionRate).toBe(0);
+    expect(REPLAY_DIAGNOSTIC_CASES[2]!.overrides?.maxConcurrentPositions).toBe(20);
   });
 });

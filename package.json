@@ -19,6 +19,7 @@
     "history:import": "node --env-file=.env dist/history-import.js",
     "backtest:replay": "node --env-file=.env dist/backtest-replay.js",
     "backtest:replay:sweep": "node --env-file=.env dist/backtest-replay-sweep.js",
+    "backtest:replay:diagnostics": "node --env-file=.env dist/backtest-replay-diagnostics.js",
     "service:telegram": "node --env-file=.env dist/telegram-service.js",
     "test": "vitest run",
     "test:watch": "vitest",

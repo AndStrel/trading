@@ -214,7 +214,6 @@ export async function runReplay(
           ],
     parameters: {
       ...DEFAULT_REPLAY_PARAMETERS,
-      ...parameterOverrides,
       commissionRate: config.commissionRate,
       slippageRate: config.scanner.slippageRate,
       startingCapitalRub: config.backtest.startingCapitalRub,
@@ -222,6 +221,7 @@ export async function runReplay(
       maxRiskRub: config.strategies.intraday.maxRiskRub,
       maxConcurrentPositions: config.backtest.maxConcurrentPositions,
       minAverageCandleTurnoverRub: config.scanner.minAverageCandleTurnoverRub,
+      ...parameterOverrides,
     },
   });
 
