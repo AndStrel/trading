@@ -10,6 +10,11 @@ export type TradePlanInput = {
   maxPositionRub: number;
   commissionRate: number;
   slippageRate: number;
+  /**
+   * Safety floor for the net reward-to-risk ratio. Live callers keep the historical 2.0
+   * default; research replays may explicitly lower it when testing smaller targets.
+   */
+  minimumRewardToRisk?: number;
 };
 
 export type TradePlan = {
@@ -29,6 +34,7 @@ export type TradePlan = {
 
 export function calculateTradePlan(input: TradePlanInput): TradePlan {
   const { entryPrice, stopPrice, targetPrice, lotSize, maxRiskRub, maxPositionRub } = input;
+  const minimumRewardToRisk = input.minimumRewardToRisk ?? 2;
   const values = [
     input.entryPrice,
     input.stopPrice,
@@ -41,6 +47,9 @@ export function calculateTradePlan(input: TradePlanInput): TradePlan {
   ];
   if (values.some((value) => !Number.isFinite(value) || value < 0)) {
     throw new Error('All numeric values must be finite and non-negative');
+  }
+  if (!Number.isFinite(minimumRewardToRisk) || minimumRewardToRisk < 0) {
+    throw new Error('minimumRewardToRisk must be finite and non-negative');
   }
   if (entryPrice <= 0 || lotSize < 1 || maxRiskRub <= 0 || maxPositionRub <= 0) {
     throw new Error('Entry, lot size and limits must be greater than zero');
@@ -76,7 +85,10 @@ export function calculateTradePlan(input: TradePlanInput): TradePlan {
   const reasons: string[] = [];
 
   if (lots === 0) reasons.push('No whole lot fits the configured risk and position limits');
-  if (rewardToRisk < 2) reasons.push('Net reward-to-risk is below 2.0');
+  if (rewardToRisk < minimumRewardToRisk) {
+    const formattedMinimum = minimumRewardToRisk === 2 ? '2.0' : String(minimumRewardToRisk);
+    reasons.push(`Net reward-to-risk is below ${formattedMinimum}`);
+  }
   if (netRewardRub <= 0) reasons.push('Expected costs consume the potential reward');
 
   return {
