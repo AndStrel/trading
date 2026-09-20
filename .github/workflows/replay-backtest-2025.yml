@@ -119,9 +119,13 @@ jobs:
         timeout-minutes: 40
         run: |
           run_dir="/tmp/trading-replay-${REPLAY_RUN_ID}"
+          status_error="$RUNNER_TEMP/replay-${REPLAY_RUN_ID}-ssh-error"
+          ssh_failures=0
+          heartbeat=0
           deadline=$((SECONDS + 2400))
-          while (( SECONDS < deadline )); do
-            state="$(ssh -i "$HOME/.ssh/id_ed25519" \
+
+          worker_state() {
+            ssh -i "$HOME/.ssh/id_ed25519" \
               -o BatchMode=yes \
               -o ConnectTimeout=15 \
               -o ServerAliveInterval=15 \
@@ -130,52 +134,74 @@ jobs:
               -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
               "$DEPLOY_USER@$DEPLOY_HOST" \
               "if test -f '$run_dir/exit_code'; then cat '$run_dir/exit_code'; elif test -s '$run_dir/pid' && kill -0 \"\$(cat '$run_dir/pid')\" 2>/dev/null; then printf running; else printf missing; fi" \
-              2>/dev/null || true)"
+              2>"$status_error"
+          }
 
-            if [[ "$state" == "running" || -z "$state" ]]; then
+          show_worker_log() {
+            ssh -i "$HOME/.ssh/id_ed25519" \
+              -o BatchMode=yes \
+              -o ConnectTimeout=15 \
+              -o ServerAliveInterval=15 \
+              -o ServerAliveCountMax=4 \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+              "$DEPLOY_USER@$DEPLOY_HOST" "tail -200 '$run_dir/worker.log'" || true
+          }
+
+          while (( SECONDS < deadline )); do
+            if state="$(worker_state)"; then
+              ssh_failures=0
+            else
+              ssh_failures=$((ssh_failures + 1))
+              echo "[$(date -u +%FT%TZ)] SSH status check failed (${ssh_failures}/6)" >&2
+              if (( ssh_failures == 1 || ssh_failures == 3 || ssh_failures == 6 )); then
+                sed -n '1,20p' "$status_error" >&2 || true
+              fi
+              if (( ssh_failures >= 6 )); then
+                echo "Cannot verify replay worker status after repeated SSH failures" >&2
+                show_worker_log
+                exit 1
+              fi
               sleep 15
               continue
             fi
-            if [[ "$state" == "missing" ]]; then
-              echo "Replay worker disappeared without an exit code" >&2
-              ssh -i "$HOME/.ssh/id_ed25519" \
-                -o BatchMode=yes \
-                -o ConnectTimeout=15 \
-                -o ServerAliveInterval=15 \
-                -o ServerAliveCountMax=4 \
-                -o StrictHostKeyChecking=yes \
-                -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-                "$DEPLOY_USER@$DEPLOY_HOST" "tail -200 '$run_dir/worker.log'" || true
+            if [[ -z "$state" ]]; then
+              echo "Replay worker status check returned an empty state" >&2
+              show_worker_log
               exit 1
             fi
-            if [[ "$state" =~ ^[0-9]+$ ]]; then
-              if [[ "$state" == "0" ]]; then
+            case "$state" in
+              running)
+                heartbeat=$((heartbeat + 1))
+                if (( heartbeat % 4 == 0 )); then
+                  echo "[$(date -u +%FT%TZ)] Replay worker is still running"
+                fi
+                sleep 15
+                ;;
+              missing)
+                echo "Replay worker disappeared without an exit code" >&2
+                show_worker_log
+                exit 1
+                ;;
+              0)
+                echo "[$(date -u +%FT%TZ)] Replay worker completed successfully"
                 exit 0
-              fi
-              echo "Replay worker failed with exit code $state" >&2
-              ssh -i "$HOME/.ssh/id_ed25519" \
-                -o BatchMode=yes \
-                -o ConnectTimeout=15 \
-                -o ServerAliveInterval=15 \
-                -o ServerAliveCountMax=4 \
-                -o StrictHostKeyChecking=yes \
-                -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-                "$DEPLOY_USER@$DEPLOY_HOST" "tail -200 '$run_dir/worker.log'" || true
-              exit "$state"
-            fi
-            echo "Unexpected replay worker state: $state" >&2
-            sleep 15
+                ;;
+              [0-9]*)
+                echo "Replay worker failed with exit code $state" >&2
+                show_worker_log
+                exit "$state"
+                ;;
+              *)
+                echo "Unexpected replay worker state: $state" >&2
+                show_worker_log
+                exit 1
+                ;;
+            esac
           done
 
           echo "Replay worker timed out" >&2
-          ssh -i "$HOME/.ssh/id_ed25519" \
-            -o BatchMode=yes \
-            -o ConnectTimeout=15 \
-            -o ServerAliveInterval=15 \
-            -o ServerAliveCountMax=4 \
-            -o StrictHostKeyChecking=yes \
-            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            "$DEPLOY_USER@$DEPLOY_HOST" "tail -200 '$run_dir/worker.log'" || true
+          show_worker_log
           exit 1
 
       - name: Download and validate replay report

@@ -78,13 +78,16 @@ async function main(): Promise<void> {
 
   const results: SweepRun[] = [];
   let metadata: ReplayRunResult | null = null;
-  for (const targetRiskMultiple of options.targetRiskMultiples) {
+  for (const [index, targetRiskMultiple] of options.targetRiskMultiples.entries()) {
+    const progressPrefix = `[replay-sweep] ${index + 1}/${options.targetRiskMultiples.length} targetRiskMultiple=${targetRiskMultiple}`;
+    console.error(`${progressPrefix} started`);
     const result = await runReplay(options.replay, {
       targetRiskMultiple,
       // The sweep deliberately measures lower targets; the production trade-plan default
       // remains 2.0 when no explicit override is supplied by a live caller.
       minimumRewardToRisk: 0,
     });
+    console.error(`${progressPrefix} completed`);
     metadata ??= result;
     results.push({ targetRiskMultiple, report: result.report });
   }
