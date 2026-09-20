@@ -105,12 +105,12 @@ jobs:
 
               printf '%s\n' "$status" > "$RUN_DIR/exit_code"
               exit "$status"
-              WORKER
+          WORKER
               chmod 700 "$run_dir/worker.sh"
               DEPLOY_PATH="$deployment_path" \
                 RUN_DIR="$run_dir" \
                 SOURCE_COMMIT="$source_commit" \
-                nohup "$run_dir/worker.sh" > "$run_dir/worker.log" 2>&1 < /dev/null &
+                nohup bash "$run_dir/worker.sh" > "$run_dir/worker.log" 2>&1 < /dev/null &
               printf '%s\n' "$!" > "$run_dir/pid"
               echo "Replay worker started: $run_dir"
           REMOTE
