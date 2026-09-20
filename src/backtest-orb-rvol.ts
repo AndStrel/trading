@@ -13,6 +13,7 @@ import {
   type OrbRvolReport,
   type OrbRvolSessionSchedule,
 } from './backtest/orb-rvol.js';
+import { getMoexEquities2025SessionSchedule } from './backtest/orb-rvol-calendar.js';
 import { MarketDataStore } from './history/market-data-store.js';
 
 export type OrbRvolCliOptions = {
@@ -51,8 +52,8 @@ Collects all first opening-range breakout events from imported minute archives. 
 read-only, does not send broker orders, and requires explicit historical session hours so an
 unverified current exchange schedule cannot silently change the experiment.
 
-The fixed session profile is recorded in the JSON output. Verify it against the dated exchange
-calendar before treating a result as a valid research observation.`;
+The fixed session profile is recorded in the JSON output. For 2025, date eligibility is
+resolved by the versioned MOEX equity calendar; verify the supplied session hours separately.`;
 
 function parseClock(value: string, flag: string): number {
   const match = /^(\d{2}):(\d{2})$/.exec(value.trim());
@@ -114,7 +115,7 @@ function requireSessionSchedule(options: OrbRvolCliOptions): OrbRvolSessionSched
   return {
     startMinuteMoscow: options.sessionStartMinuteMoscow,
     endMinuteMoscow: options.sessionEndMinuteMoscow,
-    source: 'fixed-cli-profile; verify against dated MOEX schedule',
+    source: 'fixed-cli-profile; calendar=moex-equities-2025-v1 for 2025',
   };
 }
 
@@ -208,7 +209,14 @@ export async function runOrbRvolResearch(options: OrbRvolCliOptions): Promise<Or
   };
   const report = collectOrbRvolResearch({
     instruments: loadInstruments(),
-    scheduleForSession: () => sessionSchedule,
+    scheduleForSession: (session) =>
+      options.replay.year === 2025
+        ? getMoexEquities2025SessionSchedule({
+            sessionDate: session.sessionDate,
+            startMinuteMoscow: sessionSchedule.startMinuteMoscow,
+            endMinuteMoscow: sessionSchedule.endMinuteMoscow,
+          })
+        : sessionSchedule,
     parameters,
   });
 

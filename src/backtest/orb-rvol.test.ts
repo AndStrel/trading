@@ -139,6 +139,34 @@ describe('collectOrbRvolResearch', () => {
     expect(event.strategyExit.exitMarketPrice).toBe(event.stopPrice);
   });
 
+
+  it('records a date rejected by the calendar without adding a warning-only gap', () => {
+    const report = collectOrbRvolResearch({
+      instruments: [{ instrument, candles: syntheticArchive() }],
+      scheduleForSession: ({ sessionDate }) =>
+        sessionDate === '2025-01-21'
+          ? null
+          : {
+              startMinuteMoscow: 10 * 60,
+              endMinuteMoscow: 13 * 60,
+              source: 'test-calendar',
+            },
+      parameters: researchParameters(),
+    });
+
+    expect(report.dataQuality.calendarRejectedSessionCount).toBe(1);
+    expect(report.warnings).toEqual([]);
+    expect(report.rejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionDate: '2025-01-21',
+          reason: 'outside_trading_calendar',
+        }),
+      ]),
+    );
+    expect(report.events.some((event) => event.sessionDate === '2025-01-21')).toBe(false);
+  });
+
   it('records an incomplete opening range instead of inventing a session', () => {
     const candles = syntheticArchive().filter((candle) => candle.time !== '2025-01-21T07:15:00.000Z');
     const report = collect(candles);

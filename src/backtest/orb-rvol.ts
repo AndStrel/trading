@@ -100,7 +100,8 @@ export type OrbRvolRejectionReason =
   | 'insufficient_rvol_history'
   | 'incomplete_signal_bar'
   | 'entry_data_gap'
-  | 'entry_open_not_above_range';
+  | 'entry_open_not_above_range'
+  | 'outside_trading_calendar';
 
 export type OrbRvolRejection = {
   ticker: string;
@@ -133,6 +134,7 @@ export type OrbRvolGroupSummary = {
 
 export type OrbRvolDataQuality = {
   sessionCount: number;
+  calendarRejectedSessionCount: number;
   completeOpeningRangeSessionCount: number;
   noMainSessionDataCount: number;
   incompleteOpeningRangeSessionCount: number;
@@ -566,6 +568,7 @@ function forwardReturn(
 function emptyDataQuality(): OrbRvolDataQuality {
   return {
     sessionCount: 0,
+    calendarRejectedSessionCount: 0,
     completeOpeningRangeSessionCount: 0,
     noMainSessionDataCount: 0,
     incompleteOpeningRangeSessionCount: 0,
@@ -654,7 +657,14 @@ export function collectOrbRvolResearch(input: OrbRvolInput): OrbRvolReport {
         sessionDate,
       });
       if (!schedule) {
-        warnings.push(`${instrument.ticker} ${sessionDate}: session schedule is unavailable`);
+        dataQuality.calendarRejectedSessionCount += 1;
+        rejections.push({
+          ticker: instrument.ticker,
+          instrumentId: instrument.instrumentId,
+          sessionDate,
+          reason: 'outside_trading_calendar',
+          detail: 'The session date is outside the configured historical trading calendar',
+        });
         continue;
       }
       validateSchedule(schedule);
