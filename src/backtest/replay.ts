@@ -16,6 +16,17 @@ export type ReplayInstrument = {
   priceStep: number;
 };
 
+export type ReplaySignalFeatures = {
+  signalMinuteMoscow: number;
+  relativeVolume: number;
+  averageCandleTurnoverRub: number;
+  trendDistance: number;
+  vwapDistance: number;
+  pullbackDistance: number;
+  atr14RubPerUnit: number;
+  riskPerUnitRub: number;
+};
+
 export type ReplayPhase = {
   id: 'development' | 'validation' | 'out_of_sample';
   label: string;
@@ -124,6 +135,7 @@ export type ReplayTrade = {
   maxFavorableExcursionRub: number;
   maxAdverseExcursionR: number;
   maxFavorableExcursionR: number;
+  signalFeatures: ReplaySignalFeatures;
   marketPnlRub: number;
   totalSlippageRub: number;
   totalCommissionRub: number;
@@ -160,6 +172,17 @@ export type ReplayPeriodSummary = {
   averageMfeR: number | null;
 };
 
+export type ReplaySignalBucketSummary = {
+  dimension: 'relativeVolume' | 'trendDistance' | 'signalTime';
+  bucket: string;
+  tradeCount: number;
+  marketPnlRub: number;
+  netPnlRub: number;
+  winRate: number | null;
+  averageMaeR: number | null;
+  averageMfeR: number | null;
+};
+
 export type ReplayPhaseReport = {
   phase: ReplayPhase;
   signalCount: number;
@@ -188,6 +211,7 @@ export type ReplayPhaseReport = {
   exitReasons: Record<ReplayExitReason, number>;
   tickerResults: ReplayTickerSummary[];
   monthlyResults: ReplayPeriodSummary[];
+  signalBuckets: ReplaySignalBucketSummary[];
   /** Complete deterministic ledger for audit/recalculation; it never contains credentials. */
   trades: ReplayTrade[];
   warnings: string[];
@@ -249,6 +273,7 @@ type Candidate = {
   exitMarketPrice: number;
   maxAdverseExcursionPrice: number;
   maxFavorableExcursionPrice: number;
+  signalFeatures: ReplaySignalFeatures;
 };
 
 type IncompleteCandidate = Omit<
@@ -802,6 +827,16 @@ function buildCandidates(
         entryMarketPrice,
         stopPrice,
         targetPrice,
+        signalFeatures: {
+          signalMinuteMoscow: bar.minuteOfDayMoscow,
+          relativeVolume,
+          averageCandleTurnoverRub: averageTurnover,
+          trendDistance: sma20 / sma50 - 1,
+          vwapDistance: bar.close / vwap - 1,
+          pullbackDistance: previousBar.close / previousVwap! - 1,
+          atr14RubPerUnit: atr14,
+          riskPerUnitRub: riskPerUnit,
+        },
       };
       if (!exit) {
         incompleteCandidates.push(candidateBase);
@@ -879,6 +914,16 @@ function materializeTrade(candidate: Candidate, parameters: ReplayParameters): {
       maxFavorableExcursionRub,
       maxAdverseExcursionR: round(candidate.maxAdverseExcursionPrice / riskPerUnit, 4),
       maxFavorableExcursionR: round(candidate.maxFavorableExcursionPrice / riskPerUnit, 4),
+      signalFeatures: {
+        signalMinuteMoscow: candidate.signalFeatures.signalMinuteMoscow,
+        relativeVolume: round(candidate.signalFeatures.relativeVolume, 4),
+        averageCandleTurnoverRub: round(candidate.signalFeatures.averageCandleTurnoverRub),
+        trendDistance: round(candidate.signalFeatures.trendDistance, 6),
+        vwapDistance: round(candidate.signalFeatures.vwapDistance, 6),
+        pullbackDistance: round(candidate.signalFeatures.pullbackDistance, 6),
+        atr14RubPerUnit: round(candidate.signalFeatures.atr14RubPerUnit, 6),
+        riskPerUnitRub: round(candidate.signalFeatures.riskPerUnitRub, 6),
+      },
       marketPnlRub,
       totalSlippageRub,
       totalCommissionRub,
@@ -932,6 +977,49 @@ function summarizeTradeGroup(period: string, trades: readonly ReplayTrade[]): Re
     averageMaeR: average(trades.map((trade) => trade.maxAdverseExcursionR)),
     averageMfeR: average(trades.map((trade) => trade.maxFavorableExcursionR)),
   };
+}
+
+function summarizeSignalBuckets(trades: readonly ReplayTrade[]): ReplaySignalBucketSummary[] {
+  const buckets = new Map<string, { dimension: ReplaySignalBucketSummary['dimension']; bucket: string; trades: ReplayTrade[] }>();
+  const add = (dimension: ReplaySignalBucketSummary['dimension'], bucket: string, trade: ReplayTrade): void => {
+    const key = `${dimension}:${bucket}`;
+    const group = buckets.get(key) ?? { dimension, bucket, trades: [] };
+    group.trades.push(trade);
+    buckets.set(key, group);
+  };
+
+  for (const trade of trades) {
+    const features = trade.signalFeatures;
+    add(
+      'relativeVolume',
+      features.relativeVolume < 1.25 ? '1.00-1.25' : features.relativeVolume < 1.5 ? '1.25-1.50' : '1.50+',
+      trade,
+    );
+    add(
+      'trendDistance',
+      features.trendDistance < 0.003 ? '0.20-0.30%' : features.trendDistance < 0.005 ? '0.30-0.50%' : '0.50%+',
+      trade,
+    );
+    add(
+      'signalTime',
+      features.signalMinuteMoscow < 900 ? '14:10-15:00' : features.signalMinuteMoscow < 960 ? '15:00-16:00' : '16:00-17:15',
+      trade,
+    );
+  }
+
+  return [...buckets.values()].map((group) => {
+    const summary = summarizeTradeGroup(group.bucket, group.trades);
+    return {
+      dimension: group.dimension,
+      bucket: group.bucket,
+      tradeCount: summary.tradeCount,
+      marketPnlRub: summary.marketPnlRub,
+      netPnlRub: summary.netPnlRub,
+      winRate: summary.winRate,
+      averageMaeR: summary.averageMaeR,
+      averageMfeR: summary.averageMfeR,
+    };
+  });
 }
 
 function summarizePhase(
@@ -1140,6 +1228,7 @@ function summarizePhase(
     exitReasons,
     tickerResults,
     monthlyResults,
+    signalBuckets: summarizeSignalBuckets(trades),
     trades: [...trades].sort(
       (left, right) => left.entryAt.localeCompare(right.entryAt) || left.ticker.localeCompare(right.ticker),
     ),

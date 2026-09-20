@@ -138,6 +138,23 @@ describe('replayVwapPullback', () => {
     expect(trade.maxFavorableExcursionRub).toBeGreaterThan(0);
     expect(trade.maxAdverseExcursionR).toBeGreaterThanOrEqual(0);
     expect(trade.maxFavorableExcursionR).toBeGreaterThan(0);
+    expect(trade.signalFeatures).toEqual(
+      expect.objectContaining({
+        signalMinuteMoscow: 850,
+        relativeVolume: expect.any(Number),
+        averageCandleTurnoverRub: expect.any(Number),
+        trendDistance: expect.any(Number),
+        vwapDistance: expect.any(Number),
+        pullbackDistance: expect.any(Number),
+      }),
+    );
+    expect(phase.signalBuckets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ dimension: 'relativeVolume', tradeCount: 1 }),
+        expect.objectContaining({ dimension: 'trendDistance', tradeCount: 1 }),
+        expect.objectContaining({ dimension: 'signalTime', tradeCount: 1 }),
+      ]),
+    );
     expect(phase.monthlyResults).toEqual([
       expect.objectContaining({ period: '2025-01', tradeCount: 1 }),
     ]);
