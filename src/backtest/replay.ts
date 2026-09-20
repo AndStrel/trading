@@ -76,7 +76,6 @@ export const DEFAULT_REPLAY_PARAMETERS: Omit<
   | 'maxRiskRub'
   | 'maxConcurrentPositions'
   | 'minAverageCandleTurnoverRub'
-  | 'targetRiskMultiple'
 > = {
   minRelativeVolume: 1,
   minTrendDistance: 0.002,
