@@ -87,7 +87,7 @@ jobs:
                   trap - EXIT
                 '
 
-              docker compose run --rm --no-deps telegram-service \
+              docker compose exec -T telegram-service \
                 node --input-type=module -e '
                   import { readFile } from "node:fs/promises";
                   const replay = JSON.parse(await readFile("/app/data/backtests/replay-2025-liquid-20.json", "utf8"));
@@ -107,3 +107,44 @@ jobs:
                   }));
                 '
           REMOTE
+
+      - name: Download and validate replay report
+        run: |
+          report_path="$RUNNER_TEMP/replay-2025-liquid-20.json"
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' > "$report_path" <<'REMOTE'
+              set -Eeuo pipefail
+              cd "/opt/andstrel/trading"
+              docker compose exec -T telegram-service \
+                sh -ceu '
+                  test -s /app/data/backtests/replay-2025-liquid-20.json
+                  cat /app/data/backtests/replay-2025-liquid-20.json
+                '
+          REMOTE
+          jq -e . "$report_path" >/dev/null
+          test "$(jq -r '.status' "$report_path")" = "ok"
+
+          {
+            echo "## Replay 2025 historical data"
+            echo
+            echo "Source commit: $(jq -r '.sourceCommit' "$report_path")"
+            echo
+            echo "| Phase | Trades | Net PnL, ₽ | Return | Profit factor |"
+            echo "|---|---:|---:|---:|---:|"
+            jq -r '.report.phases[] | "| \(.phase.id) | \(.executedTradeCount) | \(.netPnlRub) | \(.returnPct)% | \(.profitFactor // \"—\") |"' "$report_path"
+            echo
+            echo "### Warnings"
+            jq -r '.report.warnings[]?, .report.phases[]?.warnings[]?' "$report_path" | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload replay report
+        uses: actions/upload-artifact@v4
+        with:
+          name: replay-2025-liquid-20-${{ github.run_id }}
+          path: ${{ runner.temp }}/replay-2025-liquid-20.json
+          if-no-files-found: error
+          retention-days: 30
