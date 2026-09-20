@@ -69,8 +69,9 @@ jobs:
               chmod 600 .env
               docker compose up -d --build --remove-orphans
 
-              docker compose run --rm --no-deps telegram-service \
+              docker compose run --rm --no-deps \
                 -e REPLAY_SOURCE_COMMIT="$source_commit" \
+                telegram-service \
                 sh -ceu '
                   umask 077
                   report_path="/app/data/backtests/replay-2025-liquid-20.json"
