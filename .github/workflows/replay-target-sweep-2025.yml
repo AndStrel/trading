@@ -1,0 +1,139 @@
+name: Replay target sweep 2025
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_risk_multiples:
+        description: 'Comma-separated target multiples, for example 0.75,1,1.25,1.5,2'
+        required: false
+        default: '0.75,1,1.25,1.5,2,2.5'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trading-telegram-production
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: production
+    env:
+      DEPLOY_HOST: ${{ vars.TRADING_DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.TRADING_DEPLOY_USER }}
+      DEPLOY_PATH: ${{ vars.TRADING_DEPLOY_PATH }}
+      DEPLOY_SSH_KEY: ${{ secrets.TRADING_DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.TRADING_DEPLOY_KNOWN_HOSTS }}
+      TARGET_RISK_MULTIPLES: ${{ inputs.target_risk_multiples }}
+    steps:
+      - name: Validate deployment configuration
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test "$DEPLOY_PATH" = "/opt/andstrel/trading"
+          case "$TARGET_RISK_MULTIPLES" in
+            ''|*[!0-9.,]*)
+              echo "target_risk_multiples may contain only digits, dots and commas"
+              exit 1
+              ;;
+          esac
+
+      - name: Configure verified SSH access
+        run: |
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Build current main and run target sweep
+        run: |
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            env TARGET_RISK_MULTIPLES="$TARGET_RISK_MULTIPLES" 'bash -s' <<'REMOTE'
+              set -Eeuo pipefail
+
+              deployment_path="/opt/andstrel/trading"
+
+              test -d "$deployment_path/.git"
+              test -f "$deployment_path/.env"
+              command -v git >/dev/null
+              command -v docker >/dev/null
+              docker compose version >/dev/null
+
+              cd "$deployment_path"
+              git fetch --depth=1 origin main
+              git checkout --detach origin/main
+              source_commit="$(git rev-parse HEAD)"
+              chmod 600 .env
+              docker compose up -d --build --remove-orphans
+
+              docker compose run --rm --no-deps \
+                -e NODE_OPTIONS=--max-old-space-size=2048 \
+                -e REPLAY_SOURCE_COMMIT="$source_commit" \
+                -e TARGET_RISK_MULTIPLES="$TARGET_RISK_MULTIPLES" \
+                telegram-service \
+                sh -ceu '
+                  umask 077
+                  report_path="/app/data/backtests/replay-2025-target-sweep.json"
+                  report_tmp="${report_path}.tmp.$$"
+                  trap "rm -f \"$report_tmp\"" EXIT
+                  mkdir -p /app/data/backtests
+                  node dist/backtest-replay-sweep.js \
+                    --year 2025 \
+                    --target-risk-multiple "$TARGET_RISK_MULTIPLES" > "$report_tmp"
+                  test -s "$report_tmp"
+                  mv -f "$report_tmp" "$report_path"
+                  trap - EXIT
+                '
+          REMOTE
+
+      - name: Download and validate sweep report
+        run: |
+          report_path="$RUNNER_TEMP/replay-2025-target-sweep.json"
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' > "$report_path" <<'REMOTE'
+              set -Eeuo pipefail
+              cd "/opt/andstrel/trading"
+              docker compose exec -T telegram-service \
+                sh -ceu '
+                  test -s /app/data/backtests/replay-2025-target-sweep.json
+                  cat /app/data/backtests/replay-2025-target-sweep.json
+                '
+          REMOTE
+          jq -e '.status == "ok" and .mode == "target-risk-sweep" and (.runs | length) > 0' "$report_path" >/dev/null
+
+          {
+            echo "## Replay 2025 target sweep"
+            echo
+            echo "Source commit: $(jq -r '.sourceCommit' "$report_path")"
+            echo
+            echo "| Target R | Phase | Trades | Net PnL, ₽ | Return | Profit factor |"
+            echo "|---:|---|---:|---:|---:|---:|"
+            jq -r '.runs[] | .targetRiskMultiple as $target | .report.phases[] | "| \($target) | \(.phase.id) | \(.executedTradeCount) | \(.netPnlRub) | \(.returnPct)% | \(.profitFactor // "—") |"' "$report_path"
+            echo
+            echo "### Warnings"
+            jq -r '.runs[] | .report.warnings[]?, .report.phases[]?.warnings[]?' "$report_path" | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload target sweep report
+        uses: actions/upload-artifact@v4
+        with:
+          name: replay-2025-target-sweep-${{ github.run_id }}
+          path: ${{ runner.temp }}/replay-2025-target-sweep.json
+          if-no-files-found: error
+          retention-days: 30

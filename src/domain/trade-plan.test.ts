@@ -44,6 +44,24 @@ describe('calculateTradePlan', () => {
     expect(plan.reasons).toContain('Net reward-to-risk is below 2.0');
   });
 
+  it('allows an explicitly lower reward-to-risk floor for research scenarios', () => {
+    const plan = calculateTradePlan({
+      side: 'long',
+      entryPrice: 300,
+      stopPrice: 295,
+      targetPrice: 307,
+      lotSize: 10,
+      maxRiskRub: 500,
+      maxPositionRub: 50_000,
+      commissionRate: 0.0005,
+      slippageRate: 0.0005,
+      minimumRewardToRisk: 1,
+    });
+
+    expect(plan.allowed).toBe(true);
+    expect(plan.rewardToRisk).toBeGreaterThanOrEqual(1);
+  });
+
   it('does not allow a partial lot', () => {
     const plan = calculateTradePlan({
       side: 'long',

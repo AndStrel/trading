@@ -7,7 +7,7 @@ import type { HistoricalMinuteCandle } from '../history/market-data-store.js';
  * then enters at the open of the following one-minute bar, so no candle used by the signal
  * can also be used as the entry price.
  */
-export const REPLAY_STRATEGY_ID = 'vwap-pullback-v1' as const;
+export const REPLAY_STRATEGY_ID = 'vwap-pullback-v2-cost-aware-target' as const;
 
 export type ReplayInstrument = {
   instrumentId: string;
@@ -62,6 +62,7 @@ export type ReplayParameters = {
   minTrendDistance: number;
   maxHoldingMinutes: number;
   targetRiskMultiple: number;
+  minimumRewardToRisk: number;
   minSignalMinuteMoscow: number;
   maxSignalMinuteMoscow: number;
   forceExitMinuteMoscow: number;
@@ -81,6 +82,9 @@ export const DEFAULT_REPLAY_PARAMETERS: Omit<
   minTrendDistance: 0.002,
   maxHoldingMinutes: 90,
   targetRiskMultiple: 2.0,
+  // Replay experiments may test targets below 2R. Live trade-plan callers retain their
+  // independent 2.0 default unless they explicitly opt into another floor.
+  minimumRewardToRisk: 0,
   // Signals first become possible after the 50 five-minute-bar warm-up. Keeping the window
   // away from the open and evening session makes the first baseline intentionally conservative.
   minSignalMinuteMoscow: 14 * 60 + 10,
@@ -286,6 +290,9 @@ function validateParameters(parameters: ReplayParameters): void {
     throw new Error('maxHoldingMinutes must be a positive integer');
   }
   assertFinitePositive(parameters.targetRiskMultiple, 'targetRiskMultiple');
+  if (!Number.isFinite(parameters.minimumRewardToRisk) || parameters.minimumRewardToRisk < 0) {
+    throw new Error('minimumRewardToRisk must be finite and non-negative');
+  }
   assertMinuteOfDay(parameters.minSignalMinuteMoscow, 'minSignalMinuteMoscow');
   assertMinuteOfDay(parameters.maxSignalMinuteMoscow, 'maxSignalMinuteMoscow');
   assertMinuteOfDay(parameters.forceExitMinuteMoscow, 'forceExitMinuteMoscow');
@@ -686,11 +693,13 @@ function buildCandidates(
       const riskPerUnit = Math.max(atr14 * 1.5, entryMarketPrice * 0.001);
       const roundTripCostPerUnit =
         entryMarketPrice * (parameters.commissionRate * 2 + parameters.slippageRate * 2);
-      // Two ticks beyond the theoretical break-even R/R line prevent a floating-point or
-      // exchange-step rounding artefact from turning an intended 2.0R net trade into 1.999R.
+      // Keep the target multiple meaningful. The old replay forced every target to at least
+      // 2R plus costs, so 2.0R and 2.5R produced identical prices. The floor below only keeps
+      // the gross target above round-trip costs and two price ticks; the configured target and
+      // the explicit plan safety floor decide whether a candidate is accepted.
       const targetDistance = Math.max(
         riskPerUnit * parameters.targetRiskMultiple,
-        riskPerUnit * 2 + roundTripCostPerUnit * 3 + instrument.priceStep * 2,
+        roundTripCostPerUnit + instrument.priceStep * 2,
       );
       const stopPrice = roundDownToStep(entryMarketPrice - riskPerUnit, instrument.priceStep);
       const targetPrice = roundUpToStep(entryMarketPrice + targetDistance, instrument.priceStep);
@@ -709,6 +718,7 @@ function buildCandidates(
         maxPositionRub: parameters.maxPositionRub,
         commissionRate: parameters.commissionRate,
         slippageRate: parameters.slippageRate,
+        minimumRewardToRisk: parameters.minimumRewardToRisk,
       });
       if (!plan.allowed || plan.lots === 0 || plan.units === 0) {
         rejectedPlanSessionDates.push(bar.sessionDate);
@@ -1092,7 +1102,7 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
     strategyRules: [
       'Completed 5m bar: SMA20 is at least 0.2% above SMA50, with session VWAP pullback and reclaim.',
       '5m turnover filter and time-of-day relative volume use only earlier completed data.',
-      'Entry is next 1m open; stop uses max(1.5 ATR14, 0.1%); target uses configurable targetRiskMultiple with a cost floor.',
+      'Entry is next 1m open; stop uses max(1.5 ATR14, 0.1%); target uses configurable targetRiskMultiple with only a cost-and-tick floor.',
       'When one OHLC minute touches both stop and target, replay assigns the adverse stop first.',
     ],
     parameters,

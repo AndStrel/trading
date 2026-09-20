@@ -7,6 +7,7 @@ import {
   MIN_SUPPORTED_REPLAY_YEAR,
   replayVwapPullback,
   type ReplayInstrument,
+  type ReplayParameters,
 } from './backtest/replay.js';
 import { MarketDataStore } from './history/market-data-store.js';
 import {
@@ -21,11 +22,31 @@ export type ReplayCliOptions = {
   help: boolean;
 };
 
+export type ReplayArchiveMetadata = {
+  ticker: string;
+  instrumentId: string;
+  archiveSha256: string;
+  storedCandleCount: number;
+  invalidRowCount: number;
+  lotSize: number | null;
+  priceStep: number | null;
+  importedAt: string;
+};
+
+export type ReplayRunResult = {
+  status: 'ok';
+  year: number;
+  requestedTickers: string[];
+  sourceCommit: string | null;
+  archives: ReplayArchiveMetadata[];
+  report: ReturnType<typeof replayVwapPullback>;
+};
+
 const usage = `Usage:
   npm run backtest:replay -- --year 2025
   npm run backtest:replay -- --year 2025 --ticker SBER,GAZP
 
-Replays the fixed vwap-pullback-v1 baseline from already imported one-minute archives.
+Replays the registered vwap-pullback strategy from already imported one-minute archives.
 It is read-only: the command never sends a broker order and fails rather than silently
 dropping a requested ticker that lacks an imported archive.`;
 
@@ -86,12 +107,10 @@ function archiveRange(year: number): { from: string; to: string } {
   };
 }
 
-async function main(): Promise<void> {
-  const options = parseReplayArgs(process.argv.slice(2));
-  if (options.help) {
-    console.log(usage);
-    return;
-  }
+export async function runReplay(
+  options: ReplayCliOptions,
+  parameterOverrides: Partial<ReplayParameters> = {},
+): Promise<ReplayRunResult> {
   if (options.year === null) throw new Error(`An explicit --year is required.\n\n${usage}`);
 
   const config = loadConfig();
@@ -103,16 +122,7 @@ async function main(): Promise<void> {
     instrument: ReplayInstrument;
     archive: ReturnType<MarketDataStore['listArchiveImports']>[number];
   }> = [];
-  const archives: Array<{
-    ticker: string;
-    instrumentId: string;
-    archiveSha256: string;
-    storedCandleCount: number;
-    invalidRowCount: number;
-    lotSize: number | null;
-    priceStep: number | null;
-    importedAt: string;
-  }> = [];
+  const archives: ReplayArchiveMetadata[] = [];
   const missingArchiveMetadata: string[] = [];
   const archivesByTicker = new Map<string, ReturnType<MarketDataStore['listArchiveImports']>[number]>();
   for (const archive of store.listArchiveImports(options.year)) {
@@ -204,6 +214,7 @@ async function main(): Promise<void> {
           ],
     parameters: {
       ...DEFAULT_REPLAY_PARAMETERS,
+      ...parameterOverrides,
       commissionRate: config.commissionRate,
       slippageRate: config.scanner.slippageRate,
       startingCapitalRub: config.backtest.startingCapitalRub,
@@ -214,16 +225,23 @@ async function main(): Promise<void> {
     },
   });
 
-  console.log(
-    JSON.stringify({
-      status: 'ok',
-      year: options.year,
-      requestedTickers,
-      sourceCommit: process.env.REPLAY_SOURCE_COMMIT?.trim() || process.env.GITHUB_SHA?.trim() || null,
-      archives,
-      report,
-    }),
-  );
+  return {
+    status: 'ok',
+    year: options.year,
+    requestedTickers,
+    sourceCommit: process.env.REPLAY_SOURCE_COMMIT?.trim() || process.env.GITHUB_SHA?.trim() || null,
+    archives,
+    report,
+  };
+}
+
+async function main(): Promise<void> {
+  const options = parseReplayArgs(process.argv.slice(2));
+  if (options.help) {
+    console.log(usage);
+    return;
+  }
+  console.log(JSON.stringify(await runReplay(options)));
 }
 
 const entryPoint = process.argv[1];
