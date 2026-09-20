@@ -30,10 +30,15 @@ export type TInvestHistoryClientOptions = {
   transport?: TInvestTransport;
   fetchImpl?: FetchLike;
   curlGetArchive?: CurlGetArchive;
+  retryAttempts?: number;
+  retryDelayMs?: number;
+  sleep?: (delayMs: number) => Promise<void>;
 };
 
 const curlStatusPrefix = '__ANDSTREL_TINVEST_HISTORY_STATUS__:';
 const maxArchiveBytes = 64 * 1024 * 1024;
+const defaultRetryAttempts = 3;
+const defaultRetryDelayMs = 1_000;
 
 function describeNetworkError(error: unknown): string {
   if (!(error instanceof Error)) return 'unknown network failure';
@@ -174,6 +179,10 @@ function isSuccessStatus(status: number): boolean {
   return status >= 200 && status < 300;
 }
 
+function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
 function validateRequest(request: HistoryArchiveRequest): void {
   const instrumentId = request.instrumentId?.trim() ?? '';
   const figi = request.figi?.trim() ?? '';
@@ -190,6 +199,9 @@ export class TInvestHistoryClient {
   private readonly transport: TInvestTransport;
   private readonly fetchImpl: FetchLike;
   private readonly curlGetArchive: CurlGetArchive;
+  private readonly retryAttempts: number;
+  private readonly retryDelayMs: number;
+  private readonly sleep: (delayMs: number) => Promise<void>;
 
   constructor(
     private readonly token: string | undefined,
@@ -199,6 +211,9 @@ export class TInvestHistoryClient {
     this.transport = options.transport ?? 'fetch';
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.curlGetArchive = options.curlGetArchive ?? getArchiveWithSystemCurl;
+    this.retryAttempts = Math.max(1, Math.floor(options.retryAttempts ?? defaultRetryAttempts));
+    this.retryDelayMs = Math.max(0, options.retryDelayMs ?? defaultRetryDelayMs);
+    this.sleep = options.sleep ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
   }
 
   async getMinuteCandleArchive(request: HistoryArchiveRequest): Promise<Uint8Array> {
@@ -213,46 +228,58 @@ export class TInvestHistoryClient {
     else url.searchParams.set('instrument_id', request.instrumentId!.trim());
     url.searchParams.set('year', String(request.year));
 
-    let status: number;
-    let statusText: string;
-    let body: Uint8Array;
+    for (let attempt = 1; attempt <= this.retryAttempts; attempt += 1) {
+      let status: number;
+      let statusText: string;
+      let body: Uint8Array;
 
-    try {
-      if (this.transport === 'system-curl') {
-        const response = await this.curlGetArchive({ url: url.toString(), token: this.token });
-        status = response.status;
-        statusText = response.statusText;
-        body = response.body;
-      } else {
-        const response = await this.fetchImpl(url.toString(), {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${this.token}`,
-            Accept: 'application/zip, application/octet-stream',
-            'x-app-name': 'AndStrel.trading-mcp',
-          },
-          signal: AbortSignal.timeout(120_000),
-        });
-        status = response.status;
-        statusText = response.statusText;
-        const contentLength = Number(response.headers.get('content-length'));
-        if (Number.isFinite(contentLength) && contentLength > maxArchiveBytes) {
-          throw new Error(`T-Invest history archive exceeds ${maxArchiveBytes} byte safety limit`);
+      try {
+        if (this.transport === 'system-curl') {
+          const response = await this.curlGetArchive({ url: url.toString(), token: this.token });
+          status = response.status;
+          statusText = response.statusText;
+          body = response.body;
+        } else {
+          const response = await this.fetchImpl(url.toString(), {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${this.token}`,
+              Accept: 'application/zip, application/octet-stream',
+              'x-app-name': 'AndStrel.trading-mcp',
+            },
+            signal: AbortSignal.timeout(120_000),
+          });
+          status = response.status;
+          statusText = response.statusText;
+          const contentLength = Number(response.headers.get('content-length'));
+          if (Number.isFinite(contentLength) && contentLength > maxArchiveBytes) {
+            throw new Error(`T-Invest history archive exceeds ${maxArchiveBytes} byte safety limit`);
+          }
+          body = new Uint8Array(await response.arrayBuffer());
+          if (body.byteLength > maxArchiveBytes) {
+            throw new Error(`T-Invest history archive exceeds ${maxArchiveBytes} byte safety limit`);
+          }
         }
-        body = new Uint8Array(await response.arrayBuffer());
-        if (body.byteLength > maxArchiveBytes) {
-          throw new Error(`T-Invest history archive exceeds ${maxArchiveBytes} byte safety limit`);
+      } catch (error) {
+        if (attempt < this.retryAttempts) {
+          await this.sleep(this.retryDelayMs * 2 ** (attempt - 1));
+          continue;
         }
+        throw new Error(`T-Invest history network error: ${describeNetworkError(error)}`);
       }
-    } catch (error) {
-      throw new Error(`T-Invest history network error: ${describeNetworkError(error)}`);
+
+      if (!isSuccessStatus(status)) {
+        if (isRetryableStatus(status) && attempt < this.retryAttempts) {
+          await this.sleep(this.retryDelayMs * 2 ** (attempt - 1));
+          continue;
+        }
+        throw new Error(`T-Invest history API ${status || statusText}: ${describeApiError(body)}`);
+      }
+      if (body.byteLength === 0) throw new Error('T-Invest history API returned an empty archive');
+
+      return body;
     }
 
-    if (!isSuccessStatus(status)) {
-      throw new Error(`T-Invest history API ${status || statusText}: ${describeApiError(body)}`);
-    }
-    if (body.byteLength === 0) throw new Error('T-Invest history API returned an empty archive');
-
-    return body;
+    throw new Error('T-Invest history download exhausted retry attempts');
   }
 }

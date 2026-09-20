@@ -54,6 +54,42 @@ describe('TInvestHistoryClient', () => {
     );
   });
 
+  it('retries transient network failures before succeeding', async () => {
+    const archive = new Uint8Array([80, 75, 3, 4]);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(new Error('fetch failed: UND_ERR_SOCKET: other side closed'))
+      .mockRejectedValueOnce(new Error('fetch failed: UND_ERR_SOCKET: other side closed'))
+      .mockResolvedValueOnce(new Response(archive, { status: 200 }));
+    const sleepMock = vi.fn(async () => undefined);
+    const client = new TInvestHistoryClient('read-secret', 'https://example.test/history-data', {
+      fetchImpl: fetchMock,
+      retryDelayMs: 0,
+      sleep: sleepMock,
+    });
+
+    await expect(client.getMinuteCandleArchive({ instrumentId: 'uid', year: 2025 })).resolves.toEqual(archive);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(sleepMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries rate limits and upstream server failures', async () => {
+    const archive = new Uint8Array([80, 75, 3, 4]);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('busy', { status: 429 }))
+      .mockResolvedValueOnce(new Response('temporary failure', { status: 503 }))
+      .mockResolvedValueOnce(new Response(archive, { status: 200 }));
+    const client = new TInvestHistoryClient('read-secret', 'https://example.test/history-data', {
+      fetchImpl: fetchMock,
+      retryDelayMs: 0,
+      sleep: vi.fn(async () => undefined),
+    });
+
+    await expect(client.getMinuteCandleArchive({ instrumentId: 'uid', year: 2025 })).resolves.toEqual(archive);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it('uses system curl only when configured', async () => {
     const curlGetArchive = vi.fn<CurlGetArchive>().mockResolvedValue({
       status: 200,
