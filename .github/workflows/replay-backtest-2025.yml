@@ -87,7 +87,7 @@ jobs:
                   trap - EXIT
                 '
 
-              docker compose run --rm --no-deps telegram-service \
+              docker compose exec -T telegram-service \
                 node --input-type=module -e '
                   import { readFile } from "node:fs/promises";
                   const replay = JSON.parse(await readFile("/app/data/backtests/replay-2025-liquid-20.json", "utf8"));
@@ -119,7 +119,7 @@ jobs:
             "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' > "$report_path" <<'REMOTE'
               set -Eeuo pipefail
               cd "/opt/andstrel/trading"
-              docker compose run --rm --no-deps telegram-service \
+              docker compose exec -T telegram-service \
                 sh -ceu '
                   test -s /app/data/backtests/replay-2025-liquid-20.json
                   cat /app/data/backtests/replay-2025-liquid-20.json
@@ -131,7 +131,7 @@ jobs:
           {
             echo "## Replay 2025 historical data"
             echo
-            echo "Source commit: \\`$(jq -r '.sourceCommit' "$report_path")\\`"
+            echo "Source commit: $(jq -r '.sourceCommit' "$report_path")"
             echo
             echo "| Phase | Trades | Net PnL, ₽ | Return | Profit factor |"
             echo "|---|---:|---:|---:|---:|"
