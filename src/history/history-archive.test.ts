@@ -87,16 +87,16 @@ describe('parseHistoryMinuteArchive', () => {
     expect(parsed.candles).toHaveLength(1);
   });
 
-  it('refuses an archive with ambiguous candle CSV files', () => {
-    expect(() =>
-      parseHistoryMinuteArchive(
-        multiFileArchive({
-          'candles-a.csv': 'UID,UTC,open,close,high,low,volume\nuid-1,2025-01-02T07:00:00Z,100,100,101,99,20\n',
-          'candles-b.csv': 'UID,UTC,open,close,high,low,volume\nuid-1,2025-01-02T07:01:00Z,100,100,101,99,20\n',
-        }),
-        { instrumentId: 'uid-1', year: 2025 },
-      ),
-    ).toThrow('multiple candle CSV files');
+  it('merges a candle archive split across multiple CSV files', () => {
+    const parsed = parseHistoryMinuteArchive(
+      multiFileArchive({
+        'candles-2025-01-02.csv': 'UID,UTC,open,close,high,low,volume\nuid-1,2025-01-02T07:00:00Z,100,100,101,99,20\n',
+        'candles-2025-01-03.csv': 'UID,UTC,open,close,high,low,volume\nuid-1,2025-01-03T07:00:00Z,100,100,101,99,20\n',
+      }),
+      { instrumentId: 'uid-1', year: 2025 },
+    );
+
+    expect(parsed.candles).toHaveLength(2);
   });
 
   it('creates a stable archive checksum for import provenance', () => {

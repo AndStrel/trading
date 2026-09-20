@@ -6,8 +6,8 @@ import type { HistoricalMinuteCandle } from './market-data-store.js';
 
 const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const MAX_CSV_BYTES = 256 * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES = 32;
-const MAX_CSV_ENTRIES = 4;
+const MAX_ARCHIVE_ENTRIES = 1024;
+const MAX_CSV_ENTRIES = 512;
 
 export type ParsedHistoryArchive = {
   candles: HistoricalMinuteCandle[];
@@ -156,6 +156,7 @@ function readCsvFromZip(archive: Uint8Array): string {
   let csvExceedsSafetyLimit = false;
   let archiveExceedsEntryLimit = false;
   let archiveEntryCount = 0;
+  let totalCsvBytes = 0;
   try {
     files = unzipSync(archive, {
       // Only CSV candidates are decompressed. Auxiliary files are expected from external
@@ -169,7 +170,12 @@ function readCsvFromZip(archive: Uint8Array): string {
         if (file.name.endsWith('/')) return false;
         if (!file.name.toLowerCase().endsWith('.csv')) return false;
         csvEntries.push({ name: file.name, originalSize: file.originalSize });
-        if (csvEntries.length > MAX_CSV_ENTRIES || file.originalSize > MAX_CSV_BYTES) {
+        totalCsvBytes += file.originalSize;
+        if (
+          csvEntries.length > MAX_CSV_ENTRIES ||
+          file.originalSize > MAX_CSV_BYTES ||
+          totalCsvBytes > MAX_CSV_BYTES
+        ) {
           csvExceedsSafetyLimit = true;
           return false;
         }
@@ -205,7 +211,30 @@ function readCsvFromZip(archive: Uint8Array): string {
     throw new Error(`Historical archive has no candle CSV with required columns; CSV entries: ${describeEntries(csvEntries)}`);
   }
   if (candleEntries.length > 1) {
-    throw new Error(`Historical archive has multiple candle CSV files; candidates: ${describeEntries(candleEntries)}`);
+    const documents = candleEntries.map((entry) => {
+      const bytes = files[entry.name];
+      if (!bytes || bytes.byteLength !== entry.originalSize) {
+        throw new Error(`Historical archive CSV cannot be read: ${entry.name}`);
+      }
+      return { entry, lines: strFromU8(bytes).split(/\r?\n/).filter((line) => line.trim().length > 0) };
+    });
+    const firstHeader = documents[0]!.lines[0];
+    if (!firstHeader) throw new Error('Historical archive CSV is empty');
+    const firstSignature = `${detectDelimiter(firstHeader)}:${splitCsvLine(firstHeader, detectDelimiter(firstHeader))
+      .map(normalizeHeader)
+      .join('|')}`;
+    const mergedLines = [firstHeader];
+    for (const document of documents) {
+      const header = document.lines[0];
+      if (!header) throw new Error(`Historical archive CSV is empty: ${document.entry.name}`);
+      const delimiter = detectDelimiter(header);
+      const signature = `${delimiter}:${splitCsvLine(header, delimiter).map(normalizeHeader).join('|')}`;
+      if (signature !== firstSignature) {
+        throw new Error(`Historical archive candle CSV headers differ: ${document.entry.name}`);
+      }
+      mergedLines.push(...document.lines.slice(1));
+    }
+    return mergedLines.join('\n');
   }
 
   const entry = candleEntries[0]!;
