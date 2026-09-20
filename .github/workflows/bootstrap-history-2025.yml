@@ -1,18 +1,10 @@
 name: Bootstrap 2025 historical data
 
 # This one-off workflow is safe to rerun: the importer is idempotent and keeps the broker
-# token on the VPS. It runs automatically when the archive-import contract changes and can
-# also be started manually after a failed or interrupted bootstrap.
+# token on the VPS. It is manual-only: an application deployment must not unexpectedly
+# trigger a large external-data import.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/bootstrap-history-2025.yml
-      - src/history-import.ts
-      - src/history/**
-      - src/scanner/intraday-universe.ts
-      - src/tbank/history-client.ts
 
 permissions:
   contents: read
