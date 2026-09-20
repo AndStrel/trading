@@ -102,7 +102,6 @@ function isCandleCsv(csv: string): boolean {
     const delimiter = detectDelimiter(header);
     const headers = splitCsvLine(header, delimiter);
     return [
-      ['uid', 'instrumentuid'],
       ['utc', 'time', 'timestamp'],
       ['open'],
       ['close'],
@@ -113,6 +112,18 @@ function isCandleCsv(csv: string): boolean {
   } catch {
     return false;
   }
+}
+
+function hasUidColumn(csv: string): boolean {
+  const header = csv.split(/\r?\n/, 1)[0];
+  if (!header?.trim()) return false;
+  const delimiter = detectDelimiter(header);
+  return splitCsvLine(header, delimiter).some((value) => ['uid', 'instrumentuid'].includes(normalizeHeader(value)));
+}
+
+function fileBelongsToInstrument(name: string, instrumentId: string): boolean {
+  const basename = name.split('/').pop() ?? name;
+  return basename.startsWith(`${instrumentId}_`);
 }
 
 function describeEntries(entries: Array<{ name: string; originalSize: number }>): string {
@@ -145,7 +156,7 @@ function parseTimestamp(value: string | null): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-function readCsvFromZip(archive: Uint8Array): string {
+function readCsvFromZip(archive: Uint8Array, instrumentId: string): string {
   if (archive.byteLength === 0) throw new Error('Historical archive is empty');
   if (archive.byteLength > MAX_ARCHIVE_BYTES) {
     throw new Error(`Historical archive exceeds ${MAX_ARCHIVE_BYTES} byte safety limit`);
@@ -216,7 +227,11 @@ function readCsvFromZip(archive: Uint8Array): string {
       if (!bytes || bytes.byteLength !== entry.originalSize) {
         throw new Error(`Historical archive CSV cannot be read: ${entry.name}`);
       }
-      return { entry, lines: strFromU8(bytes).split(/\r?\n/).filter((line) => line.trim().length > 0) };
+      const csv = strFromU8(bytes);
+      if (!hasUidColumn(csv) && !fileBelongsToInstrument(entry.name, instrumentId)) {
+        throw new Error(`Historical archive CSV filename does not identify ${instrumentId}: ${entry.name}`);
+      }
+      return { entry, lines: csv.split(/\r?\n/).filter((line) => line.trim().length > 0) };
     });
     const firstHeader = documents[0]!.lines[0];
     if (!firstHeader) throw new Error('Historical archive CSV is empty');
@@ -278,14 +293,14 @@ export function parseHistoryMinuteArchive(
     throw new Error('History archive year is invalid');
   }
 
-  const csv = readCsvFromZip(archive);
+  const csv = readCsvFromZip(archive, input.instrumentId);
   const lines = csv.split(/\r?\n/).filter((line) => line.trim().length > 0);
   const header = lines.shift();
   if (!header) throw new Error('Historical archive CSV is empty');
 
   const delimiter = detectDelimiter(header);
   const headers = splitCsvLine(header, delimiter);
-  const uidIndex = getColumnIndex(headers, ['uid', 'instrumentuid'], 'UID');
+  const uidIndex = headers.findIndex((headerValue) => ['uid', 'instrumentuid'].includes(normalizeHeader(headerValue)));
   const timeIndex = getColumnIndex(headers, ['utc', 'time', 'timestamp'], 'UTC');
   const openIndex = getColumnIndex(headers, ['open'], 'open');
   const closeIndex = getColumnIndex(headers, ['close'], 'close');
@@ -306,7 +321,7 @@ export function parseHistoryMinuteArchive(
       continue;
     }
 
-    const uid = readCell(row, uidIndex);
+    const uid = uidIndex < 0 ? input.instrumentId : readCell(row, uidIndex);
     const time = parseTimestamp(readCell(row, timeIndex));
     const open = parseDecimal(readCell(row, openIndex));
     const close = parseDecimal(readCell(row, closeIndex));

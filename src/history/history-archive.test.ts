@@ -90,8 +90,8 @@ describe('parseHistoryMinuteArchive', () => {
   it('merges a candle archive split across multiple CSV files', () => {
     const parsed = parseHistoryMinuteArchive(
       multiFileArchive({
-        'candles-2025-01-02.csv': 'UID,UTC,open,close,high,low,volume\nuid-1,2025-01-02T07:00:00Z,100,100,101,99,20\n',
-        'candles-2025-01-03.csv': 'UID,UTC,open,close,high,low,volume\nuid-1,2025-01-03T07:00:00Z,100,100,101,99,20\n',
+        'uid-1_2025-01-02.csv': 'timestamp,open,close,high,low,volume\n2025-01-02T07:00:00Z,100,100,101,99,20\n',
+        'uid-1_2025-01-03.csv': 'timestamp,open,close,high,low,volume\n2025-01-03T07:00:00Z,100,100,101,99,20\n',
       }),
       { instrumentId: 'uid-1', year: 2025 },
     );
