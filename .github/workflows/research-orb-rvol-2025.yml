@@ -1,0 +1,273 @@
+name: Research ORB RVOL 2025
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_start:
+        description: 'Verified main-session start in Moscow time, for example 10:00'
+        required: true
+        default: '10:00'
+        type: string
+      session_end:
+        description: 'Verified last usable main-session minute in Moscow time, for example 18:40'
+        required: true
+        default: '18:40'
+        type: string
+      tickers:
+        description: 'Optional comma-separated tickers; empty means the fixed liquid-20 set'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trading-telegram-production
+  cancel-in-progress: false
+
+jobs:
+  research:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    environment: production
+    env:
+      DEPLOY_HOST: ${{ vars.TRADING_DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.TRADING_DEPLOY_USER }}
+      DEPLOY_PATH: ${{ vars.TRADING_DEPLOY_PATH }}
+      DEPLOY_SSH_KEY: ${{ secrets.TRADING_DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.TRADING_DEPLOY_KNOWN_HOSTS }}
+      RESEARCH_SESSION_START: ${{ inputs.session_start }}
+      RESEARCH_SESSION_END: ${{ inputs.session_end }}
+      RESEARCH_TICKERS: ${{ inputs.tickers }}
+      RESEARCH_RUN_ID: ${{ github.run_id }}
+    steps:
+      - name: Validate deployment and research inputs
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test "$DEPLOY_PATH" = "/opt/andstrel/trading"
+          [[ "$RESEARCH_SESSION_START" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]
+          [[ "$RESEARCH_SESSION_END" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]
+          [[ -z "$RESEARCH_TICKERS" || "$RESEARCH_TICKERS" =~ ^[A-Z0-9.,-]+$ ]]
+          case "$RESEARCH_RUN_ID" in
+            ''|*[!0-9]*) echo "Invalid research run id" >&2; exit 1 ;;
+          esac
+
+      - name: Configure verified SSH access
+        run: |
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Build current main and start ORB RVOL worker
+        run: |
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=4 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            env RESEARCH_RUN_ID="$RESEARCH_RUN_ID" \
+              RESEARCH_SESSION_START="$RESEARCH_SESSION_START" \
+              RESEARCH_SESSION_END="$RESEARCH_SESSION_END" \
+              RESEARCH_TICKERS="$RESEARCH_TICKERS" 'bash -s' <<'REMOTE'
+              set -Eeuo pipefail
+
+              deployment_path="/opt/andstrel/trading"
+              test -d "$deployment_path/.git"
+              test -f "$deployment_path/.env"
+              command -v git >/dev/null
+              command -v docker >/dev/null
+              docker compose version >/dev/null
+
+              cd "$deployment_path"
+              git fetch --depth=1 origin main
+              git checkout --detach origin/main
+              source_commit="$(git rev-parse HEAD)"
+              chmod 600 .env
+              docker compose up -d --build --remove-orphans
+
+              run_dir="/tmp/trading-orb-rvol-${RESEARCH_RUN_ID}"
+              rm -rf -- "$run_dir"
+              install -d -m 700 "$run_dir"
+              cat > "$run_dir/worker.sh" <<'WORKER'
+              #!/usr/bin/env bash
+              set -uo pipefail
+
+              status=0
+              cd "$DEPLOY_PATH"
+              docker compose run --rm --no-deps \
+                -e NODE_OPTIONS=--max-old-space-size=2048 \
+                -e REPLAY_SOURCE_COMMIT="$SOURCE_COMMIT" \
+                -e RESEARCH_RUN_ID="$RESEARCH_RUN_ID" \
+                -e SESSION_START="$RESEARCH_SESSION_START" \
+                -e SESSION_END="$RESEARCH_SESSION_END" \
+                -e RESEARCH_TICKERS="$RESEARCH_TICKERS" \
+                telegram-service \
+                sh -ceu '
+                  umask 077
+                  report_path="/app/data/backtests/orb-rvol-2025-${RESEARCH_RUN_ID}.json"
+                  report_tmp="${report_path}.tmp.$$"
+                  trap "rm -f \"$report_tmp\"" EXIT
+                  mkdir -p /app/data/backtests
+                  set -- --year 2025 --session-start "$SESSION_START" --session-end "$SESSION_END"
+                  if [ -n "$RESEARCH_TICKERS" ]; then
+                    set -- "$@" --ticker "$RESEARCH_TICKERS"
+                  fi
+                  node dist/backtest-orb-rvol.js "$@" > "$report_tmp"
+                  test -s "$report_tmp"
+                  mv -f "$report_tmp" "$report_path"
+                  trap - EXIT
+                ' || status=$?
+
+              printf '%s\n' "$status" > "$RUN_DIR/exit_code"
+              exit "$status"
+          WORKER
+              chmod 700 "$run_dir/worker.sh"
+              DEPLOY_PATH="$deployment_path" \
+                RUN_DIR="$run_dir" \
+                SOURCE_COMMIT="$source_commit" \
+                RESEARCH_RUN_ID="$RESEARCH_RUN_ID" \
+                RESEARCH_SESSION_START="$RESEARCH_SESSION_START" \
+                RESEARCH_SESSION_END="$RESEARCH_SESSION_END" \
+                RESEARCH_TICKERS="$RESEARCH_TICKERS" \
+                nohup bash "$run_dir/worker.sh" > "$run_dir/worker.log" 2>&1 < /dev/null &
+              printf '%s\n' "$!" > "$run_dir/pid"
+              echo "ORB RVOL worker started: $run_dir"
+          REMOTE
+
+      - name: Wait for ORB RVOL worker
+        timeout-minutes: 65
+        run: |
+          run_dir="/tmp/trading-orb-rvol-${RESEARCH_RUN_ID}"
+          status_error="$RUNNER_TEMP/orb-rvol-${RESEARCH_RUN_ID}-ssh-error"
+          ssh_failures=0
+          heartbeat=0
+          deadline=$((SECONDS + 3600))
+
+          worker_state() {
+            ssh -i "$HOME/.ssh/id_ed25519" \
+              -o BatchMode=yes \
+              -o ConnectTimeout=15 \
+              -o ServerAliveInterval=15 \
+              -o ServerAliveCountMax=4 \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "if test -f '$run_dir/exit_code'; then cat '$run_dir/exit_code'; elif test -s '$run_dir/pid' && kill -0 \"\$(cat '$run_dir/pid')\" 2>/dev/null; then printf running; else printf missing; fi" \
+              2>"$status_error"
+          }
+
+          show_worker_log() {
+            ssh -i "$HOME/.ssh/id_ed25519" \
+              -o BatchMode=yes \
+              -o ConnectTimeout=15 \
+              -o ServerAliveInterval=15 \
+              -o ServerAliveCountMax=4 \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+              "$DEPLOY_USER@$DEPLOY_HOST" "tail -200 '$run_dir/worker.log'" || true
+          }
+
+          while (( SECONDS < deadline )); do
+            if state="$(worker_state)"; then
+              ssh_failures=0
+            else
+              ssh_failures=$((ssh_failures + 1))
+              echo "[$(date -u +%FT%TZ)] SSH status check failed (${ssh_failures}/6)" >&2
+              if (( ssh_failures == 1 || ssh_failures == 3 || ssh_failures == 6 )); then
+                sed -n '1,20p' "$status_error" >&2 || true
+              fi
+              if (( ssh_failures >= 6 )); then
+                echo "Cannot verify ORB RVOL worker after repeated SSH failures" >&2
+                show_worker_log
+                exit 1
+              fi
+              sleep 15
+              continue
+            fi
+            case "$state" in
+              running)
+                heartbeat=$((heartbeat + 1))
+                if (( heartbeat % 4 == 0 )); then
+                  echo "[$(date -u +%FT%TZ)] ORB RVOL worker is still running"
+                fi
+                sleep 15
+                ;;
+              missing)
+                echo "ORB RVOL worker disappeared without an exit code" >&2
+                show_worker_log
+                exit 1
+                ;;
+              0)
+                echo "[$(date -u +%FT%TZ)] ORB RVOL worker completed successfully"
+                exit 0
+                ;;
+              [0-9]*)
+                echo "ORB RVOL worker failed with exit code $state" >&2
+                show_worker_log
+                exit "$state"
+                ;;
+              *)
+                echo "Unexpected ORB RVOL worker state: $state" >&2
+                show_worker_log
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "ORB RVOL worker timed out" >&2
+          show_worker_log
+          exit 1
+
+      - name: Download and validate ORB RVOL report
+        run: |
+          report_path="$RUNNER_TEMP/orb-rvol-2025.json"
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=4 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" env RESEARCH_RUN_ID="$RESEARCH_RUN_ID" 'bash -s' > "$report_path" <<'REMOTE'
+              set -Eeuo pipefail
+              cd "/opt/andstrel/trading"
+              report_path="/app/data/backtests/orb-rvol-2025-${RESEARCH_RUN_ID}.json"
+              docker compose exec -T telegram-service \
+                sh -ceu 'test -s "$1" && cat "$1"' sh "$report_path"
+          REMOTE
+          jq -e '.status == "ok" and .mode == "orb-rvol-research" and (.report.strategyId == "orb-rvol-research-v1")' "$report_path" >/dev/null
+
+          {
+            echo "## ORB RVOL research 2025"
+            echo
+            echo "Source commit: $(jq -r '.sourceCommit' "$report_path")"
+            echo "Session profile: $(jq -r '.sessionSchedule.startMinuteMoscow' "$report_path")–$(jq -r '.sessionSchedule.endMinuteMoscow' "$report_path") Moscow time"
+            echo
+            echo "| Group | Horizon, min | Events | Available | Average net return | Positive rate |"
+            echo "|---|---:|---:|---:|---:|---:|"
+            jq -r '.report.summaries[] | .group as $group | .horizons[] | "| \($group) | \(.horizonMinutes) | \(.availableCount + .missingCount) | \(.availableCount) | \((.averageNetReturnPct // "—") | tostring) | \((.positiveNetRate // "—") | tostring) |"' "$report_path"
+            echo
+            echo "### Data quality"
+            jq -r '.report.dataQuality | to_entries[] | "- \(.key): \(.value)"' "$report_path"
+            echo
+            echo "### Warnings"
+            jq -r '.report.warnings[]?' "$report_path" | sed 's/^/- /'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload ORB RVOL report
+        uses: actions/upload-artifact@v4
+        with:
+          name: orb-rvol-2025-${{ github.run_id }}
+          path: ${{ runner.temp }}/orb-rvol-2025.json
+          if-no-files-found: error
+          retention-days: 30
