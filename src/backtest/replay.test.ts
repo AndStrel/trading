@@ -87,6 +87,20 @@ function syntheticArchive(): HistoricalMinuteCandle[] {
 }
 
 describe('replayVwapPullback', () => {
+  it('accepts a lazy instrument iterable for bounded-memory archive replays', () => {
+    function* instruments(): Generator<{ instrument: typeof instrument; candles: HistoricalMinuteCandle[] }> {
+      yield { instrument, candles: syntheticArchive() };
+    }
+
+    const report = replayVwapPullback({
+      instruments: instruments(),
+      phases: [{ id: 'out_of_sample', label: 'synthetic holdout', from: '2025-01-21', to: '2025-01-21' }],
+      parameters: replayParameters(),
+    });
+
+    expect(report.data).toHaveLength(1);
+    expect(report.data[0]!.ticker).toBe('TEST');
+  });
   it('keeps mathematically exact tick boundaries stable despite binary floating point', () => {
     expect(roundDownToStep(2.4000000000000004, 0.1)).toBe(2.4);
     expect(roundUpToStep(2.4000000000000004, 0.1)).toBe(2.4);

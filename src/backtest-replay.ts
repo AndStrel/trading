@@ -99,7 +99,10 @@ async function main(): Promise<void> {
   const store = new MarketDataStore(config.marketDataPath);
   const range = archiveRange(options.year);
   const missingArchives: string[] = [];
-  const instruments: Array<{ instrument: ReplayInstrument; candles: ReturnType<MarketDataStore['listMinuteCandles']> }> = [];
+  const replayInstrumentDefinitions: Array<{
+    instrument: ReplayInstrument;
+    archive: ReturnType<MarketDataStore['listArchiveImports']>[number];
+  }> = [];
   const archives: Array<{
     ticker: string;
     instrumentId: string;
@@ -130,23 +133,14 @@ async function main(): Promise<void> {
       missingArchiveMetadata.push(ticker);
       continue;
     }
-    const candles = store.listMinuteCandles({
-      instrumentId: archive.instrumentId,
-      from: range.from,
-      to: range.to,
-    });
-    if (candles.length === 0) {
-      missingArchives.push(ticker);
-      continue;
-    }
-    instruments.push({
+    replayInstrumentDefinitions.push({
       instrument: {
         instrumentId: archive.instrumentId,
         ticker,
         lotSize: archive.lotSize,
         priceStep: archive.priceStep,
       },
-      candles,
+      archive,
     });
     archives.push({
       ticker,
@@ -172,8 +166,31 @@ async function main(): Promise<void> {
     );
   }
 
+  // Load one ticker at a time so raw minute-candle arrays can be released before the
+  // next ticker is queried. The replay keeps only compact candidates for cross-ticker
+  // portfolio scheduling.
+  function* loadReplayInstruments(): Generator<{
+    instrument: ReplayInstrument;
+    candles: ReturnType<MarketDataStore['listMinuteCandles']>;
+  }> {
+    for (const definition of replayInstrumentDefinitions) {
+      const candles = store.listMinuteCandles({
+        instrumentId: definition.archive.instrumentId,
+        from: range.from,
+        to: range.to,
+      });
+      if (candles.length === 0) {
+        throw new Error(
+          'Historical archive for ' + options.year + ' is missing or empty for: ' + definition.instrument.ticker + '. ' +
+            'Import the requested ticker with current archive provenance before comparing results.',
+        );
+      }
+      yield { instrument: definition.instrument, candles };
+    }
+  }
+
   const report = replayVwapPullback({
-    instruments,
+    instruments: loadReplayInstruments(),
     phases:
       options.year === 2025
         ? DEFAULT_REPLAY_PHASES

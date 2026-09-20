@@ -69,11 +69,10 @@ jobs:
               chmod 600 .env
               docker compose up -d --build --remove-orphans
 
-              # The liquid-20 replay materializes minute candles and audit trades for all
-              # instruments. Keep the explicit heap budget here instead of relying on the
-              # runner's default Node.js heap, which is too small for the full 2025 dataset.
+              # Replay loads one ticker at a time; keep a bounded safety budget for the
+              # per-ticker candle array without allowing Node to consume the whole VPS.
               docker compose run --rm --no-deps \
-                -e NODE_OPTIONS=--max-old-space-size=4096 \
+                -e NODE_OPTIONS=--max-old-space-size=2048 \
                 -e REPLAY_SOURCE_COMMIT="$source_commit" \
                 telegram-service \
                 sh -ceu '
