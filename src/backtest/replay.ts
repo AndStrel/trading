@@ -80,7 +80,7 @@ export const DEFAULT_REPLAY_PARAMETERS: Omit<
   minRelativeVolume: 1,
   minTrendDistance: 0.002,
   maxHoldingMinutes: 90,
-  targetRiskMultiple: 2.5,
+  targetRiskMultiple: 2.0,
   // Signals first become possible after the 50 five-minute-bar warm-up. Keeping the window
   // away from the open and evening session makes the first baseline intentionally conservative.
   minSignalMinuteMoscow: 14 * 60 + 10,
