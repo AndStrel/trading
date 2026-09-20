@@ -99,6 +99,17 @@ describe('parseHistoryMinuteArchive', () => {
     expect(parsed.candles).toHaveLength(2);
   });
 
+  it('accepts the provider begin column as the candle timestamp', () => {
+    const parsed = parseHistoryMinuteArchive(
+      multiFileArchive({
+        'uid-1_2025-01-02.csv': 'begin;open;high;low;close;volume\n2025-01-02T07:00:00Z;100;101;99;100;20\n',
+      }),
+      { instrumentId: 'uid-1', year: 2025 },
+    );
+
+    expect(parsed.candles).toHaveLength(1);
+  });
+
   it('creates a stable archive checksum for import provenance', () => {
     const bytes = archive('UID,UTC,open,close,high,low,volume\n');
     expect(archiveSha256(bytes)).toMatch(/^[a-f0-9]{64}$/);

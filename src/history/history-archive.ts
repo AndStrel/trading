@@ -8,6 +8,7 @@ const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const MAX_CSV_BYTES = 256 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = 1024;
 const MAX_CSV_ENTRIES = 512;
+const TIME_COLUMN_ALIASES = ['utc', 'time', 'timestamp', 'begin', 'start', 'from', 'date', 'datetime'];
 
 export type ParsedHistoryArchive = {
   candles: HistoricalMinuteCandle[];
@@ -102,7 +103,7 @@ function isCandleCsv(csv: string): boolean {
     const delimiter = detectDelimiter(header);
     const headers = splitCsvLine(header, delimiter);
     return [
-      ['utc', 'time', 'timestamp'],
+      TIME_COLUMN_ALIASES,
       ['open'],
       ['close'],
       ['high'],
@@ -301,7 +302,7 @@ export function parseHistoryMinuteArchive(
   const delimiter = detectDelimiter(header);
   const headers = splitCsvLine(header, delimiter);
   const uidIndex = headers.findIndex((headerValue) => ['uid', 'instrumentuid'].includes(normalizeHeader(headerValue)));
-  const timeIndex = getColumnIndex(headers, ['utc', 'time', 'timestamp'], 'UTC');
+  const timeIndex = getColumnIndex(headers, TIME_COLUMN_ALIASES, 'UTC');
   const openIndex = getColumnIndex(headers, ['open'], 'open');
   const closeIndex = getColumnIndex(headers, ['close'], 'close');
   const highIndex = getColumnIndex(headers, ['high'], 'high');
