@@ -27,6 +27,7 @@ jobs:
       DEPLOY_PATH: ${{ vars.TRADING_DEPLOY_PATH }}
       DEPLOY_SSH_KEY: ${{ secrets.TRADING_DEPLOY_SSH_KEY }}
       DEPLOY_KNOWN_HOSTS: ${{ secrets.TRADING_DEPLOY_KNOWN_HOSTS }}
+      REPLAY_RUN_ID: ${{ github.run_id }}
     steps:
       - name: Validate deployment configuration
         run: |
@@ -44,14 +45,20 @@ jobs:
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/known_hosts"
 
-      - name: Build current main and replay liquid-20
+      - name: Build current main and start replay worker
         run: |
+          case "$REPLAY_RUN_ID" in
+            ''|*[!0-9]*) echo "Invalid replay run id" >&2; exit 1 ;;
+          esac
           ssh -i "$HOME/.ssh/id_ed25519" \
             -o BatchMode=yes \
             -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=4 \
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            env REPLAY_RUN_ID="$REPLAY_RUN_ID" 'bash -s' <<'REMOTE'
               set -Eeuo pipefail
 
               deployment_path="/opt/andstrel/trading"
@@ -69,11 +76,20 @@ jobs:
               chmod 600 .env
               docker compose up -d --build --remove-orphans
 
+              run_dir="/tmp/trading-replay-${REPLAY_RUN_ID}"
+              rm -rf -- "$run_dir"
+              install -d -m 700 "$run_dir"
+              cat > "$run_dir/worker.sh" <<'WORKER'
+              #!/usr/bin/env bash
+              set -uo pipefail
+
+              status=0
+              cd "$DEPLOY_PATH"
               # Replay loads one ticker at a time; keep a bounded safety budget for the
               # per-ticker candle array without allowing Node to consume the whole VPS.
               docker compose run --rm --no-deps \
                 -e NODE_OPTIONS=--max-old-space-size=2048 \
-                -e REPLAY_SOURCE_COMMIT="$source_commit" \
+                -e REPLAY_SOURCE_COMMIT="$SOURCE_COMMIT" \
                 telegram-service \
                 sh -ceu '
                   umask 077
@@ -85,28 +101,82 @@ jobs:
                   test -s "$report_tmp"
                   mv -f "$report_tmp" "$report_path"
                   trap - EXIT
-                '
+                ' || status=$?
 
-              docker compose exec -T telegram-service \
-                node --input-type=module -e '
-                  import { readFile } from "node:fs/promises";
-                  const replay = JSON.parse(await readFile("/app/data/backtests/replay-2025-liquid-20.json", "utf8"));
-                  console.log(JSON.stringify({
-                    reportPath: "/app/data/backtests/replay-2025-liquid-20.json",
-                    year: replay.year,
-                    sourceCommit: replay.sourceCommit,
-                    requestedTickers: replay.requestedTickers,
-                    phases: replay.report.phases.map((phase) => ({
-                      phase: phase.phase.id,
-                      trades: phase.executedTradeCount,
-                      netPnlRub: phase.netPnlRub,
-                      returnPct: phase.returnPct,
-                      profitFactor: phase.profitFactor,
-                      warnings: phase.warnings,
-                    })),
-                  }));
-                '
+              printf '%s\n' "$status" > "$RUN_DIR/exit_code"
+              exit "$status"
+              WORKER
+              chmod 700 "$run_dir/worker.sh"
+              DEPLOY_PATH="$deployment_path" \
+                RUN_DIR="$run_dir" \
+                SOURCE_COMMIT="$source_commit" \
+                nohup "$run_dir/worker.sh" > "$run_dir/worker.log" 2>&1 < /dev/null &
+              printf '%s\n' "$!" > "$run_dir/pid"
+              echo "Replay worker started: $run_dir"
           REMOTE
+
+      - name: Wait for replay worker
+        timeout-minutes: 40
+        run: |
+          run_dir="/tmp/trading-replay-${REPLAY_RUN_ID}"
+          deadline=$((SECONDS + 2400))
+          while (( SECONDS < deadline )); do
+            state="$(ssh -i "$HOME/.ssh/id_ed25519" \
+              -o BatchMode=yes \
+              -o ConnectTimeout=15 \
+              -o ServerAliveInterval=15 \
+              -o ServerAliveCountMax=4 \
+              -o StrictHostKeyChecking=yes \
+              -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+              "$DEPLOY_USER@$DEPLOY_HOST" \
+              "if test -f '$run_dir/exit_code'; then cat '$run_dir/exit_code'; elif test -s '$run_dir/pid' && kill -0 \"\$(cat '$run_dir/pid')\" 2>/dev/null; then printf running; else printf missing; fi" \
+              2>/dev/null || true)"
+
+            if [[ "$state" == "running" || -z "$state" ]]; then
+              sleep 15
+              continue
+            fi
+            if [[ "$state" == "missing" ]]; then
+              echo "Replay worker disappeared without an exit code" >&2
+              ssh -i "$HOME/.ssh/id_ed25519" \
+                -o BatchMode=yes \
+                -o ConnectTimeout=15 \
+                -o ServerAliveInterval=15 \
+                -o ServerAliveCountMax=4 \
+                -o StrictHostKeyChecking=yes \
+                -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+                "$DEPLOY_USER@$DEPLOY_HOST" "tail -200 '$run_dir/worker.log'" || true
+              exit 1
+            fi
+            if [[ "$state" =~ ^[0-9]+$ ]]; then
+              if [[ "$state" == "0" ]]; then
+                exit 0
+              fi
+              echo "Replay worker failed with exit code $state" >&2
+              ssh -i "$HOME/.ssh/id_ed25519" \
+                -o BatchMode=yes \
+                -o ConnectTimeout=15 \
+                -o ServerAliveInterval=15 \
+                -o ServerAliveCountMax=4 \
+                -o StrictHostKeyChecking=yes \
+                -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+                "$DEPLOY_USER@$DEPLOY_HOST" "tail -200 '$run_dir/worker.log'" || true
+              exit "$state"
+            fi
+            echo "Unexpected replay worker state: $state" >&2
+            sleep 15
+          done
+
+          echo "Replay worker timed out" >&2
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=4 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" "tail -200 '$run_dir/worker.log'" || true
+          exit 1
 
       - name: Download and validate replay report
         run: |
@@ -114,6 +184,8 @@ jobs:
           ssh -i "$HOME/.ssh/id_ed25519" \
             -o BatchMode=yes \
             -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=4 \
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
             "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' > "$report_path" <<'REMOTE'
