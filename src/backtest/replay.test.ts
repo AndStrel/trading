@@ -137,6 +137,24 @@ describe('replayVwapPullback', () => {
     expect(trade.exitReason).toBe('target');
   });
 
+  it('uses the configured target risk multiple', () => {
+    const baseline = replayVwapPullback({
+      instruments: [{ instrument, candles: syntheticArchive() }],
+      phases: [{ id: 'out_of_sample', label: 'synthetic holdout', from: '2025-01-21', to: '2025-01-21' }],
+      parameters: replayParameters(),
+    });
+    const widerTarget = replayVwapPullback({
+      instruments: [{ instrument, candles: syntheticArchive() }],
+      phases: [{ id: 'out_of_sample', label: 'synthetic holdout', from: '2025-01-21', to: '2025-01-21' }],
+      parameters: { ...replayParameters(), targetRiskMultiple: 4 },
+    });
+
+    expect(widerTarget.parameters.targetRiskMultiple).toBe(4);
+    expect(widerTarget.phases[0]!.trades[0]!.targetPrice).toBeGreaterThan(
+      baseline.phases[0]!.trades[0]!.targetPrice,
+    );
+  });
+
   it('fills an intrabar stop crossing at the stop price before adverse slippage', () => {
     const baseline = replayVwapPullback({
       instruments: [{ instrument, candles: syntheticArchive() }],

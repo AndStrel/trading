@@ -61,6 +61,7 @@ export type ReplayParameters = {
   minRelativeVolume: number;
   minTrendDistance: number;
   maxHoldingMinutes: number;
+  targetRiskMultiple: number;
   minSignalMinuteMoscow: number;
   maxSignalMinuteMoscow: number;
   forceExitMinuteMoscow: number;
@@ -79,6 +80,7 @@ export const DEFAULT_REPLAY_PARAMETERS: Omit<
   minRelativeVolume: 1,
   minTrendDistance: 0.002,
   maxHoldingMinutes: 90,
+  targetRiskMultiple: 2.0,
   // Signals first become possible after the 50 five-minute-bar warm-up. Keeping the window
   // away from the open and evening session makes the first baseline intentionally conservative.
   minSignalMinuteMoscow: 14 * 60 + 10,
@@ -283,6 +285,7 @@ function validateParameters(parameters: ReplayParameters): void {
   if (!Number.isInteger(parameters.maxHoldingMinutes) || parameters.maxHoldingMinutes < 1) {
     throw new Error('maxHoldingMinutes must be a positive integer');
   }
+  assertFinitePositive(parameters.targetRiskMultiple, 'targetRiskMultiple');
   assertMinuteOfDay(parameters.minSignalMinuteMoscow, 'minSignalMinuteMoscow');
   assertMinuteOfDay(parameters.maxSignalMinuteMoscow, 'maxSignalMinuteMoscow');
   assertMinuteOfDay(parameters.forceExitMinuteMoscow, 'forceExitMinuteMoscow');
@@ -686,7 +689,7 @@ function buildCandidates(
       // Two ticks beyond the theoretical break-even R/R line prevent a floating-point or
       // exchange-step rounding artefact from turning an intended 2.0R net trade into 1.999R.
       const targetDistance = Math.max(
-        riskPerUnit * 2.5,
+        riskPerUnit * parameters.targetRiskMultiple,
         riskPerUnit * 2 + roundTripCostPerUnit * 3 + instrument.priceStep * 2,
       );
       const stopPrice = roundDownToStep(entryMarketPrice - riskPerUnit, instrument.priceStep);
@@ -1089,7 +1092,7 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
     strategyRules: [
       'Completed 5m bar: SMA20 is at least 0.2% above SMA50, with session VWAP pullback and reclaim.',
       '5m turnover filter and time-of-day relative volume use only earlier completed data.',
-      'Entry is next 1m open; stop uses max(1.5 ATR14, 0.1%); target preserves 2.5R before costs.',
+      'Entry is next 1m open; stop uses max(1.5 ATR14, 0.1%); target uses configurable targetRiskMultiple with a cost floor.',
       'When one OHLC minute touches both stop and target, replay assigns the adverse stop first.',
     ],
     parameters,
