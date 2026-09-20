@@ -157,6 +157,38 @@ function parseTimestamp(value: string | null): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
+function isHeaderlessCandleCsv(csv: string): boolean {
+  const firstLine = csv.split(/\r?\n/).find((line) => line.trim().length > 0);
+  if (!firstLine) return false;
+
+  try {
+    const delimiter = detectDelimiter(firstLine);
+    const values = splitCsvLine(firstLine, delimiter);
+    if (values.length < 7 || !values[0]) return false;
+
+    const time = parseTimestamp(values[1] ?? null);
+    const decimals = values.slice(2, 7).map((value) => parseDecimal(value || null));
+    return Boolean(time) && decimals.length === 5 && decimals.every((value) => value !== null);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeHeaderlessCandleCsv(csv: string): string {
+  const lines = csv.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  const firstLine = lines[0];
+  if (!firstLine) throw new Error('Historical archive CSV is empty');
+
+  const delimiter = detectDelimiter(firstLine);
+  const normalizedLines = lines.map((line) => {
+    const values = splitCsvLine(line, delimiter);
+    if (values.length < 7) throw new Error('Historical archive CSV has an invalid headerless candle row');
+    return values.slice(1, 7).join(';');
+  });
+
+  return ['UTC;open;close;high;low;volume', ...normalizedLines].join('\n');
+}
+
 function readCsvFromZip(archive: Uint8Array, instrumentId: string): string {
   if (archive.byteLength === 0) throw new Error('Historical archive is empty');
   if (archive.byteLength > MAX_ARCHIVE_BYTES) {
@@ -211,12 +243,17 @@ function readCsvFromZip(archive: Uint8Array, instrumentId: string): string {
     if (!bytes || bytes.byteLength !== entry.originalSize) {
       throw new Error(`Historical archive CSV cannot be read: ${entry.name}`);
     }
-    return strFromU8(bytes);
+    const csv = strFromU8(bytes);
+    return isHeaderlessCandleCsv(csv) ? normalizeHeaderlessCandleCsv(csv) : csv;
   }
 
   const candleEntries = csvEntries.filter((entry) => {
     const bytes = files[entry.name];
-    return Boolean(bytes && bytes.byteLength === entry.originalSize && isCandleCsv(strFromU8(bytes)));
+    return Boolean(
+      bytes &&
+        bytes.byteLength === entry.originalSize &&
+        (isCandleCsv(strFromU8(bytes)) || isHeaderlessCandleCsv(strFromU8(bytes))),
+    );
   });
 
   if (candleEntries.length === 0) {
@@ -232,7 +269,8 @@ function readCsvFromZip(archive: Uint8Array, instrumentId: string): string {
       if (!hasUidColumn(csv) && !fileBelongsToInstrument(entry.name, instrumentId)) {
         throw new Error(`Historical archive CSV filename does not identify ${instrumentId}: ${entry.name}`);
       }
-      return { entry, lines: csv.split(/\r?\n/).filter((line) => line.trim().length > 0) };
+      const normalizedCsv = isHeaderlessCandleCsv(csv) ? normalizeHeaderlessCandleCsv(csv) : csv;
+      return { entry, lines: normalizedCsv.split(/\r?\n/).filter((line) => line.trim().length > 0) };
     });
     const firstHeader = documents[0]!.lines[0];
     if (!firstHeader) throw new Error('Historical archive CSV is empty');

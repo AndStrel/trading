@@ -110,6 +110,27 @@ describe('parseHistoryMinuteArchive', () => {
     expect(parsed.candles).toHaveLength(1);
   });
 
+  it('parses the provider headerless candle format', () => {
+    const parsed = parseHistoryMinuteArchive(
+      multiFileArchive({
+        'uid-1_2025-01-02.csv':
+          'uid-1;2025-01-02T07:00:00Z;100;100.5;101;99;20;\nuid-1;2025-01-02T07:01:00Z;100.5;101;102;100;30;\n',
+      }),
+      { instrumentId: 'uid-1', year: 2025 },
+    );
+
+    expect(parsed.candles).toHaveLength(2);
+    expect(parsed.candles[0]).toMatchObject({
+      instrumentId: 'uid-1',
+      time: '2025-01-02T07:00:00.000Z',
+      open: 100,
+      close: 100.5,
+      high: 101,
+      low: 99,
+      volume: 20,
+    });
+  });
+
   it('creates a stable archive checksum for import provenance', () => {
     const bytes = archive('UID,UTC,open,close,high,low,volume\n');
     expect(archiveSha256(bytes)).toMatch(/^[a-f0-9]{64}$/);
