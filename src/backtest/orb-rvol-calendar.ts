@@ -55,6 +55,6 @@ export function getMoexEquities2025SessionSchedule(input: {
   return {
     startMinuteMoscow: input.startMinuteMoscow,
     endMinuteMoscow: input.endMinuteMoscow,
-    source: `${MOEX_EQUITIES_2025_CALENDAR_ID}:${"$"}{sessionKind}`,
+    source: `${MOEX_EQUITIES_2025_CALENDAR_ID}:${sessionKind}`,
   };
 }
