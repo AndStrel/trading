@@ -134,6 +134,16 @@ describe('replayVwapPullback', () => {
     expect(trade.totalCommissionRub).toBeGreaterThan(0);
     expect(trade.marketPnlRub).toBeGreaterThan(trade.pnlAfterSlippageRub);
     expect(trade.pnlAfterSlippageRub).toBeGreaterThan(trade.netPnlRub);
+    expect(trade.maxAdverseExcursionRub).toBeGreaterThanOrEqual(0);
+    expect(trade.maxFavorableExcursionRub).toBeGreaterThan(0);
+    expect(trade.maxAdverseExcursionR).toBeGreaterThanOrEqual(0);
+    expect(trade.maxFavorableExcursionR).toBeGreaterThan(0);
+    expect(phase.monthlyResults).toEqual([
+      expect.objectContaining({ period: '2025-01', tradeCount: 1 }),
+    ]);
+    expect(phase.tickerResults[0]).toEqual(
+      expect.objectContaining({ ticker: 'TEST', tradeCount: 1, averageMaeR: trade.maxAdverseExcursionR }),
+    );
     expect(trade.exitReason).toBe('target');
   });
 

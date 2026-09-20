@@ -155,9 +155,9 @@ jobs:
             echo
             echo "Source commit: $(jq -r '.sourceCommit' "$report_path")"
             echo
-            echo "| Case | Phase | Trades | Net PnL, ₽ | Gross market PnL, ₽ | Costs, ₽ | Capacity skips |"
-            echo "|---|---|---:|---:|---:|---:|---:|"
-            jq -r '.cases[] as $case | $case.report.phases[] | "| \($case.id) | \(.phase.id) | \(.executedTradeCount) | \(.netPnlRub) | \(.marketPnlRub) | \((.totalCommissionRub + .totalSlippageRub) | round) | \(.skipped.insufficientCash + .skipped.portfolioCapacity) |"' "$report_path"
+            echo "| Case | Phase | Trades | Net PnL, ₽ | Gross market PnL, ₽ | Costs, ₽ | Avg MAE, R | Avg MFE, R | Capacity skips |"
+            echo "|---|---|---:|---:|---:|---:|---:|---:|---:|"
+            jq -r '.cases[] as $case | $case.report.phases[] | "| \($case.id) | \(.phase.id) | \(.executedTradeCount) | \(.netPnlRub) | \(.marketPnlRub) | \((.totalCommissionRub + .totalSlippageRub) | round) | \(.averageMaeR // "—") | \(.averageMfeR // "—") | \(.skipped.insufficientCash + .skipped.portfolioCapacity) |"' "$report_path"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload diagnostics report
