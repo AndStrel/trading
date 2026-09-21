@@ -17,6 +17,8 @@
     "smoke:tinvest:ci": "node dist/smoke.js",
     "scan:intraday": "node --env-file=.env dist/intraday-scanner.js",
     "history:import": "node --env-file=.env dist/history-import.js",
+    "research:catalog": "node --env-file=.env dist/research-catalog.js",
+    "research:similar": "node --env-file=.env dist/research-similar.js",
     "backtest:replay": "node --env-file=.env dist/backtest-replay.js",
     "backtest:replay:sweep": "node --env-file=.env dist/backtest-replay-sweep.js",
     "backtest:replay:diagnostics": "node --env-file=.env dist/backtest-replay-diagnostics.js",

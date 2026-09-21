@@ -2,6 +2,12 @@ import { chmodSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+import {
+  researchVectorDistance,
+  type ResearchOutcome,
+  type ResearchSituationRecord,
+} from '../research/situation-catalog.js';
+
 export type HistoricalMinuteCandle = {
   instrumentId: string;
   time: string;
@@ -52,6 +58,10 @@ export type HistoricalCoverage = {
   lastCandleAt: string | null;
 };
 
+export type SimilarResearchSituation = ResearchSituationRecord & {
+  distance: number;
+};
+
 const schema = `
   CREATE TABLE IF NOT EXISTS historical_minute_candles (
     instrument_id TEXT NOT NULL,
@@ -83,6 +93,36 @@ const schema = `
     imported_at TEXT NOT NULL,
     PRIMARY KEY (instrument_id, source_year)
   ) STRICT, WITHOUT ROWID;
+
+  CREATE TABLE IF NOT EXISTS research_situations (
+    situation_id TEXT PRIMARY KEY,
+    dataset_version TEXT NOT NULL,
+    instrument_id TEXT NOT NULL,
+    ticker TEXT NOT NULL CHECK(ticker GLOB '[A-Z0-9.-]*'),
+    session_date TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    feature_available_at TEXT NOT NULL,
+    source_year INTEGER NOT NULL CHECK(source_year >= 2000),
+    source_archive_sha256 TEXT NOT NULL,
+    features_json TEXT NOT NULL,
+    feature_vector_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(dataset_version, instrument_id, observed_at)
+  ) STRICT, WITHOUT ROWID;
+
+  CREATE INDEX IF NOT EXISTS research_situations_lookup
+    ON research_situations(dataset_version, observed_at ASC, ticker ASC);
+
+  CREATE TABLE IF NOT EXISTS research_outcomes (
+    situation_id TEXT NOT NULL,
+    horizon_minutes INTEGER NOT NULL CHECK(horizon_minutes > 0),
+    terminal_at TEXT NOT NULL,
+    forward_return_pct REAL NOT NULL,
+    max_favorable_pct REAL NOT NULL,
+    max_adverse_pct REAL NOT NULL,
+    PRIMARY KEY (situation_id, horizon_minutes),
+    FOREIGN KEY (situation_id) REFERENCES research_situations(situation_id) ON DELETE CASCADE
+  ) STRICT, WITHOUT ROWID;
 `;
 
 type CoverageRow = {
@@ -107,6 +147,30 @@ type ArchiveImportRow = {
 
 type TableInfoRow = {
   name: string;
+};
+
+type ResearchSituationRow = {
+  situation_id: string;
+  dataset_version: string;
+  instrument_id: string;
+  ticker: string;
+  session_date: string;
+  observed_at: string;
+  feature_available_at: string;
+  source_year: number | bigint;
+  source_archive_sha256: string;
+  features_json: string;
+  feature_vector_json: string;
+  created_at: string;
+};
+
+type ResearchOutcomeRow = {
+  situation_id: string;
+  horizon_minutes: number | bigint;
+  terminal_at: string;
+  forward_return_pct: number;
+  max_favorable_pct: number;
+  max_adverse_pct: number;
 };
 
 function assertFiniteNumber(value: number, name: string): void {
@@ -426,6 +490,240 @@ export class MarketDataStore {
     }
   }
 
+  replaceResearchSituations(input: {
+    datasetVersion: string;
+    instrumentId: string;
+    sourceYear: number;
+    situations: readonly ResearchSituationRecord[];
+  }): number {
+    if (!input.datasetVersion.trim()) throw new Error('Research dataset version is required');
+    if (!input.instrumentId.trim()) throw new Error('Research instrumentId is required');
+    if (!Number.isInteger(input.sourceYear) || input.sourceYear < 2000) {
+      throw new Error('Research source year is invalid');
+    }
+    for (const situation of input.situations) {
+      if (
+        situation.datasetVersion !== input.datasetVersion ||
+        situation.instrumentId !== input.instrumentId ||
+        situation.sourceYear !== input.sourceYear
+      ) {
+        throw new Error('Research situation metadata does not match replacement scope');
+      }
+      if (situation.featureVector.length === 0 || situation.features === undefined) {
+        throw new Error('Research situation features are required');
+      }
+      if (!situation.situationId.trim() || !situation.observedAt.trim()) {
+        throw new Error('Research situation identity is required');
+      }
+    }
+
+    const database = this.open();
+    try {
+      const deleteOutcomes = database.prepare(
+        `DELETE FROM research_outcomes
+         WHERE situation_id IN (
+           SELECT situation_id
+           FROM research_situations
+           WHERE dataset_version = ? AND instrument_id = ? AND source_year = ?
+         )`,
+      );
+      const deleteSituations = database.prepare(
+        `DELETE FROM research_situations
+         WHERE dataset_version = ? AND instrument_id = ? AND source_year = ?`,
+      );
+      const insertSituation = database.prepare(
+        `INSERT INTO research_situations (
+          situation_id, dataset_version, instrument_id, ticker, session_date,
+          observed_at, feature_available_at, source_year, source_archive_sha256,
+          features_json, feature_vector_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      const insertOutcome = database.prepare(
+        `INSERT INTO research_outcomes (
+          situation_id, horizon_minutes, terminal_at, forward_return_pct,
+          max_favorable_pct, max_adverse_pct
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      );
+      const createdAt = new Date().toISOString();
+
+      database.exec('BEGIN IMMEDIATE');
+      deleteOutcomes.run(input.datasetVersion, input.instrumentId, input.sourceYear);
+      deleteSituations.run(input.datasetVersion, input.instrumentId, input.sourceYear);
+      for (const situation of input.situations) {
+        insertSituation.run(
+          situation.situationId,
+          situation.datasetVersion,
+          situation.instrumentId,
+          situation.ticker,
+          situation.sessionDate,
+          situation.observedAt,
+          situation.featureAvailableAt,
+          situation.sourceYear,
+          situation.sourceArchiveSha256,
+          JSON.stringify(situation.features),
+          JSON.stringify(situation.featureVector),
+          createdAt,
+        );
+        for (const outcome of situation.outcomes) {
+          insertOutcome.run(
+            situation.situationId,
+            outcome.horizonMinutes,
+            outcome.terminalAt,
+            outcome.forwardReturnPct,
+            outcome.maxFavorablePct,
+            outcome.maxAdversePct,
+          );
+        }
+      }
+      database.exec('COMMIT');
+      return input.situations.length;
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK');
+      } catch {
+        // The transaction may already be committed or never started.
+      }
+      throw error;
+    } finally {
+      database.close();
+    }
+  }
+
+  getResearchSituation(input: {
+    datasetVersion: string;
+    ticker: string;
+    observedAt: string;
+  }): ResearchSituationRecord | null {
+    const database = this.open();
+    try {
+      const row = database
+        .prepare(
+          `SELECT situation_id, dataset_version, instrument_id, ticker, session_date,
+                  observed_at, feature_available_at, source_year, source_archive_sha256,
+                  features_json, feature_vector_json, created_at
+           FROM research_situations
+           WHERE dataset_version = ? AND ticker = ? AND observed_at = ?`,
+        )
+        .get(input.datasetVersion, input.ticker, input.observedAt) as ResearchSituationRow | undefined;
+      return row ? toResearchSituation(row, this.readResearchOutcomes(database, [row.situation_id])) : null;
+    } finally {
+      database.close();
+    }
+  }
+
+  findSimilarResearchSituations(input: {
+    datasetVersion: string;
+    featureVector: readonly number[];
+    before: string;
+    limit: number;
+    excludeSituationId?: string;
+  }): SimilarResearchSituation[] {
+    if (input.featureVector.length === 0) throw new Error('Research feature vector is empty');
+    if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 500) {
+      throw new Error('Research similarity limit must be an integer from 1 through 500');
+    }
+
+    const database = this.open();
+    try {
+      const batchSize = 5_000;
+      const nearestRows: Array<{ row: ResearchSituationRow; situation: ResearchSituationRecord; distance: number }> = [];
+      let lastFeatureAvailableAt: string | null = null;
+      let lastSituationId: string | null = null;
+      const selectBatch = database.prepare(
+        `SELECT situation_id, dataset_version, instrument_id, ticker, session_date,
+                observed_at, feature_available_at, source_year, source_archive_sha256,
+                features_json, feature_vector_json, created_at
+         FROM research_situations
+         WHERE dataset_version = ?
+           AND feature_available_at < ?
+           AND (? IS NULL OR situation_id <> ?)
+           AND (
+             ? IS NULL
+             OR feature_available_at > ?
+             OR (feature_available_at = ? AND situation_id > ?)
+           )
+         ORDER BY feature_available_at ASC, situation_id ASC
+         LIMIT ?`,
+      );
+
+      while (true) {
+        const rows = selectBatch.all(
+          input.datasetVersion,
+          input.before,
+          input.excludeSituationId ?? null,
+          input.excludeSituationId ?? null,
+          lastFeatureAvailableAt,
+          lastFeatureAvailableAt,
+          lastFeatureAvailableAt,
+          lastSituationId,
+          batchSize,
+        ) as ResearchSituationRow[];
+        if (rows.length === 0) break;
+        for (const row of rows) {
+          const situation = toResearchSituation(row, new Map());
+          nearestRows.push({ row, situation, distance: researchVectorDistance(input.featureVector, situation.featureVector) });
+        }
+        nearestRows.sort((left, right) => left.distance - right.distance || left.situation.observedAt.localeCompare(right.situation.observedAt));
+        if (nearestRows.length > input.limit) nearestRows.length = input.limit;
+        if (rows.length < batchSize) break;
+        const lastRow = rows.at(-1)!;
+        lastFeatureAvailableAt = lastRow.feature_available_at;
+        lastSituationId = lastRow.situation_id;
+      }
+      const outcomes = this.readResearchOutcomes(database, nearestRows.map(({ row }) => row.situation_id));
+      return nearestRows.map(({ situation, distance }) => ({
+        ...situation,
+        outcomes: outcomes.get(situation.situationId) ?? [],
+        distance,
+      }));
+    } finally {
+      database.close();
+    }
+  }
+
+  countResearchSituations(input: { datasetVersion: string; sourceYear?: number }): number {
+    const database = this.open();
+    try {
+      const row = input.sourceYear === undefined
+        ? database
+            .prepare('SELECT COUNT(*) AS count FROM research_situations WHERE dataset_version = ?')
+            .get(input.datasetVersion)
+        : database
+            .prepare('SELECT COUNT(*) AS count FROM research_situations WHERE dataset_version = ? AND source_year = ?')
+            .get(input.datasetVersion, input.sourceYear);
+      const count = (row as { count: number | bigint }).count;
+      return Number(count);
+    } finally {
+      database.close();
+    }
+  }
+
+  private readResearchOutcomes(database: DatabaseSync, situationIds: string[]): Map<string, ResearchOutcome[]> {
+    if (situationIds.length === 0) return new Map();
+    const placeholders = situationIds.map(() => '?').join(', ');
+    const rows = database
+      .prepare(
+        `SELECT situation_id, horizon_minutes, terminal_at, forward_return_pct,
+                max_favorable_pct, max_adverse_pct
+         FROM research_outcomes
+         WHERE situation_id IN (${placeholders})`,
+      )
+      .all(...situationIds) as ResearchOutcomeRow[];
+    const outcomes = new Map<string, ResearchOutcome[]>();
+    for (const row of rows) {
+      const list = outcomes.get(row.situation_id) ?? [];
+      list.push({
+        horizonMinutes: Number(row.horizon_minutes),
+        terminalAt: row.terminal_at,
+        forwardReturnPct: row.forward_return_pct,
+        maxFavorablePct: row.max_favorable_pct,
+        maxAdversePct: row.max_adverse_pct,
+      });
+      outcomes.set(row.situation_id, list);
+    }
+    return outcomes;
+  }
+
   private open(): DatabaseSync {
     const directory = dirname(this.databasePath);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -438,6 +736,34 @@ export class MarketDataStore {
     ensureArchiveMetadataColumns(database);
     return database;
   }
+}
+
+function toResearchSituation(row: ResearchSituationRow, outcomes: Map<string, ResearchOutcome[]>): ResearchSituationRecord {
+  let features: ResearchSituationRecord['features'];
+  let featureVector: number[];
+  try {
+    features = JSON.parse(row.features_json) as ResearchSituationRecord['features'];
+    featureVector = JSON.parse(row.feature_vector_json) as number[];
+  } catch {
+    throw new Error(`Stored research situation ${row.situation_id} contains invalid JSON`);
+  }
+  if (!features || !Array.isArray(featureVector) || featureVector.some((value) => !Number.isFinite(value))) {
+    throw new Error(`Stored research situation ${row.situation_id} contains invalid features`);
+  }
+  return {
+    situationId: row.situation_id,
+    datasetVersion: row.dataset_version,
+    instrumentId: row.instrument_id,
+    ticker: row.ticker,
+    sessionDate: row.session_date,
+    observedAt: row.observed_at,
+    featureAvailableAt: row.feature_available_at,
+    sourceYear: Number(row.source_year),
+    sourceArchiveSha256: row.source_archive_sha256,
+    features,
+    featureVector,
+    outcomes: outcomes.get(row.situation_id) ?? [],
+  };
 }
 
 function toArchiveProvenance(row: ArchiveImportRow): HistoricalArchiveProvenance {
