@@ -1,6 +1,9 @@
 import type { HistoricalMinuteCandle } from '../history/market-data-store.js';
 
 export const ORB_RVOL_STRATEGY_ID = 'orb-rvol-research-v1' as const;
+export const ORB_RVOL_RETEST_BREADTH_STRATEGY_ID = 'orb-rvol-retest-breadth-research-v1' as const;
+
+export type OrbRvolStrategyId = typeof ORB_RVOL_STRATEGY_ID | typeof ORB_RVOL_RETEST_BREADTH_STRATEGY_ID;
 
 export type OrbRvolInstrument = {
   instrumentId: string;
@@ -14,6 +17,29 @@ export type OrbRvolSessionSchedule = {
   endMinuteMoscow: number;
   source: string;
 };
+
+export type OrbRvolMarketBreadth = {
+  score: number;
+  upCount: number;
+  downCount: number;
+  flatCount: number;
+  validInstrumentCount: number;
+  availableInstrumentCount: number;
+};
+
+export type OrbRvolResearchMode =
+  | { kind: 'legacy' }
+  | {
+      kind: 'retest-breadth';
+      maxRetestWaitMinutes: number;
+      minMarketBreadthScore: number;
+      minMarketBreadthInstruments: number;
+      marketBreadthForSession: (input: {
+        ticker: string;
+        instrumentId: string;
+        sessionDate: string;
+      }) => OrbRvolMarketBreadth | null;
+    };
 
 export type OrbRvolParameters = {
   openingRangeMinutes: number;
@@ -92,6 +118,14 @@ export type OrbRvolEvent = {
   eligible: boolean;
   forwardReturns: OrbRvolForwardReturn[];
   strategyExit: OrbRvolStrategyExit;
+  entryModel?: 'breakout-next-minute' | 'retest-reclaim';
+  retestAt?: string | null;
+  retestBarLow?: number | null;
+  retestBarClose?: number | null;
+  marketBreadthScore?: number | null;
+  marketBreadthUpCount?: number | null;
+  marketBreadthValidCount?: number | null;
+  passesMarketBreadth?: boolean;
 };
 
 export type OrbRvolRejectionReason =
@@ -101,7 +135,10 @@ export type OrbRvolRejectionReason =
   | 'incomplete_signal_bar'
   | 'entry_data_gap'
   | 'entry_open_not_above_range'
-  | 'outside_trading_calendar';
+  | 'outside_trading_calendar'
+  | 'retest_data_gap'
+  | 'retest_entry_data_gap'
+  | 'retest_entry_open_not_above_range';
 
 export type OrbRvolRejection = {
   ticker: string;
@@ -145,11 +182,26 @@ export type OrbRvolDataQuality = {
   entryOpenRejectedCount: number;
   strategyIncompleteDataCount: number;
   forwardReturnGapCount: number;
+  retestNotFoundCount?: number;
+  retestDataGapCount?: number;
+  retestEntryDataGapCount?: number;
+  retestEntryOpenRejectedCount?: number;
+  marketBreadthUnavailableCount?: number;
 };
 
 export type OrbRvolReport = {
-  strategyId: typeof ORB_RVOL_STRATEGY_ID;
+  strategyId: OrbRvolStrategyId;
   parameters: OrbRvolParameters;
+  experiment?: {
+    entryModel: 'breakout-next-minute' | 'retest-reclaim';
+    maxRetestWaitMinutes?: number;
+    marketFilter?: {
+      kind: 'opening-range-cross-sectional-breadth';
+      minScore: number;
+      minValidInstruments: number;
+      scoreDefinition: string;
+    };
+  };
   data: Array<{
     ticker: string;
     instrumentId: string;
@@ -177,6 +229,7 @@ export type OrbRvolInput = {
     sessionDate: string;
   }) => OrbRvolSessionSchedule | null;
   parameters: OrbRvolParameters;
+  mode?: OrbRvolResearchMode;
 };
 
 type PreparedMinuteCandle = HistoricalMinuteCandle & {
@@ -249,6 +302,22 @@ function validateParameters(parameters: OrbRvolParameters): void {
   }
   if (new Set(parameters.forwardHorizonsMinutes).size !== parameters.forwardHorizonsMinutes.length) {
     throw new Error('forwardHorizonsMinutes must contain unique values');
+  }
+}
+
+function validateResearchMode(mode: OrbRvolResearchMode): void {
+  if (mode.kind === 'legacy') return;
+  if (!Number.isInteger(mode.maxRetestWaitMinutes) || mode.maxRetestWaitMinutes < 1) {
+    throw new Error('maxRetestWaitMinutes must be a positive integer');
+  }
+  if (!Number.isFinite(mode.minMarketBreadthScore) || mode.minMarketBreadthScore < -1 || mode.minMarketBreadthScore > 1) {
+    throw new Error('minMarketBreadthScore must be a finite score from -1 through 1');
+  }
+  if (!Number.isInteger(mode.minMarketBreadthInstruments) || mode.minMarketBreadthInstruments < 1) {
+    throw new Error('minMarketBreadthInstruments must be a positive integer');
+  }
+  if (typeof mode.marketBreadthForSession !== 'function') {
+    throw new Error('marketBreadthForSession is required for retest-breadth mode');
   }
 }
 
@@ -628,10 +697,19 @@ function summarizeGroup(
 
 export function collectOrbRvolResearch(input: OrbRvolInput): OrbRvolReport {
   validateParameters(input.parameters);
+  const mode: OrbRvolResearchMode = input.mode ?? { kind: 'legacy' };
+  validateResearchMode(mode);
   const events: OrbRvolEvent[] = [];
   const rejections: OrbRvolRejection[] = [];
   const data: OrbRvolReport['data'] = [];
   const dataQuality = emptyDataQuality();
+  if (mode.kind === 'retest-breadth') {
+    dataQuality.retestNotFoundCount = 0;
+    dataQuality.retestDataGapCount = 0;
+    dataQuality.retestEntryDataGapCount = 0;
+    dataQuality.retestEntryOpenRejectedCount = 0;
+    dataQuality.marketBreadthUnavailableCount = 0;
+  }
   const warnings: string[] = [];
 
   for (const { instrument, candles } of input.instruments) {
@@ -737,31 +815,94 @@ export function collectOrbRvolResearch(input: OrbRvolInput): OrbRvolReport {
         }
 
         dataQuality.breakoutCount += 1;
-        const entryMinuteMoscow = signalStartMinute + 5;
-        const entryCandle = byMinute.get(entryMinuteMoscow);
-        if (!entryCandle) {
-          dataQuality.entryDataGapCount += 1;
-          rejections.push({
-            ticker: instrument.ticker,
-            instrumentId: instrument.instrumentId,
-            sessionDate,
-            reason: 'entry_data_gap',
-            detail: `The minute after the first completed breakout bar is missing`,
-          });
-          break;
+        let entryCandle: PreparedMinuteCandle | null = null;
+        let retestCandle: PreparedMinuteCandle | null = null;
+        if (mode.kind === 'legacy') {
+          const entryMinuteMoscow = signalStartMinute + 5;
+          entryCandle = byMinute.get(entryMinuteMoscow) ?? null;
+          if (!entryCandle) {
+            dataQuality.entryDataGapCount += 1;
+            rejections.push({
+              ticker: instrument.ticker,
+              instrumentId: instrument.instrumentId,
+              sessionDate,
+              reason: 'entry_data_gap',
+              detail: 'The minute after the first completed breakout bar is missing',
+            });
+            break;
+          }
+          if (entryCandle.open <= openingRangeHigh) {
+            dataQuality.entryOpenRejectedCount += 1;
+            rejections.push({
+              ticker: instrument.ticker,
+              instrumentId: instrument.instrumentId,
+              sessionDate,
+              reason: 'entry_open_not_above_range',
+              detail: 'The next-minute open did not remain above the opening-range high',
+            });
+            break;
+          }
+        } else {
+          const firstRetestMinute = signalStartMinute + 5;
+          const lastRetestMinute = Math.min(
+            firstRetestMinute + mode.maxRetestWaitMinutes - 1,
+            schedule.startMinuteMoscow + input.parameters.signalWindowEndOffsetMinutes - 1,
+            schedule.endMinuteMoscow - 1,
+          );
+          let retestDataGap = false;
+          for (let retestMinute = firstRetestMinute; retestMinute <= lastRetestMinute; retestMinute += 1) {
+            const candidate = byMinute.get(retestMinute);
+            if (!candidate) {
+              dataQuality.retestDataGapCount = (dataQuality.retestDataGapCount ?? 0) + 1;
+              rejections.push({
+                ticker: instrument.ticker,
+                instrumentId: instrument.instrumentId,
+                sessionDate,
+                reason: 'retest_data_gap',
+                detail: `A minute is missing while waiting up to ${mode.maxRetestWaitMinutes} minutes for a retest`,
+              });
+              retestDataGap = true;
+              break;
+            }
+            if (candidate.low <= openingRangeHigh && candidate.close > openingRangeHigh) {
+              retestCandle = candidate;
+              break;
+            }
+          }
+          if (retestDataGap) break;
+          if (!retestCandle) {
+            dataQuality.retestNotFoundCount = (dataQuality.retestNotFoundCount ?? 0) + 1;
+            break;
+          }
+          entryCandle = byMinute.get(retestCandle.minuteOfDayMoscow + 1) ?? null;
+          if (!entryCandle) {
+            dataQuality.entryDataGapCount += 1;
+            dataQuality.retestEntryDataGapCount = (dataQuality.retestEntryDataGapCount ?? 0) + 1;
+            rejections.push({
+              ticker: instrument.ticker,
+              instrumentId: instrument.instrumentId,
+              sessionDate,
+              reason: 'retest_entry_data_gap',
+              detail: 'The minute after the completed retest/reclaim candle is missing',
+            });
+            break;
+          }
+          if (entryCandle.open <= openingRangeHigh) {
+            dataQuality.entryOpenRejectedCount += 1;
+            dataQuality.retestEntryOpenRejectedCount = (dataQuality.retestEntryOpenRejectedCount ?? 0) + 1;
+            rejections.push({
+              ticker: instrument.ticker,
+              instrumentId: instrument.instrumentId,
+              sessionDate,
+              reason: 'retest_entry_open_not_above_range',
+              detail: 'The next-minute open after the retest did not remain above the opening-range high',
+            });
+            break;
+          }
         }
-        if (entryCandle.open <= openingRangeHigh) {
-          dataQuality.entryOpenRejectedCount += 1;
-          rejections.push({
-            ticker: instrument.ticker,
-            instrumentId: instrument.instrumentId,
-            sessionDate,
-            reason: 'entry_open_not_above_range',
-            detail: 'The next-minute open did not remain above the opening-range high',
-          });
-          break;
-        }
+        if (!entryCandle) break;
 
+        const entryMinuteMoscow = entryCandle.minuteOfDayMoscow;
         const stopPrice = roundDownToStep(
           openingRangeLow - instrument.priceStep * input.parameters.stopBufferTicks,
           instrument.priceStep,
@@ -776,6 +917,20 @@ export function collectOrbRvolResearch(input: OrbRvolInput): OrbRvolReport {
         const estimatedRoundTripCostPct = 2 * (input.parameters.commissionRate + input.parameters.slippageRate);
         const passesRelativeVolume = openingRangeVolume / previousOpeningRangeMedianVolume >= input.parameters.minRelativeVolume;
         const passesCostFilter = riskPct >= estimatedRoundTripCostPct * input.parameters.minStopDistanceToRoundTripCost;
+        const marketBreadth =
+          mode.kind === 'retest-breadth'
+            ? mode.marketBreadthForSession({
+                ticker: instrument.ticker,
+                instrumentId: instrument.instrumentId,
+                sessionDate,
+              })
+            : null;
+        if (mode.kind === 'retest-breadth' && marketBreadth === null) {
+          dataQuality.marketBreadthUnavailableCount = (dataQuality.marketBreadthUnavailableCount ?? 0) + 1;
+        }
+        const passesMarketBreadth =
+          mode.kind === 'legacy' ||
+          (marketBreadth !== null && marketBreadth.score >= mode.minMarketBreadthScore);
         const strategyExit = simulateStrategyExit({
           orderedSession: session,
           byMinute,
@@ -826,9 +981,21 @@ export function collectOrbRvolResearch(input: OrbRvolInput): OrbRvolReport {
           estimatedRoundTripCostPct,
           passesRelativeVolume,
           passesCostFilter,
-          eligible: passesRelativeVolume && passesCostFilter,
+          eligible: passesRelativeVolume && passesCostFilter && passesMarketBreadth,
           forwardReturns,
           strategyExit,
+          ...(mode.kind === 'retest-breadth'
+            ? {
+                entryModel: 'retest-reclaim' as const,
+                retestAt: retestCandle!.time,
+                retestBarLow: retestCandle!.low,
+                retestBarClose: retestCandle!.close,
+                marketBreadthScore: marketBreadth?.score ?? null,
+                marketBreadthUpCount: marketBreadth?.upCount ?? null,
+                marketBreadthValidCount: marketBreadth?.validInstrumentCount ?? null,
+                passesMarketBreadth,
+              }
+            : {}),
         });
         break;
       }
@@ -840,8 +1007,24 @@ export function collectOrbRvolResearch(input: OrbRvolInput): OrbRvolReport {
   const costEligibleLowRvol = events.filter((event) => event.passesCostFilter && !event.passesRelativeVolume);
   const costEligibleHighRvol = events.filter((event) => event.passesCostFilter && event.passesRelativeVolume);
   return {
-    strategyId: ORB_RVOL_STRATEGY_ID,
+    strategyId:
+      mode.kind === 'retest-breadth' ? ORB_RVOL_RETEST_BREADTH_STRATEGY_ID : ORB_RVOL_STRATEGY_ID,
     parameters: input.parameters,
+    ...(mode.kind === 'retest-breadth'
+      ? {
+          experiment: {
+            entryModel: 'retest-reclaim' as const,
+            maxRetestWaitMinutes: mode.maxRetestWaitMinutes,
+            marketFilter: {
+              kind: 'opening-range-cross-sectional-breadth' as const,
+              minScore: mode.minMarketBreadthScore,
+              minValidInstruments: mode.minMarketBreadthInstruments,
+              scoreDefinition:
+                '(up instruments - down instruments) / (up instruments + down instruments) using completed opening-range drift',
+            },
+          },
+        }
+      : {}),
     data,
     dataQuality,
     events,
