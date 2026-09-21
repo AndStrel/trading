@@ -21,6 +21,7 @@
     "backtest:replay:sweep": "node --env-file=.env dist/backtest-replay-sweep.js",
     "backtest:replay:diagnostics": "node --env-file=.env dist/backtest-replay-diagnostics.js",
     "backtest:replay:orb-rvol": "node --env-file=.env dist/backtest-orb-rvol.js",
+    "backtest:replay:orb-rvol:retest": "node --env-file=.env dist/backtest-orb-rvol.js --mode retest-breadth",
     "service:telegram": "node --env-file=.env dist/telegram-service.js",
     "test": "vitest run",
     "test:watch": "vitest",

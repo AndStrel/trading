@@ -30,7 +30,7 @@ function researchParameters(): OrbRvolParameters {
   };
 }
 
-function syntheticArchive(options: { stopAndTargetSameMinute?: boolean } = {}): HistoricalMinuteCandle[] {
+function syntheticArchive(options: { stopAndTargetSameMinute?: boolean; retest?: boolean } = {}): HistoricalMinuteCandle[] {
   const candles: HistoricalMinuteCandle[] = [];
   for (let day = 1; day <= 23; day += 1) {
     const date = `2025-01-${String(day).padStart(2, '0')}`;
@@ -54,13 +54,21 @@ function syntheticArchive(options: { stopAndTargetSameMinute?: boolean } = {}): 
         high = 101;
         low = 100;
       } else if (breakout && entryMinute) {
-        open = 100.9;
-        close = 100.95;
-        high = 101;
-        low = 100.8;
+        if (options.retest) {
+          open = 100.8;
+          close = 100.2;
+          high = 100.9;
+          low = 100.05;
+        } else {
+          open = 100.9;
+          close = 100.95;
+          high = 101;
+          low = 100.8;
+        }
       } else if (breakout && afterEntry) {
-        open = 101;
-        close = 101 + Math.min(offset - 35, 30) * 0.08;
+        const entryOffset = options.retest ? 36 : 35;
+        open = options.retest ? 101 : 101;
+        close = 101 + Math.min(offset - entryOffset, 30) * 0.08;
         high = close + 0.05;
         low = open - 0.02;
       }
@@ -95,6 +103,32 @@ function collect(candles: HistoricalMinuteCandle[]) {
       source: 'test-fixed-schedule',
     }),
     parameters: researchParameters(),
+  });
+}
+
+function collectRetest(candles: HistoricalMinuteCandle[], breadthScore = 1) {
+  return collectOrbRvolResearch({
+    instruments: [{ instrument, candles }],
+    scheduleForSession: () => ({
+      startMinuteMoscow: 10 * 60,
+      endMinuteMoscow: 13 * 60,
+      source: 'test-fixed-schedule',
+    }),
+    parameters: researchParameters(),
+    mode: {
+      kind: 'retest-breadth',
+      maxRetestWaitMinutes: 10,
+      minMarketBreadthScore: 0.1,
+      minMarketBreadthInstruments: 1,
+      marketBreadthForSession: () => ({
+        score: breadthScore,
+        upCount: breadthScore > 0 ? 1 : 0,
+        downCount: breadthScore < 0 ? 1 : 0,
+        flatCount: breadthScore === 0 ? 1 : 0,
+        validInstrumentCount: breadthScore === 0 ? 0 : 1,
+        availableInstrumentCount: 1,
+      }),
+    },
   });
 }
 
@@ -178,5 +212,55 @@ describe('collectOrbRvolResearch', () => {
       ]),
     );
     expect(report.events.some((event) => event.sessionDate === '2025-01-21')).toBe(false);
+  });
+
+  it('waits for a retest/reclaim and enters on the following minute', () => {
+    const report = collectRetest(syntheticArchive({ retest: true }));
+    const event = report.events[0]!;
+
+    expect(report.strategyId).toBe('orb-rvol-retest-breadth-research-v1');
+    expect(report.experiment).toEqual(
+      expect.objectContaining({
+        entryModel: 'retest-reclaim',
+        maxRetestWaitMinutes: 10,
+      }),
+    );
+    expect(event.entryModel).toBe('retest-reclaim');
+    expect(event.retestAt).toBe(atMoscow('2025-01-21', 10 * 60 + 35));
+    expect(event.entryAt).toBe(atMoscow('2025-01-21', 10 * 60 + 36));
+    expect(event.passesMarketBreadth).toBe(true);
+    expect(event.eligible).toBe(true);
+  });
+
+  it('keeps a retest event observable when breadth rejects the entry', () => {
+    const report = collectRetest(syntheticArchive({ retest: true }), 0);
+
+    expect(report.events).toHaveLength(3);
+    expect(report.events.every((event) => event.passesMarketBreadth === false)).toBe(true);
+    expect(report.events.every((event) => event.eligible === false)).toBe(true);
+  });
+
+  it('does not invent a retest after the fixed waiting window', () => {
+    const report = collectRetest(syntheticArchive());
+
+    expect(report.events).toHaveLength(0);
+    expect(report.dataQuality.retestNotFoundCount).toBe(3);
+  });
+
+  it('rejects a missing minute after the retest instead of shifting the entry', () => {
+    const candles = syntheticArchive({ retest: true }).filter(
+      (candle) => candle.time !== atMoscow('2025-01-21', 10 * 60 + 36),
+    );
+    const report = collectRetest(candles);
+
+    expect(report.events.some((event) => event.sessionDate === '2025-01-21')).toBe(false);
+    expect(report.rejections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionDate: '2025-01-21',
+          reason: 'retest_entry_data_gap',
+        }),
+      ]),
+    );
   });
 });

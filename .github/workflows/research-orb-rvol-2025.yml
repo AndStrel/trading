@@ -18,6 +18,14 @@ on:
         required: false
         default: ''
         type: string
+      strategy_mode:
+        description: 'Research-only entry model'
+        required: true
+        default: 'legacy'
+        type: choice
+        options:
+          - legacy
+          - retest-breadth
 
 permissions:
   contents: read
@@ -41,6 +49,7 @@ jobs:
       RESEARCH_SESSION_START: ${{ inputs.session_start }}
       RESEARCH_SESSION_END: ${{ inputs.session_end }}
       RESEARCH_TICKERS: ${{ inputs.tickers }}
+      RESEARCH_MODE: ${{ inputs.strategy_mode }}
       RESEARCH_RUN_ID: ${{ github.run_id }}
     steps:
       - name: Validate deployment and research inputs
@@ -53,6 +62,10 @@ jobs:
           [[ "$RESEARCH_SESSION_START" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]
           [[ "$RESEARCH_SESSION_END" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]
           [[ -z "$RESEARCH_TICKERS" || "$RESEARCH_TICKERS" =~ ^[A-Z0-9.,-]+$ ]]
+          case "$RESEARCH_MODE" in
+            legacy|retest-breadth) ;;
+            *) echo "Invalid strategy mode" >&2; exit 1 ;;
+          esac
           case "$RESEARCH_RUN_ID" in
             ''|*[!0-9]*) echo "Invalid research run id" >&2; exit 1 ;;
           esac
@@ -78,6 +91,7 @@ jobs:
             env RESEARCH_RUN_ID="$RESEARCH_RUN_ID" \
               RESEARCH_SESSION_START="$RESEARCH_SESSION_START" \
               RESEARCH_SESSION_END="$RESEARCH_SESSION_END" \
+              RESEARCH_MODE="$RESEARCH_MODE" \
               RESEARCH_TICKERS="$RESEARCH_TICKERS" 'bash -s' <<'REMOTE'
               set -Eeuo pipefail
 
@@ -110,6 +124,7 @@ jobs:
                 -e RESEARCH_RUN_ID="$RESEARCH_RUN_ID" \
                 -e SESSION_START="$RESEARCH_SESSION_START" \
                 -e SESSION_END="$RESEARCH_SESSION_END" \
+                -e RESEARCH_MODE="$RESEARCH_MODE" \
                 -e RESEARCH_TICKERS="$RESEARCH_TICKERS" \
                 telegram-service \
                 sh -ceu '
@@ -118,7 +133,7 @@ jobs:
                   report_tmp="${report_path}.tmp.$$"
                   trap "rm -f \"$report_tmp\"" EXIT
                   mkdir -p /app/data/backtests
-                  set -- --year 2025 --session-start "$SESSION_START" --session-end "$SESSION_END"
+                  set -- --mode "$RESEARCH_MODE" --year 2025 --session-start "$SESSION_START" --session-end "$SESSION_END"
                   if [ -n "$RESEARCH_TICKERS" ]; then
                     set -- "$@" --ticker "$RESEARCH_TICKERS"
                   fi
@@ -138,6 +153,7 @@ jobs:
                 RESEARCH_RUN_ID="$RESEARCH_RUN_ID" \
                 RESEARCH_SESSION_START="$RESEARCH_SESSION_START" \
                 RESEARCH_SESSION_END="$RESEARCH_SESSION_END" \
+                RESEARCH_MODE="$RESEARCH_MODE" \
                 RESEARCH_TICKERS="$RESEARCH_TICKERS" \
                 nohup bash "$run_dir/worker.sh" > "$run_dir/worker.log" 2>&1 < /dev/null &
               printf '%s\n' "$!" > "$run_dir/pid"
@@ -245,11 +261,12 @@ jobs:
               docker compose exec -T telegram-service \
                 sh -ceu 'test -s "$1" && cat "$1"' sh "$report_path"
           REMOTE
-          jq -e '.status == "ok" and .mode == "orb-rvol-research" and (.report.strategyId == "orb-rvol-research-v1")' "$report_path" >/dev/null
+          jq -e '.status == "ok" and ((.mode == "orb-rvol-research" and .report.strategyId == "orb-rvol-research-v1") or (.mode == "orb-rvol-retest-breadth-research" and .report.strategyId == "orb-rvol-retest-breadth-research-v1"))' "$report_path" >/dev/null
 
           {
             echo "## ORB RVOL research 2025"
             echo
+            echo "Mode: $(jq -r '.mode' "$report_path")"
             echo "Source commit: $(jq -r '.sourceCommit' "$report_path")"
             echo "Session profile: $(jq -r '.sessionSchedule.startMinuteMoscow' "$report_path")–$(jq -r '.sessionSchedule.endMinuteMoscow' "$report_path") Moscow time"
             echo

@@ -9,17 +9,23 @@ import {
 import {
   collectOrbRvolResearch,
   DEFAULT_ORB_RVOL_PARAMETERS,
+  type OrbRvolMarketBreadth,
   type OrbRvolParameters,
   type OrbRvolReport,
+  type OrbRvolResearchMode,
   type OrbRvolSessionSchedule,
 } from './backtest/orb-rvol.js';
 import { getMoexEquities2025SessionSchedule } from './backtest/orb-rvol-calendar.js';
+import { buildOrbRvolOpeningRangeBreadth } from './backtest/orb-rvol-breadth.js';
 import { MarketDataStore } from './history/market-data-store.js';
+
+export type OrbRvolResearchModeName = 'legacy' | 'retest-breadth';
 
 export type OrbRvolCliOptions = {
   replay: ReplayCliOptions;
   sessionStartMinuteMoscow: number | null;
   sessionEndMinuteMoscow: number | null;
+  mode: OrbRvolResearchModeName;
 };
 
 export type OrbRvolArchiveMetadata = {
@@ -35,7 +41,7 @@ export type OrbRvolArchiveMetadata = {
 
 export type OrbRvolRunResult = {
   status: 'ok';
-  mode: 'orb-rvol-research';
+  mode: 'orb-rvol-research' | 'orb-rvol-retest-breadth-research';
   year: number;
   requestedTickers: string[];
   sessionSchedule: OrbRvolSessionSchedule;
@@ -47,13 +53,16 @@ export type OrbRvolRunResult = {
 const usage = `Usage:
   npm run backtest:replay:orb-rvol -- --year 2025 --session-start 10:00 --session-end 18:40
   npm run backtest:replay:orb-rvol -- --year 2025 --ticker SBER,GAZP --session-start 10:00 --session-end 18:40
+  npm run backtest:replay:orb-rvol -- --mode retest-breadth --year 2025 --session-start 10:00 --session-end 18:40
 
 Collects all first opening-range breakout events from imported minute archives. The command is
 read-only, does not send broker orders, and requires explicit historical session hours so an
 unverified current exchange schedule cannot silently change the experiment.
 
 The fixed session profile is recorded in the JSON output. For 2025, date eligibility is
-resolved by the versioned MOEX equity calendar; verify the supplied session hours separately.`;
+resolved by the versioned MOEX equity calendar; verify the supplied session hours separately.
+The retest-breadth mode is research-only: it waits for a post-breakout retest and adds
+a same-opening-range cross-sectional breadth filter; it never sends broker orders.`;
 
 function parseClock(value: string, flag: string): number {
   const match = /^(\d{2}):(\d{2})$/.exec(value.trim());
@@ -68,17 +77,28 @@ export function parseOrbRvolArgs(args: string[]): OrbRvolCliOptions {
   const replayArgs: string[] = [];
   let sessionStartMinuteMoscow: number | null = null;
   let sessionEndMinuteMoscow: number | null = null;
+  let mode: OrbRvolResearchModeName = 'legacy';
+  let modeProvided = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]!;
     const [flag, inlineValue] = argument.split('=', 2);
-    if (flag !== '--session-start' && flag !== '--session-end') {
+    if (flag !== '--session-start' && flag !== '--session-end' && flag !== '--mode') {
       replayArgs.push(argument);
       continue;
     }
     const value = inlineValue ?? args[index + 1];
     if (!value || value.startsWith('--')) throw new Error(`${flag} requires a value`);
     if (inlineValue === undefined) index += 1;
+    if (flag === '--mode') {
+      if (modeProvided) throw new Error('--mode may be provided only once');
+      if (value !== 'legacy' && value !== 'retest-breadth') {
+        throw new Error('--mode must be legacy or retest-breadth');
+      }
+      mode = value;
+      modeProvided = true;
+      continue;
+    }
     const minute = parseClock(value, flag);
     if (flag === '--session-start') {
       if (sessionStartMinuteMoscow !== null) throw new Error('--session-start may be provided only once');
@@ -93,6 +113,7 @@ export function parseOrbRvolArgs(args: string[]): OrbRvolCliOptions {
     replay: parseReplayArgs(replayArgs),
     sessionStartMinuteMoscow,
     sessionEndMinuteMoscow,
+    mode,
   };
 }
 
@@ -124,6 +145,9 @@ export async function runOrbRvolResearch(options: OrbRvolCliOptions): Promise<Or
   const sessionSchedule = requireSessionSchedule(options);
   const config = loadConfig();
   const requestedTickers = options.replay.tickers.length > 0 ? options.replay.tickers : [...DEFAULT_REPLAY_TICKERS];
+  if (options.mode === 'retest-breadth' && requestedTickers.length < 5) {
+    throw new Error('retest-breadth requires at least five requested tickers for its market-direction proxy');
+  }
   const store = new MarketDataStore(config.marketDataPath);
   const range = archiveRange(options.replay.year);
   const archivesByTicker = new Map<string, ReturnType<MarketDataStore['listArchiveImports']>[number]>();
@@ -207,22 +231,48 @@ export async function runOrbRvolResearch(options: OrbRvolCliOptions): Promise<Or
     commissionRate: config.commissionRate,
     slippageRate: config.scanner.slippageRate,
   };
+  const scheduleForSession = (session: {
+    ticker: string;
+    instrumentId: string;
+    sessionDate: string;
+  }): OrbRvolSessionSchedule | null =>
+    options.replay.year === 2025
+      ? getMoexEquities2025SessionSchedule({
+          sessionDate: session.sessionDate,
+          startMinuteMoscow: sessionSchedule.startMinuteMoscow,
+          endMinuteMoscow: sessionSchedule.endMinuteMoscow,
+        })
+      : sessionSchedule;
+
+  let marketBreadthByDate: Map<string, OrbRvolMarketBreadth | null> | null = null;
+  if (options.mode === 'retest-breadth') {
+    marketBreadthByDate = buildOrbRvolOpeningRangeBreadth({
+      instruments: loadInstruments(),
+      scheduleForSession,
+      openingRangeMinutes: parameters.openingRangeMinutes,
+      minValidInstruments: 5,
+    });
+  }
+  const researchMode: OrbRvolResearchMode | undefined =
+    options.mode === 'retest-breadth'
+      ? {
+          kind: 'retest-breadth',
+          maxRetestWaitMinutes: 45,
+          minMarketBreadthScore: 0.1,
+          minMarketBreadthInstruments: 5,
+          marketBreadthForSession: ({ sessionDate }) => marketBreadthByDate?.get(sessionDate) ?? null,
+        }
+      : undefined;
   const report = collectOrbRvolResearch({
     instruments: loadInstruments(),
-    scheduleForSession: (session) =>
-      options.replay.year === 2025
-        ? getMoexEquities2025SessionSchedule({
-            sessionDate: session.sessionDate,
-            startMinuteMoscow: sessionSchedule.startMinuteMoscow,
-            endMinuteMoscow: sessionSchedule.endMinuteMoscow,
-          })
-        : sessionSchedule,
+    scheduleForSession,
     parameters,
+    ...(researchMode ? { mode: researchMode } : {}),
   });
 
   return {
     status: 'ok',
-    mode: 'orb-rvol-research',
+    mode: options.mode === 'retest-breadth' ? 'orb-rvol-retest-breadth-research' : 'orb-rvol-research',
     year: options.replay.year,
     requestedTickers,
     sessionSchedule,
