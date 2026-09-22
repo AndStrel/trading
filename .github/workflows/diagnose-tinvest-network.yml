@@ -1,0 +1,78 @@
+name: Diagnose T-Invest network
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: trading-telegram-production
+  cancel-in-progress: false
+jobs:
+  diagnose:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      DEPLOY_HOST: ${{ vars.TRADING_DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.TRADING_DEPLOY_USER }}
+      DEPLOY_SSH_KEY: ${{ secrets.TRADING_DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.TRADING_DEPLOY_KNOWN_HOSTS }}
+    steps:
+      - name: Configure verified SSH
+        run: |
+          set -Eeuo pipefail
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+      - name: Compare VPS and Docker connectivity
+        run: |
+          set -Eeuo pipefail
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE' | tee "$RUNNER_TEMP/network.log"
+          set -Eeuo pipefail
+          cd /opt/andstrel/trading
+          image_id="$(docker compose images -q telegram-service </dev/null | head -1)"
+          test -n "$image_id"
+          docker image inspect "$image_id" --format '{{.Id}}' </dev/null
+          # Same existing application image, but no env_file, secrets or data volumes.
+          network_name="$(docker network ls --filter name='^andstrel-trading_default$' --format '{{.Name}}' </dev/null)"
+          test "$network_name" = andstrel-trading_default
+          for host in invest-public-api.tbank.ru invest-public-api.tinkoff.ru github.com; do
+            echo "dns_host=$host"
+            getent ahostsv4 "$host" </dev/null || true
+            for mode in vps container; do
+              echo "probe_start host=$host mode=$mode"
+              args=(--disable --ipv4 --noproxy '*' --silent --show-error
+                --connect-timeout 10 --max-time 15 --proto '=https'
+                --output /dev/null --write-out 'http=%{http_code} ip=%{remote_ip} connect=%{time_connect} tls=%{time_appconnect}\n'
+                "https://$host/")
+              rc=0
+              if [ "$mode" = vps ]; then
+                curl "${args[@]}" </dev/null || rc=$?
+              else
+                docker run --rm --network "$network_name" --read-only \
+                  --cap-drop ALL --security-opt no-new-privileges \
+                  --entrypoint curl "$image_id" "${args[@]}" </dev/null || rc=$?
+              fi
+              echo "probe_end host=$host mode=$mode exit=$rc"
+            done
+          done
+          echo diagnosis_completed
+          REMOTE
+          grep -Fx diagnosis_completed "$RUNNER_TEMP/network.log"
+      - name: Upload diagnostic report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tinvest-network-${{ github.run_id }}
+          path: ${{ runner.temp }}/network.log
+          retention-days: 7
