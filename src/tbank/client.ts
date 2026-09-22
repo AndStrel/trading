@@ -278,3 +278,36 @@ export class TInvestClient {
               Authorization: `Bearer ${this.token}`,
               'Content-Type': 'application/json',
               'x-app-name': 'AndStrel.trading-mcp',
+            },
+            body: serializedBody,
+            signal: AbortSignal.timeout(this.requestTimeoutMs),
+          });
+
+          status = response.status;
+          statusText = response.statusText;
+          payload = await response.json().catch(() => ({}));
+        }
+      } catch (error: unknown) {
+        if (attempt < this.retryAttempts) {
+          await this.sleep(this.retryDelayMs * 2 ** (attempt - 1));
+          continue;
+        }
+        throw new Error(`T-Invest network error: ${describeNetworkError(error)}`);
+      }
+
+      if (status < 200 || status >= 300) {
+        if (isRetryableStatus(status) && attempt < this.retryAttempts) {
+          await this.sleep(this.retryDelayMs * 2 ** (attempt - 1));
+          continue;
+        }
+        const errorBody = asApiErrorBody(payload);
+        const detail = errorBody.message ?? errorBody.description ?? statusText;
+        throw new Error(`T-Invest API ${status}: ${detail}`);
+      }
+
+      return payload;
+    }
+
+    throw new Error('T-Invest request exhausted retry attempts');
+  }
+}
