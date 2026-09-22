@@ -30,9 +30,20 @@ export type TInvestClientOptions = {
   transport?: TInvestTransport;
   fetchImpl?: FetchLike;
   curlPost?: CurlPost;
+  requestTimeoutMs?: number;
+  retryAttempts?: number;
+  retryDelayMs?: number;
+  sleep?: (delayMs: number) => Promise<void>;
 };
 
 const curlStatusPrefix = '\n__ANDSTREL_TINVEST_STATUS__:';
+const defaultRequestTimeoutMs = 30_000;
+const defaultRetryAttempts = 3;
+const defaultRetryDelayMs = 1_000;
+
+function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
 
 function describeNetworkError(error: unknown): string {
   if (!(error instanceof Error)) return 'unknown network failure';
@@ -136,7 +147,7 @@ export async function postWithSystemCurl(input: CurlPostInput): Promise<CurlResp
         '--connect-timeout',
         '10',
         '--max-time',
-        '10',
+        '30',
         '--proto',
         '=https',
         '--data-binary',
@@ -158,6 +169,10 @@ export class TInvestClient {
   private readonly transport: TInvestTransport;
   private readonly fetchImpl: FetchLike;
   private readonly curlPost: CurlPost;
+  private readonly requestTimeoutMs: number;
+  private readonly retryAttempts: number;
+  private readonly retryDelayMs: number;
+  private readonly sleep: (delayMs: number) => Promise<void>;
 
   public constructor(
     private readonly token: string | undefined,
@@ -167,6 +182,10 @@ export class TInvestClient {
     this.transport = options.transport ?? 'fetch';
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.curlPost = options.curlPost ?? postWithSystemCurl;
+    this.requestTimeoutMs = Math.max(1, options.requestTimeoutMs ?? defaultRequestTimeoutMs);
+    this.retryAttempts = Math.max(1, Math.floor(options.retryAttempts ?? defaultRetryAttempts));
+    this.retryDelayMs = Math.max(0, options.retryDelayMs ?? defaultRetryDelayMs);
+    this.sleep = options.sleep ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
   }
 
   public async getAccounts(): Promise<unknown> {
@@ -237,46 +256,58 @@ export class TInvestClient {
     const url = `${this.baseUrl}/${path}`;
     const serializedBody = JSON.stringify(body);
 
-    let status: number;
-    let statusText: string;
-    let payload: unknown;
+    for (let attempt = 1; attempt <= this.retryAttempts; attempt += 1) {
+      let status: number;
+      let statusText: string;
+      let payload: unknown;
 
-    try {
-      if (this.transport === 'system-curl') {
-        const response = await this.curlPost({
-          url,
-          token: this.token,
-          body: serializedBody,
-        });
-        status = response.status;
-        statusText = response.statusText;
-        payload = parsePayload(response.body);
-      } else {
-        const response = await this.fetchImpl(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${this.token}`,
-            'Content-Type': 'application/json',
-            'x-app-name': 'AndStrel.trading-mcp',
-          },
-          body: serializedBody,
-          signal: AbortSignal.timeout(10_000),
-        });
+      try {
+        if (this.transport === 'system-curl') {
+          const response = await this.curlPost({
+            url,
+            token: this.token,
+            body: serializedBody,
+          });
+          status = response.status;
+          statusText = response.statusText;
+          payload = parsePayload(response.body);
+        } else {
+          const response = await this.fetchImpl(url, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${this.token}`,
+              'Content-Type': 'application/json',
+              'x-app-name': 'AndStrel.trading-mcp',
+            },
+            body: serializedBody,
+            signal: AbortSignal.timeout(this.requestTimeoutMs),
+          });
 
-        status = response.status;
-        statusText = response.statusText;
-        payload = await response.json().catch(() => ({}));
+          status = response.status;
+          statusText = response.statusText;
+          payload = await response.json().catch(() => ({}));
+        }
+      } catch (error: unknown) {
+        if (attempt < this.retryAttempts) {
+          await this.sleep(this.retryDelayMs * 2 ** (attempt - 1));
+          continue;
+        }
+        throw new Error(`T-Invest network error: ${describeNetworkError(error)}`);
       }
-    } catch (error: unknown) {
-      throw new Error(`T-Invest network error: ${describeNetworkError(error)}`);
+
+      if (status < 200 || status >= 300) {
+        if (isRetryableStatus(status) && attempt < this.retryAttempts) {
+          await this.sleep(this.retryDelayMs * 2 ** (attempt - 1));
+          continue;
+        }
+        const errorBody = asApiErrorBody(payload);
+        const detail = errorBody.message ?? errorBody.description ?? statusText;
+        throw new Error(`T-Invest API ${status}: ${detail}`);
+      }
+
+      return payload;
     }
 
-    if (status < 200 || status >= 300) {
-      const errorBody = asApiErrorBody(payload);
-      const detail = errorBody.message ?? errorBody.description ?? statusText;
-      throw new Error(`T-Invest API ${status}: ${detail}`);
-    }
-
-    return payload;
+    throw new Error('T-Invest request exhausted retry attempts');
   }
 }
