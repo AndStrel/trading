@@ -140,6 +140,7 @@ export async function postWithSystemCurl(input: CurlPostInput): Promise<CurlResp
         '--disable',
         '--silent',
         '--show-error',
+        '--ipv4',
         '--request',
         'POST',
         '--header',
