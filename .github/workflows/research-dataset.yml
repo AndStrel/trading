@@ -159,17 +159,18 @@ jobs:
             local probe_output
             local probe_exit
 
-            set +e
-            probe_output="$(
+            if probe_output="$(
               docker compose run --rm --no-deps \
                 telegram-service \
                 sh -c "curl --ipv4 --silent --show-error --output /dev/null \
                   --write-out 'http_code=%{http_code} remote_ip=%{remote_ip} time_connect=%{time_connect} total=%{time_total}' \
                   --connect-timeout 10 --max-time 20 --proto '=https' \
                   'https://${api_host}/rest'" 2>&1
-            )"
-            probe_exit=$?
-            set -e
+            )"; then
+              probe_exit=0
+            else
+              probe_exit=$?
+            fi
             printf 'api_probe_host=%s exit=%s %s\n' "$api_host" "$probe_exit" "$probe_output"
           }
 
@@ -226,6 +227,7 @@ jobs:
           echo "research_status=ok"
           REMOTE
           test -s "$report_path"
+          grep -Fx 'research_status=ok' "$report_path"
 
       - name: Add research summary
         if: always()
