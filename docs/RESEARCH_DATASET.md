@@ -31,6 +31,8 @@ npm run history:import -- \
 npm run history:import -- --year 2023 --year 2024 --year 2025 --ticker SBER,GAZP
 ```
 
+`--source auto` используется по умолчанию: T-Invest остаётся быстрым основным источником, а при сетевой недоступности импорт продолжится через MOEX ISS. Источник каждого годового набора фиксируется в SQLite provenance и JSON-логе.
+
 ## Запуск через GitHub Actions
 
 Если нет доступа к домашнему компьютеру или VPS, после merge PR с этим workflow откройте:
@@ -48,7 +50,7 @@ outcome_minutes: 15,30,60
 min_free_gb: 4
 ```
 
-Workflow использует только уже настроенный Environment `production`, secrets SSH и серверный read-only `.env`. Он блокируется общей группой `trading-telegram-production`, проверяет SSH host key и свободное место, собирает образ, запускает одноразовые контейнеры с `--no-deps` и не перезапускает Telegram-сервис. Логи импорта/каталога сохраняются в artifact `research-dataset-<run_id>`.
+Workflow использует только уже настроенный Environment `production`, secrets SSH и серверный read-only `.env`. Он блокируется общей группой `trading-telegram-production`, проверяет SSH host key и свободное место, собирает образ, запускает одноразовые контейнеры с `--no-deps` и не перезапускает Telegram-сервис. Перед импортом оба адреса T-Invest проверяются без токена: если недоступны оба, workflow сразу выбирает `--source moex`, а не ждёт длинную цепочку бесполезных retry. Логи импорта/каталога сохраняются в artifact `research-dataset-<run_id>`.
 
 После успешного прогона пришлите ссылку на run или его artifact — по нему проверим фактическое покрытие, число ситуаций и ошибки по инструментам.
 

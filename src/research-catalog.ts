@@ -96,7 +96,12 @@ function minuteGap(left: string, right: string): number {
   return (Date.parse(right) - Date.parse(left)) / 60_000;
 }
 
-function qualitySummary(candles: readonly HistoricalMinuteCandle[], rawRowCount: number, invalidRowCount: number) {
+function qualitySummary(
+  candles: readonly HistoricalMinuteCandle[],
+  rawRowCount: number,
+  invalidRowCount: number,
+  duplicateRowCount: number,
+) {
   let largestGapMinutes = 0;
   let oneMinuteGapCount = 0;
   for (let index = 1; index < candles.length; index += 1) {
@@ -107,6 +112,7 @@ function qualitySummary(candles: readonly HistoricalMinuteCandle[], rawRowCount:
   return {
     rawRowCount,
     invalidRowCount,
+    duplicateRowCount,
     invalidRate: rawRowCount === 0 ? 0 : invalidRowCount / rawRowCount,
     storedCandleCount: candles.length,
     firstCandleAt: candles[0]?.time ?? null,
@@ -142,9 +148,23 @@ async function main(): Promise<void> {
         from: `${year}-01-01T00:00:00.000Z`,
         to: `${year + 1}-01-01T00:00:00.000Z`,
       });
-      const quality = qualitySummary(candles, archive.rawRowCount, archive.invalidRowCount);
+      const quality = qualitySummary(
+        candles,
+        archive.rawRowCount,
+        archive.invalidRowCount,
+        archive.duplicateRowCount,
+      );
       if (archive.ticker === null || candles.length === 0) {
-        console.log(JSON.stringify({ status: 'skipped', reason: 'empty-archive', ticker: archive.ticker, year, quality }));
+        console.log(
+          JSON.stringify({
+            status: 'skipped',
+            reason: 'empty-archive',
+            ticker: archive.ticker,
+            year,
+            source: archive.source,
+            quality,
+          }),
+        );
         continue;
       }
 
@@ -175,6 +195,7 @@ async function main(): Promise<void> {
           ticker: archive.ticker,
           instrumentId: archive.instrumentId,
           year,
+          source: archive.source,
           datasetVersion: RESEARCH_DATASET_VERSION,
           situations: situations.length,
           quality,

@@ -39,9 +39,16 @@ describe('research workflow stdin isolation', () => {
     const result = run(body);
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain('api_probe_host=invest-public-api.tinkoff.ru exit=28');
+    expect(result.stdout).toContain('history_source=moex');
     expect(result.stdout).toContain('imported');
     expect(result.stdout).toContain('catalog');
     expect(result.stdout).toContain('research_status=ok');
+  });
+
+  it('does not keep the old long outer retry loop', () => {
+    expect(body).not.toContain('history_import_retry=');
+    expect(body).not.toContain('max_attempts=5');
+    expect(body).toContain('--source "$history_source"');
   });
   it('fails when catalog fails and does not emit success', () => {
     const result = run(body, true);

@@ -30,6 +30,8 @@ export type HistoricalArchiveImport = {
   candles: HistoricalMinuteCandle[];
   rawRowCount: number;
   invalidRowCount: number;
+  duplicateRowCount?: number;
+  source?: 'tinvest' | 'moex';
 };
 
 export type HistoricalImportResult = {
@@ -49,6 +51,8 @@ export type HistoricalArchiveProvenance = HistoricalImportResult & {
   lotSize: number | null;
   /** Null only for archives imported before replay metadata was introduced. */
   priceStep: number | null;
+  source: 'tinvest' | 'moex';
+  duplicateRowCount: number;
 };
 
 export type HistoricalCoverage = {
@@ -90,6 +94,8 @@ const schema = `
     stored_candle_count INTEGER NOT NULL CHECK(stored_candle_count >= 0),
     lot_size INTEGER CHECK(lot_size > 0),
     price_step REAL CHECK(price_step > 0),
+    source TEXT NOT NULL DEFAULT 'tinvest' CHECK(source IN ('tinvest', 'moex')),
+    duplicate_row_count INTEGER NOT NULL DEFAULT 0 CHECK(duplicate_row_count >= 0),
     imported_at TEXT NOT NULL,
     PRIMARY KEY (instrument_id, source_year)
   ) STRICT, WITHOUT ROWID;
@@ -142,6 +148,8 @@ type ArchiveImportRow = {
   invalid_row_count: number | bigint;
   lot_size: number | bigint | null;
   price_step: number | null;
+  source: 'tinvest' | 'moex' | null;
+  duplicate_row_count: number | bigint | null;
   imported_at: string;
 };
 
@@ -189,6 +197,12 @@ function ensureArchiveMetadataColumns(database: DatabaseSync): void {
   }
   if (!columns.has('price_step')) {
     database.exec('ALTER TABLE historical_archive_imports ADD COLUMN price_step REAL CHECK(price_step > 0)');
+  }
+  if (!columns.has('source')) {
+    database.exec("ALTER TABLE historical_archive_imports ADD COLUMN source TEXT NOT NULL DEFAULT 'tinvest' CHECK(source IN ('tinvest', 'moex'))");
+  }
+  if (!columns.has('duplicate_row_count')) {
+    database.exec('ALTER TABLE historical_archive_imports ADD COLUMN duplicate_row_count INTEGER NOT NULL DEFAULT 0 CHECK(duplicate_row_count >= 0)');
   }
 }
 
@@ -246,6 +260,11 @@ export class MarketDataStore {
     if (!Number.isSafeInteger(input.invalidRowCount) || input.invalidRowCount < 0) {
       throw new Error('Historical archive invalid row count is invalid');
     }
+    const duplicateRowCount = input.duplicateRowCount ?? 0;
+    if (!Number.isSafeInteger(duplicateRowCount) || duplicateRowCount < 0) {
+      throw new Error('Historical archive duplicate row count is invalid');
+    }
+    const source = input.source ?? 'tinvest';
     if (input.candles.length === 0) throw new Error('Historical archive has no valid candles');
 
     const database = this.open();
@@ -270,8 +289,8 @@ export class MarketDataStore {
       const insertImport = database.prepare(
         `INSERT INTO historical_archive_imports (
           instrument_id, ticker, source_year, archive_sha256, raw_row_count, invalid_row_count,
-          stored_candle_count, lot_size, price_step, imported_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          stored_candle_count, lot_size, price_step, source, duplicate_row_count, imported_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(instrument_id, source_year) DO UPDATE SET
           ticker = CASE
             WHEN historical_archive_imports.archive_sha256 = excluded.archive_sha256
@@ -297,6 +316,8 @@ export class MarketDataStore {
             THEN historical_archive_imports.price_step
             ELSE excluded.price_step
           END,
+          source = excluded.source,
+          duplicate_row_count = excluded.duplicate_row_count,
           imported_at = excluded.imported_at`,
       );
       const deletePriorArchive = database.prepare(
@@ -304,8 +325,29 @@ export class MarketDataStore {
          WHERE instrument_id = ?
            AND source_year = ?`,
       );
+      const deleteOtherTickerCandles = database.prepare(
+        `DELETE FROM historical_minute_candles
+         WHERE source_year = ?
+           AND instrument_id IN (
+             SELECT instrument_id FROM historical_archive_imports
+             WHERE ticker = ? AND source_year = ? AND instrument_id <> ?
+           )`,
+      );
+      const deleteOtherTickerImports = database.prepare(
+        `DELETE FROM historical_archive_imports
+         WHERE ticker = ? AND source_year = ? AND instrument_id <> ?`,
+      );
+      const deleteOtherTickerResearch = database.prepare(
+        `DELETE FROM research_situations
+         WHERE ticker = ? AND source_year = ? AND instrument_id <> ?`,
+      );
 
       database.exec('BEGIN IMMEDIATE');
+      // A ticker/year has exactly one authoritative source. This prevents a fallback
+      // from silently leaving both T-Invest and MOEX copies in the research catalog.
+      deleteOtherTickerCandles.run(input.year, input.ticker, input.year, input.instrumentId);
+      deleteOtherTickerImports.run(input.ticker, input.year, input.instrumentId);
+      deleteOtherTickerResearch.run(input.ticker, input.year, input.instrumentId);
       // A renewed archive is authoritative for its full calendar year. Removing its prior
       // rows inside the same transaction prevents stale rows from surviving a correction.
       deletePriorArchive.run(input.instrumentId, input.year);
@@ -334,6 +376,8 @@ export class MarketDataStore {
         input.candles.length,
         input.lotSize,
         input.priceStep,
+        source,
+        duplicateRowCount,
         importedAt,
       );
       database.exec('COMMIT');
@@ -411,6 +455,8 @@ export class MarketDataStore {
              invalid_row_count,
              lot_size,
              price_step,
+             source,
+             duplicate_row_count,
              imported_at
            FROM historical_archive_imports
            WHERE instrument_id = ?
@@ -441,6 +487,8 @@ export class MarketDataStore {
              invalid_row_count,
              lot_size,
              price_step,
+             source,
+             duplicate_row_count,
              imported_at
            FROM historical_archive_imports
            WHERE source_year = ?
@@ -731,6 +779,7 @@ export class MarketDataStore {
 
     const database = new DatabaseSync(this.databasePath);
     chmodSync(this.databasePath, 0o600);
+    database.exec('PRAGMA foreign_keys = ON;');
     database.exec('PRAGMA journal_mode = WAL;');
     database.exec(schema);
     ensureArchiveMetadataColumns(database);
@@ -777,6 +826,8 @@ function toArchiveProvenance(row: ArchiveImportRow): HistoricalArchiveProvenance
     invalidRowCount: Number(row.invalid_row_count),
     lotSize: row.lot_size === null ? null : Number(row.lot_size),
     priceStep: row.price_step,
+    source: row.source ?? 'tinvest',
+    duplicateRowCount: Number(row.duplicate_row_count ?? 0),
     importedAt: row.imported_at,
   };
 }

@@ -31,6 +31,8 @@ describe('MarketDataStore', () => {
       priceStep: 0.01,
       rawRowCount: 3,
       invalidRowCount: 1,
+      duplicateRowCount: 1,
+      source: 'moex',
       candles: [
         {
           instrumentId: 'instrument-uid',
@@ -74,8 +76,10 @@ describe('MarketDataStore', () => {
       storedCandleCount: 2,
       rawRowCount: 3,
       invalidRowCount: 1,
+      duplicateRowCount: 1,
       lotSize: 10,
       priceStep: 0.01,
+      source: 'moex',
     });
     expect(store.getArchiveImport('instrument-uid', 2024)).toBeNull();
     expect(store.listArchiveImports(2025)).toEqual([
@@ -147,6 +151,53 @@ describe('MarketDataStore', () => {
         to: '2025-01-02T07:01:00.000Z',
       }),
     ).toMatchObject([{ close: 100.7, high: 100.7 }]);
+  });
+
+  it('keeps one authoritative ticker/year when the data source changes', async () => {
+    const store = await storeForTest();
+    const candle = {
+      instrumentId: 'tinvest-uid',
+      time: '2025-01-02T07:00:00.000Z',
+      open: 100,
+      high: 101,
+      low: 99,
+      close: 100,
+      volume: 20,
+    };
+    store.importMinuteArchive({
+      instrumentId: 'tinvest-uid',
+      ticker: 'TEST',
+      year: 2025,
+      archiveSha256: 'a'.repeat(64),
+      lotSize: 10,
+      priceStep: 0.01,
+      rawRowCount: 1,
+      invalidRowCount: 0,
+      source: 'tinvest',
+      candles: [candle],
+    });
+    store.importMinuteArchive({
+      instrumentId: 'MOEX:TQBR:TEST',
+      ticker: 'TEST',
+      year: 2025,
+      archiveSha256: 'b'.repeat(64),
+      lotSize: 10,
+      priceStep: 0.01,
+      rawRowCount: 1,
+      invalidRowCount: 0,
+      source: 'moex',
+      candles: [{ ...candle, instrumentId: 'MOEX:TQBR:TEST', close: 100.5 }],
+    });
+
+    expect(store.listArchiveImports(2025)).toEqual([
+      expect.objectContaining({
+        instrumentId: 'MOEX:TQBR:TEST',
+        ticker: 'TEST',
+        source: 'moex',
+      }),
+    ]);
+    expect(store.getCoverage('tinvest-uid').candleCount).toBe(0);
+    expect(store.getCoverage('MOEX:TQBR:TEST').candleCount).toBe(1);
   });
 
   it('keeps the first captured contract when the market-data archive SHA is unchanged', async () => {
@@ -224,7 +275,12 @@ describe('MarketDataStore', () => {
       ],
     });
 
-    expect(store.getArchiveImport('instrument-uid', 2025)).toMatchObject({ lotSize: 10, priceStep: 0.01 });
+    expect(store.getArchiveImport('instrument-uid', 2025)).toMatchObject({
+      lotSize: 10,
+      priceStep: 0.01,
+      source: 'tinvest',
+      duplicateRowCount: 0,
+    });
   });
 
   it('removes stale candles when a renewed annual archive no longer contains them', async () => {
