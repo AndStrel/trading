@@ -120,7 +120,10 @@ describe('TInvestClient', () => {
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockRejectedValue(new TypeError('fetch failed', { cause }));
-    const client = new TInvestClient('secret-token', 'https://example.test/rest', { fetchImpl: fetchMock });
+    const client = new TInvestClient('secret-token', 'https://example.test/rest', {
+      fetchImpl: fetchMock,
+      retryAttempts: 1,
+    });
 
     await expect(client.getAccounts()).rejects.toThrow(
       'T-Invest network error: ECONNRESET: connection reset by peer',
@@ -137,6 +140,7 @@ describe('TInvestClient', () => {
     const client = new TInvestClient('secret-token', 'https://example.test/rest', {
       transport: 'system-curl',
       curlPost,
+      retryAttempts: 1,
     });
 
     await expect(client.getAccounts()).rejects.toThrow(
@@ -145,5 +149,37 @@ describe('TInvestClient', () => {
     await client.getAccounts().catch((error: unknown) => {
       expect(String(error)).not.toContain('secret-token');
     });
+  });
+
+  it('retries transient network failures before succeeding', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accounts: [] }), { status: 200 }));
+    const sleepMock = vi.fn(async () => undefined);
+    const client = new TInvestClient('secret', 'https://example.test/rest', {
+      fetchImpl: fetchMock,
+      retryDelayMs: 0,
+      sleep: sleepMock,
+    });
+
+    await expect(client.getAccounts()).resolves.toEqual({ accounts: [] });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sleepMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries temporary upstream failures before succeeding', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('busy', { status: 503 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accounts: [] }), { status: 200 }));
+    const client = new TInvestClient('secret', 'https://example.test/rest', {
+      fetchImpl: fetchMock,
+      retryDelayMs: 0,
+      sleep: vi.fn(async () => undefined),
+    });
+
+    await expect(client.getAccounts()).resolves.toEqual({ accounts: [] });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

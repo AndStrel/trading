@@ -155,7 +155,9 @@ jobs:
           done
 
           echo "history_import_start=$(date -u +%FT%TZ)"
-          docker compose run --rm --no-deps telegram-service \
+          docker compose run --rm --no-deps \
+            --env T_INVEST_TRANSPORT=system-curl \
+            telegram-service \
             node dist/history-import.js \
             "${history_args[@]}" \
             --ticker "$RESEARCH_TICKERS"
@@ -182,9 +184,9 @@ jobs:
           {
             echo "## Research historical dataset"
             echo
-            echo "Years: `$RESEARCH_YEARS`"
-            echo "Tickers: `$RESEARCH_TICKERS`"
-            echo "Source: `main`"
+            echo "Years: $RESEARCH_YEARS"
+            echo "Tickers: $RESEARCH_TICKERS"
+            echo "Source: main"
             echo
             if test -s "$report_path"; then
               echo '```text'
