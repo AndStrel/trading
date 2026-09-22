@@ -172,47 +172,41 @@ jobs:
               probe_exit=$?
             fi
             printf 'api_probe_host=%s exit=%s %s\n' "$api_host" "$probe_exit" "$probe_output"
+            return "$probe_exit"
           }
 
           # Probe both hostnames without sending a token. A 401/404 still proves
           # that DNS, TCP and TLS are reachable; the body is discarded.
-          probe_api_endpoint "invest-public-api.tbank.ru"
-          probe_api_endpoint "invest-public-api.tinkoff.ru"
+          tbank_probe=0
+          tinkoff_probe=0
+          probe_api_endpoint "invest-public-api.tbank.ru" || tbank_probe=$?
+          probe_api_endpoint "invest-public-api.tinkoff.ru" || tinkoff_probe=$?
 
-          run_history_import() {
-            local attempt=1
-            local max_attempts=5
-            local api_hosts=(invest-public-api.tinkoff.ru invest-public-api.tbank.ru)
-            while true; do
-              local host_index=$(( (attempt - 1) % ${#api_hosts[@]} ))
-              local api_host="${api_hosts[$host_index]}"
-              echo "history_import_attempt=${attempt} start=$(date -u +%FT%TZ)"
-              echo "history_import_host=${api_host}"
-              if docker compose run --rm --no-deps -T --interactive=false </dev/null \
-                --env T_INVEST_TRANSPORT=system-curl \
-                --env T_INVEST_BASE_URL="https://${api_host}/rest" \
-                --env T_INVEST_HISTORY_DATA_URL="https://${api_host}/history-data" \
-                telegram-service \
-                node dist/history-import.js \
-                "${history_args[@]}" \
-                --ticker "$RESEARCH_TICKERS"; then
-                echo "history_import_attempt=${attempt} result=ok end=$(date -u +%FT%TZ)"
-                return 0
-              fi
-
-              if (( attempt >= max_attempts )); then
-                echo "history_import_attempt=${attempt} result=failed" >&2
-                return 1
-              fi
-
-              local delay_seconds=$((30 * 2 ** (attempt - 1)))
-              echo "history_import_retry=$((attempt + 1)) delay_seconds=${delay_seconds}" >&2
-              sleep "$delay_seconds"
-              attempt=$((attempt + 1))
-            done
-          }
-
-          run_history_import
+          history_source=auto
+          history_api_host=invest-public-api.tbank.ru
+          if (( tbank_probe == 0 )); then
+            history_api_host=invest-public-api.tbank.ru
+          elif (( tinkoff_probe == 0 )); then
+            history_api_host=invest-public-api.tinkoff.ru
+          else
+            # Do not spend eleven minutes retrying an endpoint that the preflight
+            # already proved unreachable. The importer resolves tickers and candles
+            # independently through MOEX ISS in this mode.
+            history_source=moex
+            history_api_host=invest-public-api.tbank.ru
+          fi
+          echo "history_source=$history_source"
+          echo "history_import_host=$history_api_host"
+          echo "history_import_start=$(date -u +%FT%TZ)"
+          docker compose run --rm --no-deps -T --interactive=false </dev/null \
+            --env T_INVEST_TRANSPORT=system-curl \
+            --env T_INVEST_BASE_URL="https://${history_api_host}/rest" \
+            --env T_INVEST_HISTORY_DATA_URL="https://${history_api_host}/history-data" \
+            telegram-service \
+            node dist/history-import.js \
+            "${history_args[@]}" \
+            --ticker "$RESEARCH_TICKERS" \
+            --source "$history_source"
           echo "history_import_end=$(date -u +%FT%TZ)"
 
           echo "research_catalog_start=$(date -u +%FT%TZ)"

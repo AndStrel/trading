@@ -46,7 +46,7 @@ jobs:
           # Same existing application image, but no env_file, secrets or data volumes.
           network_name="$(docker network ls --filter name='^andstrel-trading_default$' --format '{{.Name}}' </dev/null)"
           test "$network_name" = andstrel-trading_default
-          for host in invest-public-api.tbank.ru invest-public-api.tinkoff.ru github.com; do
+          for host in invest-public-api.tbank.ru invest-public-api.tinkoff.ru iss.moex.com github.com; do
             echo "dns_host=$host"
             getent ahostsv4 "$host" </dev/null || true
             for mode in vps container; do
@@ -69,6 +69,18 @@ jobs:
           echo diagnosis_completed
           REMOTE
           grep -Fx diagnosis_completed "$RUNNER_TEMP/network.log"
+          if grep -Eq 'probe_end host=invest-public-api\.(tbank|tinkoff)\.ru mode=container exit=0' "$RUNNER_TEMP/network.log"; then
+            echo "T-Invest is reachable from the application container." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::Both T-Invest API hosts are unreachable from the application container"
+            {
+              echo "## T-Invest connectivity blocked"
+              echo
+              echo "Both API hostnames failed from the production application network."
+              echo "Historical research can use MOEX fallback, but live broker operations remain unavailable."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
       - name: Upload diagnostic report
         if: always()
         uses: actions/upload-artifact@v4

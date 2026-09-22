@@ -68,10 +68,10 @@ npm run scan:intraday
 
 ```bash
 npm run build
-npm run history:import -- --year 2025 --ticker SBER,GAZP
+npm run history:import -- --year 2025 --ticker SBER,GAZP --source auto
 ```
 
-Данные сохраняются отдельно в `T_INVEST_MARKET_DATA_PATH` (по умолчанию `.trading/market-data.sqlite`). Импорт проверяет формат, UID и время свечей, а повторный запуск безопасно обновляет те же записи. Полная инструкция и границы данных — в [документе об исторических данных](docs/HISTORICAL_DATA.md).
+Данные сохраняются отдельно в `T_INVEST_MARKET_DATA_PATH` (по умолчанию `.trading/market-data.sqlite`). Импорт сначала использует годовой архив T-Invest, а при его недоступности переключается на публичные минутные свечи MOEX ISS. Источник, качество и хеш набора сохраняются в provenance; повторный запуск безопасно заменяет тот же `тикер + год`. Полная инструкция и границы данных — в [документе об исторических данных](docs/HISTORICAL_DATA.md).
 
 После полного импорта `liquid-20` за 2025 можно запустить первый зафиксированный replay:
 
