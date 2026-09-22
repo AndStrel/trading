@@ -154,13 +154,43 @@ jobs:
             catalog_args+=(--year "$year")
           done
 
+          probe_api_endpoint() {
+            local api_host="$1"
+            local probe_output
+            local probe_exit
+
+            set +e
+            probe_output="$(
+              docker compose run --rm --no-deps \
+                telegram-service \
+                sh -c "curl --ipv4 --silent --show-error --output /dev/null \
+                  --write-out 'http_code=%{http_code} remote_ip=%{remote_ip} time_connect=%{time_connect} total=%{time_total}' \
+                  --connect-timeout 10 --max-time 20 --proto '=https' \
+                  'https://${api_host}/rest'" 2>&1
+            )"
+            probe_exit=$?
+            set -e
+            printf 'api_probe_host=%s exit=%s %s\n' "$api_host" "$probe_exit" "$probe_output"
+          }
+
+          # Probe both hostnames without sending a token. A 401/404 still proves
+          # that DNS, TCP and TLS are reachable; the body is discarded.
+          probe_api_endpoint "invest-public-api.tbank.ru"
+          probe_api_endpoint "invest-public-api.tinkoff.ru"
+
           run_history_import() {
             local attempt=1
             local max_attempts=5
+            local api_hosts=(invest-public-api.tinkoff.ru invest-public-api.tbank.ru)
             while true; do
+              local host_index=$(( (attempt - 1) % ${#api_hosts[@]} ))
+              local api_host="${api_hosts[$host_index]}"
               echo "history_import_attempt=${attempt} start=$(date -u +%FT%TZ)"
+              echo "history_import_host=${api_host}"
               if docker compose run --rm --no-deps \
                 --env T_INVEST_TRANSPORT=system-curl \
+                --env T_INVEST_BASE_URL="https://${api_host}/rest" \
+                --env T_INVEST_HISTORY_DATA_URL="https://${api_host}/history-data" \
                 telegram-service \
                 node dist/history-import.js \
                 "${history_args[@]}" \
