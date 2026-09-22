@@ -139,6 +139,7 @@ export async function getArchiveWithSystemCurl(input: CurlGetArchiveInput): Prom
       '--disable',
       '--silent',
       '--show-error',
+      '--ipv4',
       '--location',
       '--request',
       'GET',

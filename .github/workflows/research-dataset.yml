@@ -154,13 +154,34 @@ jobs:
             catalog_args+=(--year "$year")
           done
 
-          echo "history_import_start=$(date -u +%FT%TZ)"
-          docker compose run --rm --no-deps \
-            --env T_INVEST_TRANSPORT=system-curl \
-            telegram-service \
-            node dist/history-import.js \
-            "${history_args[@]}" \
-            --ticker "$RESEARCH_TICKERS"
+          run_history_import() {
+            local attempt=1
+            local max_attempts=5
+            while true; do
+              echo "history_import_attempt=${attempt} start=$(date -u +%FT%TZ)"
+              if docker compose run --rm --no-deps \
+                --env T_INVEST_TRANSPORT=system-curl \
+                telegram-service \
+                node dist/history-import.js \
+                "${history_args[@]}" \
+                --ticker "$RESEARCH_TICKERS"; then
+                echo "history_import_attempt=${attempt} result=ok end=$(date -u +%FT%TZ)"
+                return 0
+              fi
+
+              if (( attempt >= max_attempts )); then
+                echo "history_import_attempt=${attempt} result=failed" >&2
+                return 1
+              fi
+
+              local delay_seconds=$((30 * 2 ** (attempt - 1)))
+              echo "history_import_retry=$((attempt + 1)) delay_seconds=${delay_seconds}" >&2
+              sleep "$delay_seconds"
+              attempt=$((attempt + 1))
+            done
+          }
+
+          run_history_import
           echo "history_import_end=$(date -u +%FT%TZ)"
 
           echo "research_catalog_start=$(date -u +%FT%TZ)"
