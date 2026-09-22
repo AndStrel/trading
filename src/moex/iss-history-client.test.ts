@@ -74,6 +74,7 @@ describe('MoexIssHistoryClient', () => {
                 [100, 101, 98, 99, 20, '2025-02-03 10:01:00'],
                 [100, 101, 102, 99, 30, '2025-02-03 10:00:00'],
                 [100, 101, 102, 99, 25, '2025-02-03 10:02:00'],
+                [100, 101, 102, 99, 20, '2025-02-30 10:03:00'],
               ],
             },
           })
@@ -87,8 +88,8 @@ describe('MoexIssHistoryClient', () => {
 
     const result = await client.getMinuteHistory('GAZP', 2025);
 
-    expect(result.rawRowCount).toBe(4);
-    expect(result.invalidRowCount).toBe(2);
+    expect(result.rawRowCount).toBe(5);
+    expect(result.invalidRowCount).toBe(3);
     expect(result.duplicateRowCount).toBe(1);
     expect(result.candles).toHaveLength(1);
     expect(result.candles[0]?.volume).toBe(3);

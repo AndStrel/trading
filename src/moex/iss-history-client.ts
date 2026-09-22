@@ -76,10 +76,28 @@ function parseMoexTime(value: unknown, year: number): string | null {
   const normalized = value.trim();
   const match = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/.exec(normalized);
   if (!match || Number(match[1]) !== year) return null;
+  const parts = match.slice(1).map(Number);
+  const [parsedYear, month, day, hour, minute, second] = parts;
+  if (
+    parsedYear === undefined ||
+    month === undefined ||
+    day === undefined ||
+    hour === undefined ||
+    minute === undefined ||
+    second === undefined
+  ) return null;
+  const localCalendarTime = new Date(Date.UTC(parsedYear, month - 1, day, hour, minute, second));
+  if (
+    localCalendarTime.getUTCFullYear() !== parsedYear ||
+    localCalendarTime.getUTCMonth() !== month - 1 ||
+    localCalendarTime.getUTCDate() !== day ||
+    localCalendarTime.getUTCHours() !== hour ||
+    localCalendarTime.getUTCMinutes() !== minute ||
+    localCalendarTime.getUTCSeconds() !== second
+  ) return null;
   // MOEX ISS candle timestamps are Moscow exchange time. Since the supported
   // fallback range starts after 2014, Europe/Moscow is UTC+03 without DST.
-  const parsed = new Date(`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}+03:00`);
-  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  return new Date(localCalendarTime.getTime() - 3 * 60 * 60 * 1_000).toISOString();
 }
 
 function isValidCandle(candle: HistoricalMinuteCandle): boolean {
