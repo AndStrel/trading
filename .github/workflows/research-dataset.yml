@@ -1,0 +1,205 @@
+name: Research historical dataset
+
+# Manual-only: historical downloads are large and must never be triggered by a normal deploy.
+# The workflow uses the existing production Environment only for read-only data import and
+# research catalog generation. It does not submit broker orders or restart the service.
+on:
+  workflow_dispatch:
+    inputs:
+      years:
+        description: 'Comma-separated archive years'
+        required: true
+        default: '2023,2024,2025'
+        type: string
+      tickers:
+        description: 'Comma-separated tickers; start with SBER,GAZP before expanding the set'
+        required: true
+        default: 'SBER,GAZP'
+        type: string
+      lookback_minutes:
+        description: 'Past candle window used for features'
+        required: true
+        default: '30'
+        type: string
+      step_minutes:
+        description: 'Distance between catalog situations'
+        required: true
+        default: '5'
+        type: string
+      outcome_minutes:
+        description: 'Comma-separated forward horizons'
+        required: true
+        default: '15,30,60'
+        type: string
+      min_free_gb:
+        description: 'Required free disk space on VPS before starting'
+        required: true
+        default: '4'
+        type: string
+
+permissions:
+  contents: read
+
+# Do not race deploy, archive bootstrap, or replay on the shared market-data volume.
+concurrency:
+  group: trading-telegram-production
+  cancel-in-progress: false
+
+jobs:
+  research:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: production
+    env:
+      DEPLOY_HOST: ${{ vars.TRADING_DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.TRADING_DEPLOY_USER }}
+      DEPLOY_PATH: ${{ vars.TRADING_DEPLOY_PATH }}
+      DEPLOY_SSH_KEY: ${{ secrets.TRADING_DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.TRADING_DEPLOY_KNOWN_HOSTS }}
+      RESEARCH_YEARS: ${{ inputs.years }}
+      RESEARCH_TICKERS: ${{ inputs.tickers }}
+      RESEARCH_LOOKBACK_MINUTES: ${{ inputs.lookback_minutes }}
+      RESEARCH_STEP_MINUTES: ${{ inputs.step_minutes }}
+      RESEARCH_OUTCOME_MINUTES: ${{ inputs.outcome_minutes }}
+      RESEARCH_MIN_FREE_GB: ${{ inputs.min_free_gb }}
+      RESEARCH_RUN_ID: ${{ github.run_id }}
+    steps:
+      - name: Validate deployment and research inputs
+        run: |
+          set -Eeuo pipefail
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test "$DEPLOY_PATH" = "/opt/andstrel/trading"
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          [[ "$RESEARCH_YEARS" =~ ^[0-9]{4}(,[0-9]{4})*$ ]]
+          [[ "$RESEARCH_TICKERS" =~ ^[A-Z0-9.-]+(,[A-Z0-9.-]+)*$ ]]
+          [[ "$RESEARCH_OUTCOME_MINUTES" =~ ^[0-9]+(,[0-9]+)*$ ]]
+          case "$RESEARCH_LOOKBACK_MINUTES" in ''|*[!0-9]*) echo "Invalid lookback_minutes" >&2; exit 1 ;; esac
+          case "$RESEARCH_STEP_MINUTES" in ''|*[!0-9]*) echo "Invalid step_minutes" >&2; exit 1 ;; esac
+          case "$RESEARCH_MIN_FREE_GB" in ''|*[!0-9]*) echo "Invalid min_free_gb" >&2; exit 1 ;; esac
+          test "$RESEARCH_LOOKBACK_MINUTES" -ge 30
+          test "$RESEARCH_LOOKBACK_MINUTES" -le 240
+          test "$RESEARCH_STEP_MINUTES" -ge 1
+          test "$RESEARCH_STEP_MINUTES" -le "$RESEARCH_LOOKBACK_MINUTES"
+          test "$RESEARCH_MIN_FREE_GB" -ge 1
+          test "$RESEARCH_MIN_FREE_GB" -le 128
+          case "$RESEARCH_RUN_ID" in ''|*[!0-9]*) echo "Invalid run id" >&2; exit 1 ;; esac
+
+      - name: Configure verified SSH access
+        run: |
+          set -Eeuo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Import archives and build research catalog
+        run: |
+          set -Eeuo pipefail
+          report_path="$RUNNER_TEMP/research-dataset-${RESEARCH_RUN_ID}.log"
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=4 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            env DEPLOY_PATH="$DEPLOY_PATH" \
+              RESEARCH_YEARS="$RESEARCH_YEARS" \
+              RESEARCH_TICKERS="$RESEARCH_TICKERS" \
+              RESEARCH_LOOKBACK_MINUTES="$RESEARCH_LOOKBACK_MINUTES" \
+              RESEARCH_STEP_MINUTES="$RESEARCH_STEP_MINUTES" \
+              RESEARCH_OUTCOME_MINUTES="$RESEARCH_OUTCOME_MINUTES" \
+              RESEARCH_MIN_FREE_GB="$RESEARCH_MIN_FREE_GB" \
+              'bash -s' <<'REMOTE' | tee "$report_path"
+          set -Eeuo pipefail
+
+          deployment_path="$DEPLOY_PATH"
+          test -d "$deployment_path/.git"
+          test -f "$deployment_path/.env"
+          test -r "$deployment_path/.env"
+          command -v git >/dev/null
+          command -v docker >/dev/null
+          docker compose version >/dev/null
+
+          free_kb="$(df -Pk "$deployment_path" | awk 'NR == 2 { print $4 }')"
+          test "$free_kb" -ge 1
+          required_free_kb=$((RESEARCH_MIN_FREE_GB * 1024 * 1024))
+          if [ "$free_kb" -lt "$required_free_kb" ]; then
+            echo "Need at least ${RESEARCH_MIN_FREE_GB} GiB free on $deployment_path; found ${free_kb} KiB." >&2
+            exit 1
+          fi
+          echo "free_space_kb=$free_kb"
+
+          cd "$deployment_path"
+          git fetch --depth=1 origin main
+          git checkout --detach origin/main
+          source_commit="$(git rev-parse HEAD)"
+          echo "source_commit=$source_commit"
+          chmod 600 .env
+
+          # Build the image once, but run research containers with --no-deps so the
+          # already-running Telegram service is not restarted by this workflow.
+          docker compose build telegram-service
+
+          IFS=',' read -r -a year_values <<< "$RESEARCH_YEARS"
+          history_args=()
+          catalog_args=()
+          for year in "${year_values[@]}"; do
+            history_args+=(--year "$year")
+            catalog_args+=(--year "$year")
+          done
+
+          echo "history_import_start=$(date -u +%FT%TZ)"
+          docker compose run --rm --no-deps telegram-service \
+            node dist/history-import.js \
+            "${history_args[@]}" \
+            --ticker "$RESEARCH_TICKERS"
+          echo "history_import_end=$(date -u +%FT%TZ)"
+
+          echo "research_catalog_start=$(date -u +%FT%TZ)"
+          docker compose run --rm --no-deps telegram-service \
+            node dist/research-catalog.js \
+            "${catalog_args[@]}" \
+            --ticker "$RESEARCH_TICKERS" \
+            --lookback-minutes "$RESEARCH_LOOKBACK_MINUTES" \
+            --step-minutes "$RESEARCH_STEP_MINUTES" \
+            --outcome-minutes "$RESEARCH_OUTCOME_MINUTES"
+          echo "research_catalog_end=$(date -u +%FT%TZ)"
+          echo "research_status=ok"
+          REMOTE
+          test -s "$report_path"
+
+      - name: Add research summary
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          report_path="$RUNNER_TEMP/research-dataset-${RESEARCH_RUN_ID}.log"
+          {
+            echo "## Research historical dataset"
+            echo
+            echo "Years: `$RESEARCH_YEARS`"
+            echo "Tickers: `$RESEARCH_TICKERS`"
+            echo "Source: `main`"
+            echo
+            if test -s "$report_path"; then
+              echo '```text'
+              tail -80 "$report_path"
+              echo '```'
+            else
+              echo "The remote step did not produce a report. Check the failed step logs."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload import and catalog report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: research-dataset-${{ github.run_id }}
+          path: ${{ runner.temp }}/research-dataset-${{ github.run_id }}.log
+          if-no-files-found: warn
+          retention-days: 30

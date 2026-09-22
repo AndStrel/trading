@@ -31,6 +31,27 @@ npm run history:import -- \
 npm run history:import -- --year 2023 --year 2024 --year 2025 --ticker SBER,GAZP
 ```
 
+## Запуск через GitHub Actions
+
+Если нет доступа к домашнему компьютеру или VPS, после merge PR с этим workflow откройте:
+
+`GitHub → Actions → Research historical dataset → Run workflow → Branch: main`.
+
+Для первого запуска оставьте значения по умолчанию:
+
+```text
+years: 2023,2024,2025
+tickers: SBER,GAZP
+lookback_minutes: 30
+step_minutes: 5
+outcome_minutes: 15,30,60
+min_free_gb: 4
+```
+
+Workflow использует только уже настроенный Environment `production`, secrets SSH и серверный read-only `.env`. Он блокируется общей группой `trading-telegram-production`, проверяет SSH host key и свободное место, собирает образ, запускает одноразовые контейнеры с `--no-deps` и не перезапускает Telegram-сервис. Логи импорта/каталога сохраняются в artifact `research-dataset-<run_id>`.
+
+После успешного прогона пришлите ссылку на run или его artifact — по нему проверим фактическое покрытие, число ситуаций и ошибки по инструментам.
+
 ## Шаг 2. Построить каталог
 
 ```bash
@@ -71,4 +92,3 @@ npm run research:similar -- \
 - каталог не является сигналом и не подключён к live execution;
 - forward-outcomes описывают цену/диапазон OHLCV, а не реальные bid/ask fills;
 - точная глубина архива зависит от инструмента и доступности годового архива у T-Invest, поэтому перед исследованием нужно проверить фактический coverage в JSON-логе.
-
