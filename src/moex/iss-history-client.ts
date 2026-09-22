@@ -227,11 +227,25 @@ export class MoexIssHistoryClient {
         const close = positiveNumber(row[closeIndex]);
         const high = positiveNumber(row[highIndex]);
         const low = positiveNumber(row[lowIndex]);
-        const volume = finiteNumber(row[volumeIndex]);
-        if (time === null || open === null || close === null || high === null || low === null || volume === null) {
+        const securityVolume = finiteNumber(row[volumeIndex]);
+        if (
+          time === null ||
+          open === null ||
+          close === null ||
+          high === null ||
+          low === null ||
+          securityVolume === null ||
+          !Number.isSafeInteger(securityVolume) ||
+          securityVolume < 0 ||
+          securityVolume % instrument.lotSize !== 0
+        ) {
           invalidRowCount += 1;
           continue;
         }
+        // MOEX ISS reports VOLUME in securities, while T-Invest history and the
+        // replay model use lots. Keep every imported source in the same unit so
+        // turnover = volume * close * lotSize remains comparable.
+        const volume = securityVolume / instrument.lotSize;
         const candle: HistoricalMinuteCandle = {
           instrumentId: instrument.instrumentId,
           time,
