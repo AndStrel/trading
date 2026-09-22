@@ -160,7 +160,7 @@ jobs:
             local probe_exit
 
             if probe_output="$(
-              docker compose run --rm --no-deps \
+              docker compose run --rm --no-deps -T --interactive=false </dev/null \
                 telegram-service \
                 sh -c "curl --ipv4 --silent --show-error --output /dev/null \
                   --write-out 'http_code=%{http_code} remote_ip=%{remote_ip} time_connect=%{time_connect} total=%{time_total}' \
@@ -188,7 +188,7 @@ jobs:
               local api_host="${api_hosts[$host_index]}"
               echo "history_import_attempt=${attempt} start=$(date -u +%FT%TZ)"
               echo "history_import_host=${api_host}"
-              if docker compose run --rm --no-deps \
+              if docker compose run --rm --no-deps -T --interactive=false </dev/null \
                 --env T_INVEST_TRANSPORT=system-curl \
                 --env T_INVEST_BASE_URL="https://${api_host}/rest" \
                 --env T_INVEST_HISTORY_DATA_URL="https://${api_host}/history-data" \
@@ -216,7 +216,7 @@ jobs:
           echo "history_import_end=$(date -u +%FT%TZ)"
 
           echo "research_catalog_start=$(date -u +%FT%TZ)"
-          docker compose run --rm --no-deps telegram-service \
+          docker compose run --rm --no-deps -T --interactive=false </dev/null telegram-service \
             node dist/research-catalog.js \
             "${catalog_args[@]}" \
             --ticker "$RESEARCH_TICKERS" \
