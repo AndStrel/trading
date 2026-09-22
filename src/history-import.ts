@@ -8,7 +8,7 @@ import { TInvestIntradayUniverseProvider } from './scanner/intraday-universe.js'
 import { TInvestClient } from './tbank/client.js';
 import { TInvestHistoryClient } from './tbank/history-client.js';
 
-type HistorySource = 'auto' | 'tinvest' | 'moex';
+export type HistorySource = 'auto' | 'tinvest' | 'moex';
 type ImportCliOptions = { years: number[]; tickers: string[]; source: HistorySource; help: boolean };
 
 const usage = `Usage:
@@ -63,6 +63,17 @@ export function parseHistoryImportArgs(args: string[]): ImportCliOptions {
   return { years: [...new Set(years)].sort((a, b) => a - b), tickers: [...new Set(tickers)], source, help };
 }
 
+export function resolveHistorySourceForTicker(
+  requestedSource: HistorySource,
+  ticker: string,
+  hasTInvestInstrument: boolean,
+): 'tinvest' | 'moex' {
+  if (requestedSource === 'moex') return 'moex';
+  if (hasTInvestInstrument) return 'tinvest';
+  if (requestedSource === 'auto') return 'moex';
+  throw new Error(`T-Invest universe did not resolve requested ticker: ${ticker}`);
+}
+
 async function main(): Promise<void> {
   const options = parseHistoryImportArgs(process.argv.slice(2));
   if (options.help) { console.log(usage); return; }
@@ -108,7 +119,9 @@ async function main(): Promise<void> {
     for (const ticker of tickers) {
       try {
         const instrument = tInvestByTicker.get(ticker);
-        if (options.source === 'moex' || !instrument) { await importMoex(ticker, year); continue; }
+        const selectedSource = resolveHistorySourceForTicker(options.source, ticker, instrument !== undefined);
+        if (selectedSource === 'moex') { await importMoex(ticker, year); continue; }
+        if (!instrument) throw new Error(`T-Invest universe did not resolve requested ticker: ${ticker}`);
         try {
           const archive = await tInvestHistoryClient.getMinuteCandleArchive({
             ...(instrument.figi ? { figi: instrument.figi } : { instrumentId: instrument.instrumentId }), year,
