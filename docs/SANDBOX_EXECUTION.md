@@ -46,7 +46,7 @@ Executor использует заданный `T_INVEST_TRANSPORT`, в том �
 ## Защитные ограничения
 
 - отдельный `T_INVEST_TRADING_TOKEN`, который не передаётся MCP и сканеру;
-- только `SandboxService/PostSandboxOrder` и опциональный `PostSandboxStopOrder`; live-endpoint в клиенте отсутствует;
+- торговые записи только в `SandboxService`: `PostSandboxOrder`, опциональный `PostSandboxStopOrder` и, при отдельно включённом выходе из сессии, `CancelSandboxStopOrder` для собственного подтверждённого стопа; live-endpoint в клиенте отсутствует;
 - только long, лимитная заявка, `TIME_IN_FORCE_FILL_OR_KILL`, `confirmMarginTrade=false`;
 - один заранее рассчитанный размер и цена из карточки;
 - повторная проверка возраста кандидата, торгового статуса, bid/ask, спреда, отклонения цены и ликвидности;
