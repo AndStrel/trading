@@ -33,6 +33,7 @@ export type TelegramConfig = {
   token?: string;
   allowedChatIds: string[];
   pollingTimeoutSeconds: number;
+  miniApp: { enabled: boolean; url?: string; host: string; port: number };
 };
 
 export type ExecutionConfig = {
@@ -166,6 +167,10 @@ const envSchema = z.object({
   TELEGRAM_BOT_TOKEN: optionalNonEmpty,
   TELEGRAM_ALLOWED_CHAT_IDS: z.string().default(''),
   TELEGRAM_POLLING_TIMEOUT_SECONDS: z.coerce.number().int().min(10).max(50).default(25),
+  TELEGRAM_MINI_APP_ENABLED: z.enum(['true', 'false']).default('false'),
+  TELEGRAM_MINI_APP_URL: optionalNonEmpty,
+  TELEGRAM_MINI_APP_HOST: z.enum(['127.0.0.1', '0.0.0.0']).default('127.0.0.1'),
+  TELEGRAM_MINI_APP_PORT: z.coerce.number().int().min(1024).max(65535).default(8080),
   T_INVEST_EXECUTION_MODE: z.enum(['disabled', 'sandbox']).default('disabled'),
   T_INVEST_TRADING_TOKEN: optionalNonEmpty,
   T_INVEST_SANDBOX_ACCOUNT_ID: optionalNonEmpty,
@@ -199,6 +204,18 @@ const envSchema = z.object({
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = envSchema.parse(env);
   const prepare = parsed.T_INVEST_LIVE_PILOT_PREPARE === 'true';
+  let miniAppUrl: string | undefined;
+  if (parsed.TELEGRAM_MINI_APP_URL) {
+    try {
+      const url = new URL(parsed.TELEGRAM_MINI_APP_URL);
+      if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash
+        || url.pathname !== '/' || url.port || !/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(url.hostname)) throw new Error();
+      miniAppUrl = url.origin;
+    } catch { throw new Error('TELEGRAM_MINI_APP_URL must be a bare public HTTPS origin'); }
+  }
+  if (parsed.TELEGRAM_MINI_APP_ENABLED === 'true' && (!miniAppUrl || !parsed.TELEGRAM_BOT_TOKEN)) {
+    throw new Error('Mini App requires its public HTTPS origin and a configured bot');
+  }
   const commissionRate = prepare ? Math.max(0.003, parsed.T_INVEST_COMMISSION_RATE) : parsed.T_INVEST_COMMISSION_RATE;
   if (parsed.T_INVEST_LIVE_TOKEN && [parsed.T_INVEST_TOKEN, parsed.T_INVEST_TRADING_TOKEN].includes(parsed.T_INVEST_LIVE_TOKEN)) {
     throw new Error('Live, sandbox and read-only tokens must be separate');
@@ -238,6 +255,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       ...(parsed.TELEGRAM_BOT_TOKEN ? { token: parsed.TELEGRAM_BOT_TOKEN } : {}),
       allowedChatIds: parseTelegramAllowedChatIds(parsed.TELEGRAM_ALLOWED_CHAT_IDS),
       pollingTimeoutSeconds: parsed.TELEGRAM_POLLING_TIMEOUT_SECONDS,
+      miniApp: {
+        enabled: parsed.TELEGRAM_MINI_APP_ENABLED === 'true',
+        ...(miniAppUrl ? { url: miniAppUrl } : {}),
+        host: parsed.TELEGRAM_MINI_APP_HOST, port: parsed.TELEGRAM_MINI_APP_PORT,
+      },
     },
     execution: {
       mode: parsed.T_INVEST_EXECUTION_MODE,

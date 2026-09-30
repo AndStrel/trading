@@ -12,6 +12,7 @@ import type {
 } from '../scanner/intraday-scanner.js';
 import { buildCandidateCardSvg, renderCandidateCardPng } from './candidate-card.js';
 import type { TelegramClient, TelegramUpdate } from './client.js';
+import { menuCommand, tradingMenu } from './menu.js';
 
 type ScannerControl = Pick<IntradayScanner, 'isPaused' | 'pause' | 'resume'> &
   Partial<Pick<IntradayScanner, 'getLatestReport'>>;
@@ -33,6 +34,8 @@ type TelegramBotLog = (message: string) => void;
 type CardRenderer = (svg: string) => Promise<Uint8Array>;
 
 function normalizeCommand(text: string): string {
+  const fromMenu = menuCommand(text);
+  if (fromMenu) return fromMenu;
   const firstWord = text.trim().split(/\s+/, 1)[0]?.toLowerCase() ?? '';
   return firstWord.replace(/@[a-z0-9_]+$/i, '');
 }
@@ -150,6 +153,8 @@ function previewScenario(config: AppConfig): JournalScenarioRecord {
 function helpText(): string {
   return [
     'Команды:',
+    '/menu — показать меню кнопок',
+    '/app — открыть Mini App в личном чате',
     '/status — состояние сканера',
     '/market — последний проход, фильтры и лучшие ситуации',
     '/candidates — последние кандидаты',
@@ -186,6 +191,7 @@ export class TelegramTradingBot {
   ) {}
 
   async start(): Promise<never> {
+    await this.announceMenu();
     for (;;) {
       try {
         await this.pollOnce();
@@ -194,6 +200,22 @@ export class TelegramTradingBot {
         this.log(`Telegram polling failed: ${detail}`);
         await new Promise((resolve) => setTimeout(resolve, 5_000));
       }
+    }
+  }
+
+  async announceMenu(): Promise<void> {
+    const app = this.config.telegram.miniApp;
+    for (const chatId of this.config.telegram.allowedChatIds.filter(id => /^\d+$/.test(id))) {
+      const key = `telegram.menu.v1.${app.enabled ? 'miniapp' : 'buttons'}.${chatId}`;
+      if (this.journal.getRuntimeState(key) === 'sent') continue;
+      try {
+        await this.client.sendMessage(chatId, app.enabled
+          ? 'Теперь бот управляется кнопками. Mini App доступен через кнопку «Панель» или «📱 Мини-приложение». Реальная торговля остаётся выключенной.'
+          : 'Теперь бот управляется кнопками: статус, рынок, кандидаты и лимиты — в меню ниже. Реальная торговля остаётся выключенной.',
+        { replyMarkup: tradingMenu() });
+        if (app.enabled && app.url) await this.client.setChatMenuButton?.(chatId, app.url);
+        this.journal.setRuntimeState(key, 'sent');
+      } catch { this.log('Telegram menu update not confirmed; it will be retried on restart'); }
     }
   }
 
@@ -278,6 +300,25 @@ export class TelegramTradingBot {
       return;
     }
 
+    if (command === '/start' || command === '/menu' || command === '/help') {
+      await this.client.sendMessage(normalizedChatId, 'Управление — кнопками ниже. Реальные заявки пока заблокированы.\n\n' + helpText(), { replyMarkup: tradingMenu() });
+      return;
+    }
+    if (command === '/app') {
+      if (update.message?.chat?.type !== 'private') {
+        await this.client.sendMessage(normalizedChatId, 'Mini App открывается только из личного чата с ботом.');
+      } else if (!this.config.telegram.miniApp.enabled || !this.config.telegram.miniApp.url) {
+        await this.client.sendMessage(normalizedChatId, 'Mini App готовится. Пока используйте кнопки меню.', { replyMarkup: tradingMenu() });
+      } else {
+        // An INLINE launch supplies signed initData. A keyboard web_app launch
+        // does not, so the persistent menu sends this inline launch separately.
+        await this.client.sendMessage(normalizedChatId, 'Панель: статус, кандидаты и ограничения. Реальные заявки недоступны.', {
+          replyMarkup: { inline_keyboard: [[{ text: 'Открыть Mini App', web_app: { url: this.config.telegram.miniApp.url } }]] },
+        });
+      }
+      return;
+    }
+
     if (command === '/candidates') {
       await this.sendRecentCandidates(normalizedChatId);
       return;
@@ -357,7 +398,7 @@ export class TelegramTradingBot {
     }
 
     const reply = this.commandReply(command);
-    await this.client.sendMessage(normalizedChatId, reply);
+    await this.client.sendMessage(normalizedChatId, reply, { replyMarkup: tradingMenu() });
   }
 
   private async sendCandidateCard(
