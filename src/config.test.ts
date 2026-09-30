@@ -15,7 +15,7 @@ describe('loadConfig', () => {
     expect(config.scanner.maxInstruments).toBe(30);
     expect(config.scanner.minAverageCandleTurnoverRub).toBe(1_000_000);
     expect(config.scanner.intradayWatchlist).toEqual([]);
-    expect(config.telegram).toEqual({ allowedChatIds: [], pollingTimeoutSeconds: 25 });
+    expect(config.telegram).toEqual({ allowedChatIds: [], pollingTimeoutSeconds: 25, miniApp: { enabled: false, host: '127.0.0.1', port: 8080 } });
     expect(config.execution).toEqual({
       mode: 'disabled',
       maxOrdersPerDay: 3,
@@ -74,6 +74,7 @@ describe('loadConfig', () => {
       token: 'bot-token',
       allowedChatIds: ['123', '-456'],
       pollingTimeoutSeconds: 25,
+      miniApp: { enabled: false, host: '127.0.0.1', port: 8080 },
     });
   });
 
@@ -81,6 +82,15 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: 'not-a-chat-id' })).toThrow(
       'TELEGRAM_ALLOWED_CHAT_IDS',
     );
+  });
+
+  it('requires an explicit public HTTPS origin and bot token before enabling the Mini App', () => {
+    expect(() => loadConfig({ TELEGRAM_MINI_APP_ENABLED: 'true' })).toThrow('requires');
+    for (const url of ['http://bot.brewnote.net', 'https://user:password@bot.brewnote.net', 'https://bot.brewnote.net/path', 'https://bot.brewnote.net?token=x', 'https://bot.brewnote.net#secret', 'https://127.0.0.1', 'https://bot.brewnote.net:8080']) {
+      expect(() => loadConfig({ TELEGRAM_MINI_APP_URL: url })).toThrow('HTTPS origin');
+    }
+    expect(loadConfig({ TELEGRAM_BOT_TOKEN: 'test', TELEGRAM_MINI_APP_ENABLED: 'true', TELEGRAM_MINI_APP_URL: 'https://bot.brewnote.net/' }).telegram.miniApp)
+      .toEqual({ enabled: true, host: '127.0.0.1', port: 8080, url: 'https://bot.brewnote.net' });
   });
 
   it('requires an HTTPS history archive endpoint', () => {
