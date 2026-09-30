@@ -14,6 +14,7 @@ import { SandboxProtectionService } from './execution/sandbox-protection-service
 import { SandboxExitService } from './execution/sandbox-exit-service.js';
 import { SandboxLossGuard } from './execution/sandbox-loss-guard.js';
 import { SandboxSessionClose } from './execution/sandbox-session-close.js';
+import { SandboxSafetyMonitor } from './execution/sandbox-safety-monitor.js';
 
 const config = loadConfig();
 if (!config.telegram.token) {
@@ -38,9 +39,10 @@ const execution = new ExecutionService(
   sessionClose,
 );
 const scanner = new IntradayScanner(config, tInvestClient, journal);
+const telegramClient = new TelegramBotClient(config.telegram.token);
 const telegram = new TelegramTradingBot(
   config,
-  new TelegramBotClient(config.telegram.token),
+  telegramClient,
   scanner,
   journal,
   undefined,
@@ -84,19 +86,15 @@ if (config.telegram.miniApp.enabled) {
   process.stdout.write(JSON.stringify({ event: 'mini-app-listening', liveSubmissionAllowed: false }) + '\n');
 }
 if (config.execution.sandboxProtectionEnabled && config.execution.mode === 'sandbox') {
+  const safety = new SandboxSafetyMonitor(config, execution, journal, telegramClient, lossGuard);
   const monitor = async () => {
     try {
-      if (execution.isReady()) {
-        const status = await execution.protectOutstanding();
-        process.stdout.write(JSON.stringify({ event: 'sandbox-native-stop-monitor', ...status, liveSubmissionAllowed: false }) + '\n');
-        const accountId = config.execution.accountId ?? journal.getRuntimeState('execution.sandbox_account_id');
-        if (lossGuard && accountId) {
-          const report = await lossGuard.assess(accountId);
-          process.stdout.write(JSON.stringify({ event: 'sandbox-loss-guard', status: report.status, day: report.day, checkedAt: report.checkedAt,
-            liveSubmissionAllowed: false }) + '\n');
-        }
-      }
-    } catch { process.stdout.write(JSON.stringify({ event: 'sandbox-native-stop-monitor-failed', liveSubmissionAllowed: false }) + '\n'); }
+      const status = await safety.tick();
+      process.stdout.write(JSON.stringify({ event: 'sandbox-safety-monitor', ...status, liveSubmissionAllowed: false }) + '\n');
+    } catch {
+      try { execution.kill(); } catch {} // Journal failure must never imply permission to enter.
+      process.stdout.write(JSON.stringify({ event: 'sandbox-safety-monitor-failed', liveSubmissionAllowed: false }) + '\n');
+    }
     setTimeout(() => { void monitor(); }, 30_000);
   };
   void monitor();

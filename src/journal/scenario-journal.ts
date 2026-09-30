@@ -14,6 +14,9 @@ import { nanoQuotation } from '../execution/sandbox-stop-state.js';
 
 export type NativeStopRecord = { intent: SandboxStopIntent; observation: SandboxStopObservation | null };
 export type SandboxExitEvidence = { snapshot: SandboxOrderSnapshot; flatConfirmedAt: string | null; observedAt: string };
+export type SandboxSafetyReason = 'protection-unconfirmed' | 'loss-incomplete' | 'loss-limit' | 'monitor-unavailable';
+export type SandboxSafetyNotice = { incidentId: string; attemptId: string; reason: SandboxSafetyReason; checkedAt: string };
+const safetyReasons: SandboxSafetyReason[] = ['protection-unconfirmed', 'loss-incomplete', 'loss-limit', 'monitor-unavailable'];
 
 export type JournalScenarioInput = {
   observedAt: string;
@@ -240,6 +243,24 @@ const schema = `
     updated_at TEXT NOT NULL
   ) STRICT;
 
+  CREATE TABLE IF NOT EXISTS sandbox_safety_incidents (
+    id TEXT PRIMARY KEY,
+    reason TEXT NOT NULL CHECK(reason IN ('protection-unconfirmed','loss-incomplete','loss-limit','monitor-unavailable')),
+    checked_at TEXT NOT NULL,
+    resolved_at TEXT
+  ) STRICT;
+  CREATE UNIQUE INDEX IF NOT EXISTS sandbox_safety_one_active
+    ON sandbox_safety_incidents((1)) WHERE resolved_at IS NULL;
+  CREATE TABLE IF NOT EXISTS sandbox_safety_deliveries (
+    incident_id TEXT NOT NULL REFERENCES sandbox_safety_incidents(id),
+    chat_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    claimed_at TEXT NOT NULL,
+    lease_until INTEGER NOT NULL,
+    delivered_at TEXT,
+    PRIMARY KEY (incident_id,chat_id)
+  ) STRICT;
+
   CREATE TABLE IF NOT EXISTS execution_orders (
     id INTEGER PRIMARY KEY,
     scenario_id INTEGER NOT NULL UNIQUE REFERENCES scenario_journal(id),
@@ -455,6 +476,60 @@ export class ScenarioJournal {
     } finally {
       database.close();
     }
+  }
+
+  // Alert state is private, durable and separate from broker execution intents.
+  // Successful monitoring resolves an incident but NEVER clears the kill switch.
+  recordSandboxSafetyCheck(reason: SandboxSafetyReason | null, now = new Date()): void {
+    if (!Number.isFinite(now.getTime()) || (reason !== null && !safetyReasons.includes(reason))) throw new Error('Invalid sandbox safety check');
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const current = db.prepare('SELECT id,checked_at FROM sandbox_safety_incidents WHERE resolved_at IS NULL').get() as {id:string;checked_at:string}|undefined;
+      const latest = db.prepare('SELECT checked_at,resolved_at FROM sandbox_safety_incidents ORDER BY checked_at DESC LIMIT 1').get() as {checked_at:string;resolved_at:string|null}|undefined;
+      if (latest && now.getTime() < Math.max(Date.parse(latest.checked_at), Date.parse(latest.resolved_at ?? latest.checked_at))) throw new Error('Sandbox safety clock regressed');
+      const at = now.toISOString();
+      if (reason === null && current) db.prepare('UPDATE sandbox_safety_incidents SET checked_at=?,resolved_at=? WHERE id=?').run(at,at,current.id);
+      if (reason !== null) {
+        if (current) db.prepare('UPDATE sandbox_safety_incidents SET reason=?,checked_at=? WHERE id=?').run(reason,at,current.id);
+        else db.prepare('INSERT INTO sandbox_safety_incidents (id,reason,checked_at) VALUES (?,?,?)').run(randomUUID(),reason,at);
+        db.prepare(`INSERT INTO runtime_state (key,value,updated_at) VALUES ('execution.kill_switch','true',?)
+          ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at`).run(at);
+      }
+      db.exec('COMMIT');
+    } catch(error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  claimSandboxSafetyNotice(chatId: string, now = new Date()): SandboxSafetyNotice | null {
+    if (!/^[1-9]\d{0,19}$/.test(chatId) || !Number.isFinite(now.getTime())) throw new Error('Invalid private sandbox alert recipient or clock');
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const incident = db.prepare('SELECT id,reason,checked_at FROM sandbox_safety_incidents WHERE resolved_at IS NULL').get() as
+        {id:string;reason:SandboxSafetyReason;checked_at:string}|undefined;
+      const age = incident ? now.getTime()-Date.parse(incident.checked_at) : NaN;
+      if (!incident || !Number.isFinite(age) || age<0 || age>60_000) { db.exec('COMMIT'); return null; }
+      const prior = db.prepare('SELECT delivered_at,lease_until FROM sandbox_safety_deliveries WHERE incident_id=? AND chat_id=?').get(incident.id,chatId) as
+        {delivered_at:string|null;lease_until:number}|undefined;
+      if (prior?.delivered_at || (prior && prior.lease_until>now.getTime())) { db.exec('COMMIT'); return null; }
+      const count = db.prepare('SELECT COUNT(*) AS n FROM sandbox_safety_deliveries WHERE incident_id=?').get(incident.id) as {n:number};
+      if (!prior && count.n>=50) throw new Error('Sandbox alert recipient limit reached');
+      const attemptId=randomUUID();
+      db.prepare(`INSERT INTO sandbox_safety_deliveries (incident_id,chat_id,attempt_id,claimed_at,lease_until) VALUES (?,?,?,?,?)
+        ON CONFLICT(incident_id,chat_id) DO UPDATE SET attempt_id=excluded.attempt_id,claimed_at=excluded.claimed_at,lease_until=excluded.lease_until`)
+        .run(incident.id,chatId,attemptId,now.toISOString(),now.getTime()+300_000);
+      db.exec('COMMIT'); return {incidentId:incident.id,attemptId,reason:incident.reason,checkedAt:incident.checked_at};
+    } catch(error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  acknowledgeSandboxSafetyNotice(chatId: string, notice: SandboxSafetyNotice, now = new Date()): boolean {
+    if (!/^[1-9]\d{0,19}$/.test(chatId) || !Number.isFinite(now.getTime())) throw new Error('Invalid sandbox alert acknowledgement');
+    const db=this.open();
+    try {
+      // A late sender cannot acknowledge a lease subsequently claimed by another actor.
+      return db.prepare(`UPDATE sandbox_safety_deliveries SET delivered_at=? WHERE incident_id=? AND chat_id=? AND attempt_id=?
+        AND delivered_at IS NULL AND claimed_at<=? AND lease_until>=?`).run(now.toISOString(),notice.incidentId,chatId,notice.attemptId,now.toISOString(),now.getTime()).changes===1;
+    } finally { db.close(); }
   }
 
   isScannerPaused(strategy: Strategy): boolean {

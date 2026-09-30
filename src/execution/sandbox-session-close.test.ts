@@ -8,6 +8,7 @@ import { ScenarioJournal } from '../journal/scenario-journal.js';
 import { SandboxSessionClose } from './sandbox-session-close.js';
 import { SandboxExitService } from './sandbox-exit-service.js';
 import { SandboxLossGuard } from './sandbox-loss-guard.js';
+import { SandboxSafetyMonitor } from './sandbox-safety-monitor.js';
 import { ExecutionService } from './execution-service.js';
 import { parseSandboxOrderState } from './sandbox-order-state.js';
 import { sandboxSessionCloseDue, sandboxSessionEntryAllowed } from './sandbox-session-policy.js';
@@ -75,6 +76,19 @@ describe('Conservative sandbox session window',()=>{
 });
 
 describe('Durable sandbox end-of-day exit ownership',()=>{
+  it('alerts the operator after a canceled stop and rejected SELL, without a competing retry',async()=>{
+    const f=setup();vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(now);f.config.telegram.allowedChatIds=['42'];
+    f.client.postSandboxSessionExit.mockImplementation(async(input:{requestId:string})=>{f.state.requestId=input.requestId;f.state.sold=0;return 'local-session-sell';});
+    const guard=new SandboxLossGuard(f.config,f.client,f.market,f.exits,f.journal);
+    const execution=new ExecutionService(f.config,f.market,f.client,f.journal,{protect:vi.fn(),preflightForEntry:vi.fn()},f.exits,guard,f.closer);
+    const client={sendMessage:vi.fn().mockResolvedValue(undefined)};
+    const monitor=new SandboxSafetyMonitor(f.config,execution,f.journal,client,guard);
+    expect(await monitor.tick()).toMatchObject({reason:'protection-unconfirmed',delivered:1});
+    expect(await monitor.tick()).toMatchObject({reason:'protection-unconfirmed',delivered:0});
+    expect(client.sendMessage).toHaveBeenCalledOnce();expect(client.sendMessage.mock.calls[0]?.[1]).toContain('открытая позиция');
+    expect(f.client.cancelSandboxStop).toHaveBeenCalledOnce();expect(f.client.postSandboxSessionExit).toHaveBeenCalledOnce();
+    expect(f.journal.listSandboxResults()[0]?.complete).toBe(false);expect(f.journal.isExecutionKilled()).toBe(true);f.noOtherWrites();
+  });
   it('cancels only the known stop and posts one whole-position FOK SELL, then reads fees and flat account',async()=>{
     const f=setup();expect(await f.closer.advance('local-account',f.scenario.id,now)).toEqual({kind:'session',complete:true});
     expect(f.client.cancelSandboxStop).toHaveBeenCalledExactlyOnceWith({mode:'sandbox',accountId:'local-account',stopId:'local-stop'});
