@@ -7,10 +7,11 @@ const remote = workflow.split("<<'REMOTE' | tee \"$report_path\"\n")[1]!
   .split('          REMOTE\n')[0]!.replace(/^          /gm, '');
 // Execute the actual workflow body via stdin, just like ssh ... bash -s.
 const body = remote.slice(remote.indexOf("IFS=',' read"));
-function run(script: string, failCatalog = false) {
+function run(script: string, failCatalog = false, importHistory = true) {
   return spawnSync('bash', ['-s'], {
     input: `set -Eeuo pipefail
 RESEARCH_YEARS=2023,2024,2025
+RESEARCH_IMPORT_HISTORY=${importHistory}
 RESEARCH_TICKERS=SBER,GAZP
 RESEARCH_LOOKBACK_MINUTES=30
 RESEARCH_STEP_MINUTES=5
@@ -52,6 +53,20 @@ describe('research workflow stdin isolation', () => {
   });
   it('fails when catalog fails and does not emit success', () => {
     const result = run(body, true);
+    expect(result.status).toBe(9);
+    expect(result.stdout).not.toContain('research_status=ok');
+  });
+  it('rebuilds a stored catalog without probing or downloading archives', () => {
+    const result = run(body, false, false);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('history_import=skipped; using existing archives');
+    expect(result.stdout).not.toContain('api_probe_host=');
+    expect(result.stdout).not.toContain('imported');
+    expect(result.stdout).toContain('catalog');
+    expect(result.stdout).toContain('research_status=ok');
+  });
+  it('still fails if a catalog-only rebuild cannot complete', () => {
+    const result = run(body, true, false);
     expect(result.status).toBe(9);
     expect(result.stdout).not.toContain('research_status=ok');
   });
