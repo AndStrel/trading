@@ -1,5 +1,6 @@
 import type { ExecutionMode } from '../config.js';
 import { numberToQuotation } from '../domain/money.js';
+import { postWithSystemCurl, type CurlPost, type TInvestTransport } from '../tbank/client.js';
 
 type FetchLike = typeof fetch;
 
@@ -53,6 +54,7 @@ export class TInvestOrderClient {
     private readonly token: string | undefined,
     private readonly baseUrl: string,
     private readonly fetchImpl: FetchLike = fetch,
+    private readonly options: { transport?: TInvestTransport; curlPost?: CurlPost } = {},
   ) {}
 
   async postLimitOrder(input: LimitOrderInput): Promise<LimitOrderResult> {
@@ -102,12 +104,12 @@ export class TInvestOrderClient {
       ),
     );
     const accounts = payload?.accounts;
-    if (!Array.isArray(accounts)) return [];
-    return accounts.flatMap((account) => {
+    if (!Array.isArray(accounts)) throw new TInvestOrderError('Sandbox accounts response is incomplete', false);
+    return accounts.map((account) => {
       const record = asRecord(account);
       const id = asString(record?.id);
-      if (!id) return [];
-      return [{ id, name: asString(record?.name) }];
+      if (!id) throw new TInvestOrderError('Sandbox accounts response is incomplete', false);
+      return { id, name: asString(record?.name) };
     });
   }
 
@@ -144,26 +146,38 @@ export class TInvestOrderClient {
   private async request(path: string, body: unknown, uncertainOnNetwork: boolean): Promise<unknown> {
     if (!this.token) throw new TInvestOrderError('T_INVEST_TRADING_TOKEN is not configured', false);
 
-    let response: Response;
+    let status: number;
+    let payload: unknown;
     try {
-      response = await this.fetchImpl(`${this.baseUrl}/${path}`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          'Content-Type': 'application/json',
-          'x-app-name': 'AndStrel.trading-executor',
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(10_000),
-        redirect: 'error',
-      });
+      const url = `${this.baseUrl}/${path}`;
+      const serialized = JSON.stringify(body);
+      if (this.options.transport === 'system-curl') {
+        // Only the low-level one-shot transport is shared. The read-only broker
+        // client never receives this token; no retry/fallback is allowed here.
+        const response = await (this.options.curlPost ?? postWithSystemCurl)({ url, token: this.token, body: serialized });
+        status = response.status;
+        payload = JSON.parse(response.body) as unknown;
+      } else {
+        const response = await this.fetchImpl(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            'Content-Type': 'application/json',
+            'x-app-name': 'AndStrel.trading-executor',
+          },
+          body: serialized,
+          signal: AbortSignal.timeout(10_000),
+          redirect: 'error',
+        });
+        status = response.status;
+        payload = await response.json().catch(() => ({}));
+      }
     } catch (error: unknown) {
       throw new TInvestOrderError('T-Invest sandbox request did not return a confirmed response', uncertainOnNetwork);
     }
 
-    const payload = (await response.json().catch(() => ({}))) as unknown;
-    if (!response.ok) {
-      throw new TInvestOrderError(`T-Invest sandbox API returned HTTP ${response.status}`,
+    if (status < 200 || status >= 300) {
+      throw new TInvestOrderError(`T-Invest sandbox API returned HTTP ${status}`,
         // HTTP errors (including duplicate-key conflicts) alone do not prove
         // there is no order. Only verified broker state may release the reserve.
         uncertainOnNetwork);

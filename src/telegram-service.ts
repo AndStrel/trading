@@ -21,7 +21,7 @@ const tInvestClient = new TInvestClient(config.token, config.baseUrl, { transpor
 const execution = new ExecutionService(
   config,
   tInvestClient,
-  new TInvestOrderClient(config.execution.token, config.baseUrl),
+  new TInvestOrderClient(config.execution.token, config.baseUrl, undefined, { transport: config.transport }),
   journal,
 );
 const scanner = new IntradayScanner(config, tInvestClient, journal);

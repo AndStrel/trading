@@ -13,6 +13,28 @@ const input = {
 };
 
 describe('TInvestOrderClient', () => {
+  it.each([{}, { accounts: [{}] }])('does not interpret an incomplete account response as no accounts: %j', payload => {
+    const client = new TInvestOrderClient('local-secret', 'https://example.test/rest',
+      vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(payload))));
+    return expect(client.getSandboxAccounts()).rejects.toThrow('response is incomplete');
+  });
+  it('uses the explicitly selected one-shot system transport for sandbox reads', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const curlPost = vi.fn().mockResolvedValue({ status: 200, statusText: 'HTTP 200', body: '{"accounts":[]}' });
+    const client = new TInvestOrderClient('isolated-trading-token', 'https://example.test/rest', fetcher, { transport: 'system-curl', curlPost });
+    expect(await client.getSandboxAccounts()).toEqual([]);
+    expect(curlPost).toHaveBeenCalledOnce(); expect(fetcher).not.toHaveBeenCalled();
+    expect(curlPost).toHaveBeenCalledWith({ url: 'https://example.test/rest/tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxAccounts',
+      token: 'isolated-trading-token', body: '{}' });
+  });
+  it.each(['network', 'http'])('never retries or switches transports on %s submission failure', async failure => {
+    const fetcher = vi.fn<typeof fetch>(); const curlPost = vi.fn();
+    if (failure === 'network') curlPost.mockRejectedValue(new Error('private-secret'));
+    else curlPost.mockResolvedValue({ status: 409, statusText: 'HTTP 409', body: '{}' });
+    const client = new TInvestOrderClient('isolated-secret', 'https://example.test/rest', fetcher, { transport: 'system-curl', curlPost });
+    await expect(client.postLimitOrder(input)).rejects.toMatchObject({ outcomeUncertain: true });
+    expect(curlPost).toHaveBeenCalledOnce(); expect(fetcher).not.toHaveBeenCalled();
+  });
   it('looks up sandbox state by the persisted request UUID, never placing another order', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('{}'));
     const client = new TInvestOrderClient('local-secret', 'https://example.test/rest', fetcher);
