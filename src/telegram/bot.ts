@@ -27,6 +27,7 @@ type ExecutionControl = Pick<
   | 'rejectScenario'
   | 'listRecent'
   | 'submitScenario'
+  | 'reconcileScenario'
 >;
 type TelegramBotLog = (message: string) => void;
 type CardRenderer = (svg: string) => Promise<Uint8Array>;
@@ -159,6 +160,7 @@ function helpText(): string {
     '/pilot — одобренные лимиты дневного пилота',
     '/pilot_check — проверить отдельный live-счёт без заявок',
     '/orders — последние подготовленные поручения',
+    '/reconcile ID — сверить sandbox-заявку без повторной отправки',
     '/execution_arm SANDBOX — разрешить подтверждённые заявки в песочнице',
     '/approve ID CONFIRM — подтвердить одну sandbox-заявку',
     '/reject ID — отклонить подготовленную заявку',
@@ -298,6 +300,23 @@ export class TelegramTradingBot {
     }
     if (command === '/reject') {
       await this.rejectExecution(normalizedChatId, text);
+      return;
+    }
+    if (command === '/reconcile') {
+      const parts = text.trim().split(/\s+/);
+      const id = Number(parts[1]);
+      if (parts.length !== 2 || !Number.isSafeInteger(id) || id <= 0) {
+        await this.client.sendMessage(normalizedChatId, 'Формат сверки: /reconcile ID');
+      } else if (!this.execution) {
+        await this.client.sendMessage(normalizedChatId, 'Модуль исполнения не подключён.');
+      } else {
+        try {
+          const result = await this.execution.reconcileScenario(id);
+          await this.client.sendMessage(normalizedChatId, `Sandbox-сверка #${id}: ${result.executionStatus}; исполнено ${result.lotsExecuted}/${result.order.lots} лот. Новая заявка не отправлялась.`);
+        } catch {
+          await this.client.sendMessage(normalizedChatId, 'Сверка не подтверждена. Новая заявка не отправлялась; ранее зарезервированный риск сохранён.');
+        }
+      }
       return;
     }
     if (command === '/orders') {
@@ -542,7 +561,7 @@ export class TelegramTradingBot {
         `Sandbox-заявка #${scenarioId}: ${result.executionStatus}; исполнено ${result.lotsExecuted}/${result.order.lots} лот.`,
       );
     } catch (error: unknown) {
-      await this.client.sendMessage(chatId, `Заявка #${scenarioId} не отправлена: ${this.errorMessage(error)}`);
+      await this.client.sendMessage(chatId, `Результат заявки #${scenarioId} не подтверждён: ${this.errorMessage(error)}. При сетевом сбое используйте /reconcile ${scenarioId}; заявку нельзя считать отсутствующей.`);
     }
   }
 

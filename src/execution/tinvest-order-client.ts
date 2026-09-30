@@ -3,11 +3,6 @@ import { numberToQuotation } from '../domain/money.js';
 
 type FetchLike = typeof fetch;
 
-type ApiErrorBody = {
-  message?: string;
-  description?: string;
-};
-
 export type LimitOrderInput = {
   mode: Exclude<ExecutionMode, 'disabled'>;
   accountId: string;
@@ -116,6 +111,12 @@ export class TInvestOrderClient {
     });
   }
 
+  async getSandboxOrderState(accountId: string, orderRequestId: string): Promise<unknown> {
+    return this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxOrderState', {
+      accountId, orderId: orderRequestId, orderIdType: 'ORDER_ID_TYPE_REQUEST', priceType: 'PRICE_TYPE_CURRENCY',
+    }, false);
+  }
+
   async openSandboxAccount(name: string): Promise<string> {
     const payload = asRecord(
       await this.request(
@@ -154,18 +155,18 @@ export class TInvestOrderClient {
         },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(10_000),
+        redirect: 'error',
       });
     } catch (error: unknown) {
-      const detail = error instanceof Error ? error.message : 'unknown network failure';
-      throw new TInvestOrderError(`T-Invest order network error: ${detail}`, uncertainOnNetwork);
+      throw new TInvestOrderError('T-Invest sandbox request did not return a confirmed response', uncertainOnNetwork);
     }
 
     const payload = (await response.json().catch(() => ({}))) as unknown;
     if (!response.ok) {
-      const errorBody = asRecord(payload) as ApiErrorBody | null;
-      const detail = errorBody?.message ?? errorBody?.description ?? response.statusText;
-      throw new TInvestOrderError(`T-Invest order API ${response.status}: ${detail}`,
-        uncertainOnNetwork && (response.status === 408 || response.status === 429 || response.status >= 500));
+      throw new TInvestOrderError(`T-Invest sandbox API returned HTTP ${response.status}`,
+        // HTTP errors (including duplicate-key conflicts) alone do not prove
+        // there is no order. Only verified broker state may release the reserve.
+        uncertainOnNetwork);
     }
     return payload;
   }

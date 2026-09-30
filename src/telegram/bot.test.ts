@@ -25,6 +25,24 @@ afterEach(() => {
 });
 
 describe('TelegramTradingBot', () => {
+  it('reconciles only allowlisted exact requests and never submits on that command', async () => {
+    const client: TelegramClient = { getUpdates: async () => [
+      { update_id: 1, message: { chat: { id: 7 }, text: '/reconcile 17' } },
+      { update_id: 2, message: { chat: { id: 42 }, text: '/reconcile invalid' } },
+      { update_id: 3, message: { chat: { id: 42 }, text: '/reconcile 17 extra' } },
+      { update_id: 4, message: { chat: { id: 42 }, text: '/reconcile 17' } },
+    ], sendMessage: vi.fn(), sendPhoto: vi.fn() };
+    const execution = { mode: () => 'sandbox', isConfigured: () => true, isReady: () => true, isKilled: () => true,
+      armSandbox: vi.fn(), kill: vi.fn(), queueScenario: vi.fn(), rejectScenario: vi.fn(), listRecent: () => [], submitScenario: vi.fn(),
+      reconcileScenario: vi.fn().mockResolvedValue({ executionStatus: 'EXECUTION_REPORT_STATUS_FILL', lotsExecuted: 5, order: { lots: 5 } }) };
+    const scanner = { isPaused: () => false, pause: vi.fn(), resume: vi.fn() };
+    const bot = new TelegramTradingBot(loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42' }), client, scanner, createJournal(), () => undefined, undefined, execution);
+    await bot.pollOnce();
+    expect(execution.reconcileScenario).toHaveBeenCalledOnce();
+    expect(execution.reconcileScenario).toHaveBeenCalledWith(17);
+    expect(execution.submitScenario).not.toHaveBeenCalled();
+    expect(client.sendMessage).toHaveBeenLastCalledWith('42', expect.stringContaining('Новая заявка не отправлялась'));
+  });
   it('shows approved limits but checks the live account only for an allowed chat', async () => {
     const journal = createJournal();
     const config = loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42' });
@@ -266,6 +284,7 @@ describe('TelegramTradingBot', () => {
       rejectScenario: vi.fn(),
       listRecent: () => [],
       submitScenario: vi.fn(),
+      reconcileScenario: vi.fn(),
     };
     const photos: Array<{ caption: string; callbackData?: string }> = [];
     const client: TelegramClient = {
@@ -354,6 +373,7 @@ describe('TelegramTradingBot', () => {
       rejectScenario: vi.fn(),
       listRecent: () => [],
       submitScenario: vi.fn(),
+      reconcileScenario: vi.fn(),
     };
     const bot = new TelegramTradingBot(
       config,
@@ -456,6 +476,7 @@ describe('TelegramTradingBot', () => {
       rejectScenario: vi.fn(),
       listRecent: () => [],
       submitScenario,
+      reconcileScenario: vi.fn(),
     };
     const bot = new TelegramTradingBot(
       config,
@@ -519,6 +540,7 @@ describe('TelegramTradingBot', () => {
       rejectScenario: vi.fn(),
       listRecent: () => [],
       submitScenario,
+      reconcileScenario: vi.fn(),
     };
     const bot = new TelegramTradingBot(
       config,
