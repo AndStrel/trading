@@ -13,6 +13,7 @@ import type {
 import { buildCandidateCardSvg, renderCandidateCardPng } from './candidate-card.js';
 import type { TelegramClient, TelegramUpdate } from './client.js';
 import { menuCommand, tradingMenu } from './menu.js';
+import { formatNanoRub } from '../execution/sandbox-round-trip.js';
 
 type ScannerControl = Pick<IntradayScanner, 'isPaused' | 'pause' | 'resume'> &
   Partial<Pick<IntradayScanner, 'getLatestReport'>>;
@@ -353,7 +354,10 @@ export class TelegramTradingBot {
       } else {
         try {
           const result = await this.execution.reconcileScenario(id);
-          await this.client.sendMessage(normalizedChatId, `Sandbox-сверка #${id}: ${result.executionStatus}; исполнено ${result.lotsExecuted}/${result.order.lots} лот. Новая заявка не отправлялась.`);
+          const exit = result.sandboxExit;
+          const sale = exit ? ` Продано ${exit.soldLots}, осталось ${exit.remainingLots} лот. Результат после известных комиссий: ${exit.netPnlNano === null ? 'не подтверждён' : formatNanoRub(exit.netPnlNano)}. Пустой счёт: ${exit.flatConfirmedAt ? 'подтверждён при этой сверке' : 'не подтверждён'}. Sandbox, не реальная доходность.` : '';
+          const reserve = result.order.status === 'failed' ? 'Подтверждено нулевое исполнение; резерв освобождён.' : 'Резерв риска сохранён.';
+          await this.client.sendMessage(normalizedChatId, `Sandbox-сверка #${id}: ${result.executionStatus}; исполнено ${result.lotsExecuted}/${result.order.lots} лот.${sale} Новая заявка не отправлялась. ${reserve}`);
         } catch {
           await this.client.sendMessage(normalizedChatId, 'Сверка не подтверждена. Новая заявка не отправлялась; ранее зарезервированный риск сохранён.');
         }

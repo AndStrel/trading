@@ -36,6 +36,17 @@ function render(data) {
     card.append(prices, node('p', 'Сценарий #' + candidate.id + ' · не разрешение на сделку', 'muted')); elements['candidate-list'].append(card);
   }
   text('kill', data.execution.killed ? 'Новые входы уже запрещены' : 'Запретить новые входы');
+  elements['sandbox-results'].replaceChildren();
+  if (!data.sandboxResults?.length) elements['sandbox-results'].append(node('article', 'Сверенных продаж в песочнице пока нет.', 'empty'));
+  for (const result of data.sandboxResults || []) {
+    const card = node('article', '');
+    card.append(node('h3', 'Sandbox · сценарий #' + result.scenarioId),
+      node('p', 'Продано: ' + result.soldLots + ' лот. · остаток: ' + result.remainingLots + ' лот.'),
+      node('strong', result.netPnl === null ? 'Результат не подтверждён' : result.netPnl),
+      node('p', result.complete ? 'Полное исполнение и пустой счёт подтверждены при сверке.' : 'Полный цикл ещё не подтверждён.'),
+      node('p', 'Последняя сверка: ' + new Date(result.observedAt).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) + ' МСК · резерв риска сохранён', 'muted'));
+    elements['sandbox-results'].append(card);
+  }
 }
 async function request(action) {
   if (!auth || busy) return;

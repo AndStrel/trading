@@ -11,6 +11,7 @@ import { TInvestClient } from './tbank/client.js';
 import { createMiniAppServer } from './web/mini-app-server.js';
 import { buildMiniAppView } from './web/mini-app-view.js';
 import { SandboxProtectionService } from './execution/sandbox-protection-service.js';
+import { SandboxExitService } from './execution/sandbox-exit-service.js';
 
 const config = loadConfig();
 if (!config.telegram.token) {
@@ -21,12 +22,14 @@ const journal = new ScenarioJournal(config.journalPath);
 const tInvestClient = new TInvestClient(config.token, config.baseUrl, { transport: config.transport });
 const orderClient = new TInvestOrderClient(config.execution.token, config.baseUrl, undefined, { transport: config.transport });
 const protection = config.execution.sandboxProtectionEnabled ? new SandboxProtectionService(config, orderClient, journal) : undefined;
+const exits = config.execution.sandboxProtectionEnabled ? new SandboxExitService(config, orderClient, journal) : undefined;
 const execution = new ExecutionService(
   config,
   tInvestClient,
   orderClient,
   journal,
   protection,
+  exits,
 );
 const scanner = new IntradayScanner(config, tInvestClient, journal);
 const telegram = new TelegramTradingBot(

@@ -6,8 +6,10 @@ import type { ExecutionMode, Strategy } from '../config.js';
 import { riskBudgetFits } from '../execution/live-pilot-risk.js';
 import { assertSnapshotProgress, type SandboxOrderSnapshot } from '../execution/sandbox-order-state.js';
 import { decimalPriceNano, type SandboxStopIntent, type SandboxStopObservation } from '../execution/sandbox-stop-state.js';
+import { analyzeSandboxRoundTrip } from '../execution/sandbox-round-trip.js';
 
 export type NativeStopRecord = { intent: SandboxStopIntent; observation: SandboxStopObservation | null };
+export type SandboxExitEvidence = { snapshot: SandboxOrderSnapshot; flatConfirmedAt: string | null; observedAt: string };
 
 export type JournalScenarioInput = {
   observedAt: string;
@@ -279,6 +281,13 @@ const schema = `
     intent_json TEXT NOT NULL,
     observation_json TEXT,
     updated_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS sandbox_exit_evidence (
+    scenario_id INTEGER PRIMARY KEY REFERENCES scenario_journal(id),
+    snapshot_json TEXT NOT NULL,
+    flat_confirmed_at TEXT,
+    observed_at TEXT NOT NULL
   ) STRICT;
 `;
 
@@ -896,6 +905,67 @@ export class ScenarioJournal {
       db.exec('COMMIT');
     } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
     finally { db.close(); }
+  }
+
+  getSandboxExitEvidence(scenarioId: number): SandboxExitEvidence | null {
+    const db = this.open();
+    try {
+      const row = db.prepare('SELECT snapshot_json, flat_confirmed_at, observed_at FROM sandbox_exit_evidence WHERE scenario_id = ?').get(scenarioId) as
+        { snapshot_json: string; flat_confirmed_at: string | null; observed_at: string } | undefined;
+      return row ? { snapshot: JSON.parse(row.snapshot_json) as SandboxOrderSnapshot,
+        flatConfirmedAt: row.flat_confirmed_at, observedAt: row.observed_at } : null;
+    } finally { db.close(); }
+  }
+
+  recordSandboxExitEvidence(scenarioId: number, exit: SandboxOrderSnapshot, flatConfirmedAt: string | null, now = new Date()) {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const row = db.prepare(`SELECT o.id, o.mode, o.status, o.approved_by_chat_id, s.lot_size, e.snapshot_json AS entry_json,
+        n.intent_json, n.observation_json FROM execution_orders o
+        JOIN scenario_journal s ON s.id = o.scenario_id JOIN execution_evidence e ON e.execution_order_id = o.id
+        JOIN native_stop_intents n ON n.scenario_id = o.scenario_id WHERE o.scenario_id = ?`).get(scenarioId) as
+        { id: number; mode: string; status: string; approved_by_chat_id: string | null; lot_size: number; entry_json: string | null;
+          intent_json: string; observation_json: string | null } | undefined;
+      if (!row || row.mode !== 'sandbox' || row.status !== 'accepted' || !row.approved_by_chat_id || !row.entry_json || !row.observation_json) throw new Error();
+      const entry = JSON.parse(row.entry_json) as SandboxOrderSnapshot;
+      const intent = JSON.parse(row.intent_json) as SandboxStopIntent;
+      const stop = JSON.parse(row.observation_json) as SandboxStopObservation;
+      if (!intent.brokerStopId || stop.status !== 'STOP_ORDER_STATUS_EXECUTED' || stop.childOrderId !== exit.brokerOrderId
+        || intent.lots !== entry.lotsExecuted || !Number.isFinite(now.getTime())) throw new Error();
+      const result = analyzeSandboxRoundTrip(entry, exit, row.lot_size);
+      if (flatConfirmedAt !== null && (!result.fullySold || !Number.isFinite(Date.parse(flatConfirmedAt))
+        || Date.parse(flatConfirmedAt) < Date.parse(result.closedAt!) || Date.parse(flatConfirmedAt) > now.getTime() + 60_000)) throw new Error();
+      const prior = db.prepare('SELECT snapshot_json FROM sandbox_exit_evidence WHERE scenario_id = ?').get(scenarioId) as { snapshot_json: string } | undefined;
+      if (prior) assertSnapshotProgress(JSON.parse(prior.snapshot_json) as SandboxOrderSnapshot, exit);
+      const serialized = JSON.stringify(exit);
+      db.prepare(`INSERT INTO sandbox_exit_evidence (scenario_id, snapshot_json, flat_confirmed_at, observed_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(scenario_id) DO UPDATE SET snapshot_json=excluded.snapshot_json, flat_confirmed_at=excluded.flat_confirmed_at,
+        observed_at=excluded.observed_at`).run(scenarioId, serialized, flatConfirmedAt, now.toISOString());
+      if (!prior || prior.snapshot_json !== serialized) this.appendExecutionEvent(db, row.id, 'sandbox_exit_reconciled', {
+        executionStatus: exit.executionStatus, lotsExecuted: exit.lotsExecuted, grossNano: exit.grossNano, commissionNano: exit.commissionNano,
+      }, now.toISOString());
+      db.exec('COMMIT');
+      return { ...result, flatConfirmedAt, observedAt: now.toISOString(), complete: result.fullySold && result.netPnlNano !== null && flatConfirmedAt !== null };
+    } catch { try { db.exec('ROLLBACK'); } catch {} throw new Error('Sandbox exit contradicts the approved stop or earlier evidence'); }
+    finally { db.close(); }
+  }
+
+  listSandboxResults(limit = 5) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new Error('Invalid sandbox result limit');
+    const db = this.open();
+    try {
+      const rows = db.prepare(`SELECT x.scenario_id, x.snapshot_json AS exit_json, x.flat_confirmed_at, x.observed_at,
+        e.snapshot_json AS entry_json, s.lot_size FROM sandbox_exit_evidence x
+        JOIN execution_orders o ON o.scenario_id=x.scenario_id JOIN execution_evidence e ON e.execution_order_id=o.id
+        JOIN scenario_journal s ON s.id=x.scenario_id WHERE o.mode='sandbox' ORDER BY x.observed_at DESC LIMIT ?`).all(limit) as
+        Array<{ scenario_id: number; exit_json: string; entry_json: string; lot_size: number; flat_confirmed_at: string | null; observed_at: string }>;
+      return rows.map(row => {
+        const result = analyzeSandboxRoundTrip(JSON.parse(row.entry_json) as SandboxOrderSnapshot, JSON.parse(row.exit_json) as SandboxOrderSnapshot, row.lot_size);
+        return { scenarioId: row.scenario_id, ...result, flatConfirmedAt: row.flat_confirmed_at, observedAt: row.observed_at,
+          complete: result.fullySold && result.netPnlNano !== null && row.flat_confirmed_at !== null };
+      });
+    } finally { db.close(); }
   }
 
   recordExecutionReconciliation(scenarioId: number, snapshot: SandboxOrderSnapshot): ExecutionOrderRecord {

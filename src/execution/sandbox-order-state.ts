@@ -20,8 +20,8 @@ const stage = z.object({
   executionTime: z.iso.datetime({ offset: true }),
 });
 const state = z.object({
-  orderId: identifier, orderRequestId: identifier, instrumentUid: identifier,
-  direction: z.literal('ORDER_DIRECTION_BUY'), orderType: z.literal('ORDER_TYPE_LIMIT'),
+  orderId: identifier, orderRequestId: identifier.optional(), instrumentUid: identifier,
+  direction: z.enum(['ORDER_DIRECTION_BUY', 'ORDER_DIRECTION_SELL']), orderType: z.literal('ORDER_TYPE_LIMIT'),
   executionReportStatus: statuses,
   lotsRequested: integer.pipe(z.number().positive()), lotsExecuted: integer,
   currency: z.string().transform(value => value.toLowerCase()).pipe(z.literal('rub')),
@@ -47,10 +47,27 @@ function nano(value: z.infer<typeof money>): bigint {
 export function parseSandboxOrderState(payload: unknown, expected: {
   requestId: string; instrumentId: string; lots: number; lotSize: number;
 }, now = new Date()): SandboxOrderSnapshot {
+  return parseOrderState(payload, { ...expected, kind: 'entry' }, now);
+}
+
+// Stop-generated children do not have OUR request UUID. Only the exchange ID
+// obtained from the already acknowledged, exactly matched stop is admissible.
+export function parseSandboxExitOrderState(payload: unknown, expected: {
+  brokerOrderId: string; instrumentId: string; lots: number; lotSize: number; notBefore: string;
+}, now = new Date()): SandboxOrderSnapshot {
+  return parseOrderState(payload, { ...expected, kind: 'exit' }, now);
+}
+
+function parseOrderState(payload: unknown, expected: { instrumentId: string; lots: number; lotSize: number } &
+  ({ kind: 'entry'; requestId: string } | { kind: 'exit'; brokerOrderId: string; notBefore: string }), now: Date): SandboxOrderSnapshot {
   try {
     const parsed = state.parse(payload);
-    if (parsed.orderRequestId !== expected.requestId || parsed.instrumentUid !== expected.instrumentId
+    if ((expected.kind === 'entry' && (parsed.orderRequestId !== expected.requestId || parsed.direction !== 'ORDER_DIRECTION_BUY'))
+      || (expected.kind === 'exit' && (parsed.orderId !== expected.brokerOrderId || parsed.direction !== 'ORDER_DIRECTION_SELL'
+        || !Number.isFinite(Date.parse(expected.notBefore))))
+      || parsed.instrumentUid !== expected.instrumentId
       || parsed.lotsRequested !== expected.lots || parsed.lotsExecuted > expected.lots
+      || !Number.isFinite(now.getTime())
       || !Number.isSafeInteger(expected.lotSize) || expected.lotSize <= 0 || expected.lotSize > 1_000_000) {
       throw new Error('Identity or lot size mismatch');
     }
@@ -67,7 +84,8 @@ export function parseSandboxOrderState(payload: unknown, expected: {
     const stages = parsed.stages.map(item => {
       const price = nano(item.price);
       const executedAt = new Date(item.executionTime);
-      if (ids.has(item.tradeId) || price <= 0n || executedAt.getTime() > now.getTime() + 60_000) {
+      if (ids.has(item.tradeId) || price <= 0n || executedAt.getTime() > now.getTime() + 60_000
+        || (expected.kind === 'exit' && executedAt.getTime() < Date.parse(expected.notBefore))) {
         throw new Error('Invalid execution stage');
       }
       ids.add(item.tradeId);

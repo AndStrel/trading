@@ -12,6 +12,7 @@ import { TInvestOrderClient, TInvestOrderError } from './tinvest-order-client.js
 import { assessLivePilotRisk } from './live-pilot-risk.js';
 import { parseSandboxOrderState } from './sandbox-order-state.js';
 import type { SandboxProtectionService } from './sandbox-protection-service.js';
+import type { SandboxExitService } from './sandbox-exit-service.js';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -25,6 +26,7 @@ export type ExecutionSubmitResult = {
   order: ExecutionOrderRecord;
   executionStatus: string;
   lotsExecuted: number;
+  sandboxExit?: Awaited<ReturnType<SandboxExitService['reconcile']>>;
 };
 
 function asRecord(value: unknown): UnknownRecord | null {
@@ -95,6 +97,7 @@ export class ExecutionService {
     >,
     private readonly journal: ScenarioJournal,
     private readonly protection?: Pick<SandboxProtectionService, 'protect' | 'preflightForEntry'>,
+    private readonly exitReconciler?: Pick<SandboxExitService, 'reconcile'>,
   ) {
     this.accountId =
       config.execution.accountId ?? journal.getRuntimeState('execution.sandbox_account_id') ?? undefined;
@@ -290,13 +293,20 @@ export class ExecutionService {
   async protectOutstanding(now = new Date()) {
     if (!this.isReady() || !this.config.execution.sandboxProtectionEnabled || !this.protection) throw new Error('Sandbox protection is not configured');
     const orders = this.journal.listRecoverableExecutionOrders(21);
-    const result = { active: 0, triggered: 0, unconfirmed: 0, morePending: orders.length > 20 };
+    const result = { active: 0, triggered: 0, closed: 0, unconfirmed: 0, morePending: orders.length > 20 };
     for (const order of orders.slice(0, 20)) {
       if (order.status !== 'accepted') { result.unconfirmed++; continue; }
       try {
         const observed = await this.protection.protect(this.accountId!, order.scenarioId, now);
         if (observed.status === 'STOP_ORDER_STATUS_ACTIVE') result.active++;
-        else if (observed.status === 'STOP_ORDER_STATUS_EXECUTED') result.triggered++;
+        else if (observed.status === 'STOP_ORDER_STATUS_EXECUTED') {
+          result.triggered++;
+          if (this.exitReconciler) {
+            const exit = await this.exitReconciler.reconcile(this.accountId!, order.scenarioId, now);
+            if (exit.complete) result.closed++;
+            else result.unconfirmed++;
+          }
+        }
         else result.unconfirmed++;
       } catch { result.unconfirmed++; }
     }
@@ -316,7 +326,12 @@ export class ExecutionService {
         requestId: order.orderRequestId, instrumentId: order.instrumentId, lots: order.lots, lotSize: scenario.input.lotSize,
       }, now);
       const updated = this.journal.recordExecutionReconciliation(scenarioId, snapshot);
-      return { order: updated, executionStatus: snapshot.executionStatus, lotsExecuted: snapshot.lotsExecuted };
+      const native = this.journal.getNativeStop(scenarioId);
+      const sandboxExit = this.exitReconciler && this.config.execution.sandboxProtectionEnabled
+        && native?.observation?.status === 'STOP_ORDER_STATUS_EXECUTED'
+        ? await this.exitReconciler.reconcile(this.accountId!, scenarioId, now) : undefined;
+      return { order: updated, executionStatus: snapshot.executionStatus, lotsExecuted: snapshot.lotsExecuted,
+        ...(sandboxExit ? { sandboxExit } : {}) };
     } catch {
       this.journal.recordExecutionUncertain(scenarioId, 'Sandbox reconciliation did not confirm the result; prior risk remains reserved');
       throw new Error('Sandbox reconciliation is incomplete; no new order was sent and prior risk remains reserved');

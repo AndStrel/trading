@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { z } from 'zod/v4';
 import type { AppConfig } from '../config.js';
 import type { JournalScenarioRecord } from '../journal/scenario-journal.js';
 import { ScenarioJournal, type NativeStopRecord } from '../journal/scenario-journal.js';
@@ -7,14 +6,9 @@ import { assessLivePilotRisk } from './live-pilot-risk.js';
 import { parseSandboxOrderState } from './sandbox-order-state.js';
 import { assertNoActiveSandboxStops, assertSandboxPosition, decimalPriceNano, parseSandboxStop } from './sandbox-stop-state.js';
 import type { TInvestOrderClient } from './tinvest-order-client.js';
+import { assertNoSandboxOrders, sandboxFlatCashNano } from './sandbox-flat-account.js';
 
 type Client = Pick<TInvestOrderClient, 'getSandboxOrderState' | 'getSandboxPositions' | 'getSandboxStopOrders' | 'getSandboxOrders' | 'postSandboxStopLimit'>;
-const cash = z.object({ currency: z.string().transform(s => s.toLowerCase()).pipe(z.literal('rub')),
-  units: z.string().regex(/^\d{1,12}$/), nano: z.number().int().min(0).max(999_999_999) });
-const flat = z.object({ accountId: z.string(), limitsLoadingInProgress: z.literal(false),
-  securities: z.array(z.unknown()).length(0), futures: z.array(z.unknown()).length(0), options: z.array(z.unknown()).length(0),
-  money: z.array(cash).length(1), blocked: z.array(cash) });
-function noOrders(payload: unknown) { z.object({ orders: z.array(z.unknown()).length(0) }).parse(payload); }
 
 export class SandboxProtectionService {
   private readonly inFlight = new Map<number, { accountId: string; result: Promise<{ status: 'STOP_ORDER_STATUS_ACTIVE' | 'STOP_ORDER_STATUS_EXECUTED' | 'STOP_ORDER_STATUS_CANCELED' | 'STOP_ORDER_STATUS_EXPIRED'; lots: number; positionClosed: false }> }>();
@@ -29,13 +23,11 @@ export class SandboxProtectionService {
     try {
       const [positions, stops, orders] = await Promise.all([this.client.getSandboxPositions(accountId),
         this.client.getSandboxStopOrders(accountId), this.client.getSandboxOrders(accountId)]);
-      const p = flat.parse(positions); if (p.accountId !== accountId) throw new Error();
-      assertNoActiveSandboxStops(stops); noOrders(orders);
-      const nano = (value: z.infer<typeof cash>) => BigInt(value.units) * 1_000_000_000n + BigInt(value.nano);
-      if (p.blocked.some(value => nano(value) !== 0n)) throw new Error();
+      const availableCash = sandboxFlatCashNano(positions, accountId);
+      assertNoActiveSandboxStops(stops); assertNoSandboxOrders(orders);
       const result = assessLivePilotRisk(this.config.livePilot, { ...scenario.input, lots, commissionRate: this.config.commissionRate,
         slippageRate: Math.max(this.config.scanner.slippageRate, scenario.input.slippageRate),
-        availableCashRub: Number(nano(p.money[0]!) / 10_000_000n) / 100,
+        availableCashRub: Number(availableCash / 10_000_000n) / 100,
         reservedDailyRiskRub: 0, realizedDailyLossRub: 0, markedOpenLossRub: 0 });
       if (!result.allowed) throw new Error();
     } catch { throw new Error('Sandbox account, cash or protective preflight is not confirmed; no entry was sent'); }
@@ -67,7 +59,7 @@ export class SandboxProtectionService {
       const [positions, stops, orders] = await Promise.all([this.client.getSandboxPositions(accountId),
         this.client.getSandboxStopOrders(accountId), this.client.getSandboxOrders(accountId)]);
       assertSandboxPosition(positions, accountId, order.instrumentId, BigInt(entry.lotsExecuted) * BigInt(scenario.input.lotSize));
-      assertNoActiveSandboxStops(stops); noOrders(orders);
+      assertNoActiveSandboxStops(stops); assertNoSandboxOrders(orders);
       const stopNano = decimalPriceNano(scenario.input.stopPrice);
       const claim = this.journal.claimNativeStop({ scenarioId, accountId, requestId: randomUUID(), instrumentId: order.instrumentId,
         entryRequestId: order.orderRequestId, lots: entry.lotsExecuted, stopNano, limitNano: stopNano,

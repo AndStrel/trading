@@ -161,7 +161,7 @@ describe('Isolated sandbox native protection', () => {
   });
   it('monitor exposes unresolved submissions without sending entry or stop orders', async () => {
     const f = setup(false); f.journal.claimExecution(f.scenario.id, '42');
-    expect(await f.execution.protectOutstanding(now)).toEqual({ active: 0, triggered: 0, unconfirmed: 1, morePending: false });
+    expect(await f.execution.protectOutstanding(now)).toEqual({ active: 0, triggered: 0, closed: 0, unconfirmed: 1, morePending: false });
     expect(f.client.postLimitOrder).not.toHaveBeenCalled(); expect(f.client.postSandboxStopLimit).not.toHaveBeenCalled();
   });
   it.each(['disabled', 'same-token', 'flag-off'])('cannot write when %s', async condition => {

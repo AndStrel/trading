@@ -28,7 +28,7 @@ describe('Sandbox order evidence', () => {
       .toMatchObject({ terminal: true, lotsExecuted: 3 });
   });
   it.each([
-    { orderRequestId: 'another-request' }, { instrumentUid: 'another-instrument' },
+    { orderRequestId: 'another-request' }, { orderRequestId: undefined }, { instrumentUid: 'another-instrument' },
     { direction: 'ORDER_DIRECTION_SELL' }, { currency: 'usd' }, { orderType: 'ORDER_TYPE_MARKET' },
     { lotsRequested: '6' }, { lotsExecuted: '6' }, { lotsExecuted: '3.0' }, { lotsExecuted: undefined },
     { executionReportStatus: 'EXECUTION_REPORT_STATUS_UNSPECIFIED' },

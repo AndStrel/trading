@@ -46,6 +46,14 @@ describe('TInvestOrderClient', () => {
     expect(fetcher.mock.calls[0]?.[0]).toContain('SandboxService/GetSandboxStopOrders');
     expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({ accountId: 'local-account', status: 'STOP_ORDER_STATUS_ALL' });
   });
+  it('reads the known child by EXCHANGE ID, not the parent request UUID', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('{}'));
+    await new TInvestOrderClient('isolated-token', 'https://example.test/rest', fetcher).getSandboxChildOrderState('local-account', 'local-child');
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls[0]?.[0]).toContain('SandboxService/GetSandboxOrderState');
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({ accountId: 'local-account', orderId: 'local-child',
+      orderIdType: 'ORDER_ID_TYPE_EXCHANGE', priceType: 'PRICE_TYPE_CURRENCY' });
+  });
   it.each([{}, { accounts: [{}] }])('does not interpret an incomplete account response as no accounts: %j', payload => {
     const client = new TInvestOrderClient('local-secret', 'https://example.test/rest',
       vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(payload))));
