@@ -36,6 +36,13 @@ function render(data) {
     card.append(prices, node('p', 'Сценарий #' + candidate.id + ' · не разрешение на сделку', 'muted')); elements['candidate-list'].append(card);
   }
   text('kill', data.execution.killed ? 'Новые входы уже запрещены' : 'Запретить новые входы');
+  const guard = data.sandboxLossGuard;
+  const guardLabels = { off: 'Выключен', waiting: 'Ждём сверки', stale: 'Данные устарели', ok: 'Проверено', limit: 'Лимит достигнут', incomplete: 'Не подтверждён' };
+  text('sandbox-loss-state', guardLabels[guard?.state] || 'Не подтверждён');
+  text('sandbox-closed-loss', guard?.closedLoss ?? 'Не подтверждены');
+  text('sandbox-open-loss', guard?.estimatedOpenLoss ?? 'Не подтверждена');
+  text('sandbox-total-loss', guard?.totalLoss ?? 'Не подтверждена');
+  text('sandbox-loss-date', guard?.checkedAt ? 'Последняя проверка: ' + new Date(guard.checkedAt).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) + ' МСК' : 'Проверок ещё не было.');
   elements['sandbox-results'].replaceChildren();
   if (!data.sandboxResults?.length) elements['sandbox-results'].append(node('article', 'Сверенных продаж в песочнице пока нет.', 'empty'));
   for (const result of data.sandboxResults || []) {

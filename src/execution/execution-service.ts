@@ -13,6 +13,8 @@ import { assessLivePilotRisk } from './live-pilot-risk.js';
 import { parseSandboxOrderState } from './sandbox-order-state.js';
 import type { SandboxProtectionService } from './sandbox-protection-service.js';
 import type { SandboxExitService } from './sandbox-exit-service.js';
+import type { SandboxLossGuard } from './sandbox-loss-guard.js';
+import { sandboxBidValue } from './sandbox-loss-policy.js';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -98,6 +100,7 @@ export class ExecutionService {
     private readonly journal: ScenarioJournal,
     private readonly protection?: Pick<SandboxProtectionService, 'protect' | 'preflightForEntry'>,
     private readonly exitReconciler?: Pick<SandboxExitService, 'reconcile'>,
+    private readonly lossGuard?: Pick<SandboxLossGuard, 'assess'>,
   ) {
     this.accountId =
       config.execution.accountId ?? journal.getRuntimeState('execution.sandbox_account_id') ?? undefined;
@@ -218,11 +221,25 @@ export class ExecutionService {
       if (!this.protection) throw new Error('Sandbox protective module is not connected; no entry was sent');
       await this.protection.preflightForEntry(this.accountId!, scenario, plan.lots);
     }
+    let lossProof;
+    if (this.config.execution.sandboxLossGuardEnabled) {
+      if (!this.lossGuard) throw new Error('Sandbox loss guard is not connected; no entry was sent');
+      lossProof = await this.lossGuard.assess(this.accountId!);
+      if (lossProof.status !== 'ok') throw new Error('Sandbox loss allowance is not confirmed; no entry was sent');
+      await this.validateCurrentMarket(scenario, plan.lots);
+    }
+    const claimNow = lossProof ? new Date() : now;
+    if (lossProof) {
+      const finalAge = claimNow.getTime() - Date.parse(scenario.observedAt);
+      if (finalAge < 0 || finalAge > this.config.execution.candidateMaxAgeMinutes * 60_000) throw new Error('Candidate expired during sandbox loss preflight');
+    }
     if (this.isKilled()) throw new Error('Execution kill switch is active');
     const claimed = this.journal.claimExecution(scenarioId, chatId, {
-      ...day, now: now.toISOString(), maxOrders: this.config.execution.maxOrdersPerDay,
+      ...(lossProof ? moscowDayRange(claimNow) : day), now: claimNow.toISOString(), maxOrders: this.config.execution.maxOrdersPerDay,
       maxRiskRub: this.config.execution.maxDailyRiskRub,
       singlePosition: this.config.livePilot.prepare,
+      ...(lossProof ? { lossGuard: { proofId: lossProof.proofId, accountId: this.accountId!,
+        maxDailyLossRub: this.config.livePilot.maxDailyLossRub, maxTradeLossRub: this.config.livePilot.maxTradeRiskRub } } : {}),
     });
 
     let response;
@@ -389,6 +406,9 @@ export class ExecutionService {
       this.marketClient.getOrderBook(scenario.instrumentId, 20),
       this.marketClient.getTradingStatus(scenario.instrumentId),
     ]);
+    if (this.config.execution.sandboxLossGuardEnabled) {
+      sandboxBidValue(orderBookPayload, statusPayload, scenario.instrumentId, lots, scenario.input.lotSize, new Date());
+    }
     const bid = bestPrice(orderBookPayload, 'bids');
     const ask = bestPrice(orderBookPayload, 'asks');
     const status = asRecord(statusPayload);

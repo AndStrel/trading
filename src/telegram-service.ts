@@ -12,6 +12,7 @@ import { createMiniAppServer } from './web/mini-app-server.js';
 import { buildMiniAppView } from './web/mini-app-view.js';
 import { SandboxProtectionService } from './execution/sandbox-protection-service.js';
 import { SandboxExitService } from './execution/sandbox-exit-service.js';
+import { SandboxLossGuard } from './execution/sandbox-loss-guard.js';
 
 const config = loadConfig();
 if (!config.telegram.token) {
@@ -23,6 +24,7 @@ const tInvestClient = new TInvestClient(config.token, config.baseUrl, { transpor
 const orderClient = new TInvestOrderClient(config.execution.token, config.baseUrl, undefined, { transport: config.transport });
 const protection = config.execution.sandboxProtectionEnabled ? new SandboxProtectionService(config, orderClient, journal) : undefined;
 const exits = config.execution.sandboxProtectionEnabled ? new SandboxExitService(config, orderClient, journal) : undefined;
+const lossGuard = config.execution.sandboxLossGuardEnabled && exits ? new SandboxLossGuard(config, orderClient, tInvestClient, exits, journal) : undefined;
 const execution = new ExecutionService(
   config,
   tInvestClient,
@@ -30,6 +32,7 @@ const execution = new ExecutionService(
   journal,
   protection,
   exits,
+  lossGuard,
 );
 const scanner = new IntradayScanner(config, tInvestClient, journal);
 const telegram = new TelegramTradingBot(
@@ -83,6 +86,12 @@ if (config.execution.sandboxProtectionEnabled && config.execution.mode === 'sand
       if (execution.isReady()) {
         const status = await execution.protectOutstanding();
         process.stdout.write(JSON.stringify({ event: 'sandbox-native-stop-monitor', ...status, liveSubmissionAllowed: false }) + '\n');
+        const accountId = config.execution.accountId ?? journal.getRuntimeState('execution.sandbox_account_id');
+        if (lossGuard && accountId) {
+          const report = await lossGuard.assess(accountId);
+          process.stdout.write(JSON.stringify({ event: 'sandbox-loss-guard', status: report.status, day: report.day, checkedAt: report.checkedAt,
+            liveSubmissionAllowed: false }) + '\n');
+        }
       }
     } catch { process.stdout.write(JSON.stringify({ event: 'sandbox-native-stop-monitor-failed', liveSubmissionAllowed: false }) + '\n'); }
     setTimeout(() => { void monitor(); }, 30_000);

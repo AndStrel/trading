@@ -45,6 +45,7 @@ export type ExecutionConfig = {
   candidateMaxAgeMinutes: number;
   sandboxInitialBalanceRub: number;
   sandboxProtectionEnabled: boolean;
+  sandboxLossGuardEnabled: boolean;
 };
 
 export type BacktestConfig = {
@@ -176,6 +177,7 @@ const envSchema = z.object({
   T_INVEST_TRADING_TOKEN: optionalNonEmpty,
   T_INVEST_SANDBOX_ACCOUNT_ID: optionalNonEmpty,
   T_INVEST_SANDBOX_PROTECTION_ENABLED: z.enum(['true', 'false']).default('false'),
+  T_INVEST_SANDBOX_LOSS_GUARD_ENABLED: z.enum(['true', 'false']).default('false'),
   T_INVEST_EXECUTION_MAX_ORDERS_PER_DAY: z.coerce.number().int().min(1).max(20).default(3),
   T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB: z.coerce.number().positive().max(10_000).default(1_000),
   T_INVEST_EXECUTION_CANDIDATE_MAX_AGE_MINUTES: z.coerce.number().int().min(1).max(60).default(10),
@@ -274,6 +276,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       candidateMaxAgeMinutes: parsed.T_INVEST_EXECUTION_CANDIDATE_MAX_AGE_MINUTES,
       sandboxInitialBalanceRub: prepare ? Math.min(parsed.T_INVEST_SANDBOX_INITIAL_BALANCE_RUB, parsed.T_INVEST_LIVE_CAPITAL_RUB) : parsed.T_INVEST_SANDBOX_INITIAL_BALANCE_RUB,
       sandboxProtectionEnabled: parsed.T_INVEST_SANDBOX_PROTECTION_ENABLED === 'true',
+      sandboxLossGuardEnabled: parsed.T_INVEST_SANDBOX_LOSS_GUARD_ENABLED === 'true',
     },
     livePilot: {
       prepare,
