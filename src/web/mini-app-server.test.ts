@@ -9,7 +9,7 @@ const servers: Server[] = [];
 const now = new Date('2026-09-30T19:00:00Z');
 const view: MiniAppView = { observedAt: now.toISOString(), scanner: { paused: false, lastScanAt: null, fresh: false, scanned: 0, errors: 0 },
   execution: { mode: 'disabled', killed: true, liveSubmissionAllowed: false, actualPnlRub: null, lossMonitorReady: false },
-  limits: { capitalRub: 1000, tradeRiskRub: 20, dailyRiskRub: 60, dailyLossRub: 60, positionRub: 996.51, commissionRate: 0.003, slippageRate: 0.0005 }, candidates: [] };
+  limits: { capitalRub: 1000, tradeRiskRub: 20, dailyRiskRub: 60, dailyLossRub: 60, positionRub: 996.51, commissionRate: 0.003, slippageRate: 0.0005 }, candidates: [], sandboxResults: [] };
 async function start() {
   const action = vi.fn();
   const server = createMiniAppServer({ token: 'test-bot-token', origin: 'https://bot.brewnote.net', allowedPrivateIds: ['42'],

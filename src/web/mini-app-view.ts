@@ -2,6 +2,7 @@ import type { AppConfig } from '../config.js';
 import type { ExecutionService } from '../execution/execution-service.js';
 import type { ScenarioJournal } from '../journal/scenario-journal.js';
 import type { IntradayScanner } from '../scanner/intraday-scanner.js';
+import { formatNanoRub } from '../execution/sandbox-round-trip.js';
 
 export function buildMiniAppView(config: AppConfig, scanner: Pick<IntradayScanner, 'isPaused' | 'getLatestReport'>,
   execution: Pick<ExecutionService, 'mode' | 'isKilled'>, journal: ScenarioJournal, now = new Date()) {
@@ -14,6 +15,11 @@ export function buildMiniAppView(config: AppConfig, scanner: Pick<IntradayScanne
       fresh: age >= 0 && age <= maxAge, scanned: report?.scanned ?? 0, errors: report?.errors ?? 0 },
     execution: { mode: execution.mode(), killed: execution.isKilled(), liveSubmissionAllowed: false,
       actualPnlRub: null, lossMonitorReady: false },
+    sandboxResults: journal.listSandboxResults().map(result => ({
+      scenarioId: result.scenarioId, soldLots: result.soldLots, remainingLots: result.remainingLots,
+      netPnl: result.netPnlNano === null ? null : formatNanoRub(result.netPnlNano), complete: result.complete,
+      observedAt: result.observedAt, flatConfirmedAt: result.flatConfirmedAt,
+    })),
     limits: { capitalRub: config.livePilot.capitalRub, tradeRiskRub: config.strategies.intraday.maxRiskRub,
       dailyRiskRub: config.execution.maxDailyRiskRub, dailyLossRub: config.livePilot.maxDailyLossRub,
       positionRub: config.strategies.intraday.maxPositionRub, commissionRate: config.commissionRate,

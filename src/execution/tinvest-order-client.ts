@@ -120,6 +120,12 @@ export class TInvestOrderClient {
     }, false);
   }
 
+  getSandboxChildOrderState(accountId: string, brokerOrderId: string): Promise<unknown> {
+    return this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxOrderState', {
+      accountId, orderId: brokerOrderId, orderIdType: 'ORDER_ID_TYPE_EXCHANGE', priceType: 'PRICE_TYPE_CURRENCY',
+    }, false);
+  }
+
   getSandboxPositions(accountId: string): Promise<unknown> {
     return this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxPositions', { accountId }, false);
   }

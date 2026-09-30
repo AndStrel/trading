@@ -16,6 +16,12 @@ Plain reply-keyboard `web_app` launches provide empty initData, so they are not 
   observed account cash. Actual profit/loss is unavailable, not assumed zero.
 - Real submission remains disabled. Displaying a candidate is not admission
   of a profitable strategy or authorization to trade.
+- The overview can show separate sandbox sale results: actual virtual sold and
+  remaining lots, reported-commission result and last reconciliation time. Missing
+  fees/partial sales remain unconfirmed; flat-account evidence is timestamped,
+  not a current-balance guarantee. No account/order/trade IDs are exposed. These
+  virtual, pre-tax pair results are not live PnL or proof of a strategy edge;
+  reservation and kill remain intact even after full sandbox reconciliation.
 - Expired panels must be reopened in Telegram. No credentials in query strings,
   local storage, cookies, responses or logs. Do not share initData or bot tokens.
 

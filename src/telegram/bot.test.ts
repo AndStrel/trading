@@ -25,6 +25,23 @@ afterEach(() => {
 });
 
 describe('TelegramTradingBot', () => {
+  it.each([['-9000000000', '−9,00 ₽'], [null, 'не подтверждён']])('shows scoped sandbox sale result without arming or submitting: %s', async (netPnlNano, displayed) => {
+    const client: TelegramClient = { getUpdates: async () => [
+      { update_id: 1, message: { chat: { id: 42 }, text: '/reconcile 17' } },
+    ], sendMessage: vi.fn(), sendPhoto: vi.fn() };
+    const execution = { mode: () => 'sandbox', isConfigured: () => true, isReady: () => true, isKilled: () => true,
+      armSandbox: vi.fn(), kill: vi.fn(), queueScenario: vi.fn(), rejectScenario: vi.fn(), listRecent: () => [], submitScenario: vi.fn(),
+      reconcileScenario: vi.fn().mockResolvedValue({ executionStatus: 'EXECUTION_REPORT_STATUS_FILL', lotsExecuted: 5, order: { lots: 5, status: 'accepted' },
+        sandboxExit: { soldLots: netPnlNano === null ? 2 : 5, remainingLots: netPnlNano === null ? 3 : 0,
+          netPnlNano, flatConfirmedAt: netPnlNano === null ? null : '2026-10-01T08:00:00Z' } }) };
+    const bot = new TelegramTradingBot(loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42' }), client,
+      { isPaused: () => false, pause: vi.fn(), resume: vi.fn() }, createJournal(), () => undefined, undefined, execution);
+    await bot.pollOnce();
+    expect(client.sendMessage).toHaveBeenLastCalledWith('42', expect.stringContaining(String(displayed)));
+    expect(client.sendMessage).toHaveBeenLastCalledWith('42', expect.stringContaining('не реальная доходность'));
+    expect(client.sendMessage).toHaveBeenLastCalledWith('42', expect.stringContaining('Резерв риска сохранён'));
+    expect(execution.submitScenario).not.toHaveBeenCalled(); expect(execution.armSandbox).not.toHaveBeenCalled();
+  });
   it('reconciles only allowlisted exact requests and never submits on that command', async () => {
     const client: TelegramClient = { getUpdates: async () => [
       { update_id: 1, message: { chat: { id: 7 }, text: '/reconcile 17' } },
