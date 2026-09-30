@@ -21,7 +21,7 @@ const tInvestClient = new TInvestClient(config.token, config.baseUrl, { transpor
 const execution = new ExecutionService(
   config,
   tInvestClient,
-  new TInvestOrderClient(config.execution.token, config.baseUrl),
+  new TInvestOrderClient(config.execution.token, config.baseUrl, undefined, { transport: config.transport }),
   journal,
 );
 const scanner = new IntradayScanner(config, tInvestClient, journal);
@@ -51,6 +51,12 @@ process.stdout.write(JSON.stringify({
   liveAccountConfigured: Boolean(config.livePilot.accountId),
 }) + '\n');
 scanner.addEventListener((event) => telegram.notifyScannerEvent(event));
+if (execution.isReady()) {
+  // Bounded read-only recovery runs even with kill active. Never repeats POST,
+  // creates/funds an account, or interprets an incomplete lookup as no order.
+  const recovery = await execution.recoverOutstanding();
+  process.stdout.write(JSON.stringify({ event: 'sandbox-recovery', ...recovery, liveSubmissionAllowed: false }) + '\n');
+}
 scanner.start();
 if (config.telegram.miniApp.enabled) {
   const server = createMiniAppServer({

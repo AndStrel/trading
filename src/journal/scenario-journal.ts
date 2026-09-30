@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import type { ExecutionMode, Strategy } from '../config.js';
 import { riskBudgetFits } from '../execution/live-pilot-risk.js';
+import { assertSnapshotProgress, type SandboxOrderSnapshot } from '../execution/sandbox-order-state.js';
 
 export type JournalScenarioInput = {
   observedAt: string;
@@ -261,6 +262,13 @@ const schema = `
 
   CREATE INDEX IF NOT EXISTS execution_events_order_created
     ON execution_events(execution_order_id, created_at ASC);
+
+  CREATE TABLE IF NOT EXISTS execution_evidence (
+    execution_order_id INTEGER PRIMARY KEY REFERENCES execution_orders(id),
+    lots_executed INTEGER NOT NULL CHECK(lots_executed >= 0),
+    snapshot_json TEXT,
+    updated_at TEXT NOT NULL
+  ) STRICT;
 `;
 
 function parseJson<T>(value: string, fallback: T): T {
@@ -685,8 +693,17 @@ export class ScenarioJournal {
     }
   }
 
+  listRecoverableExecutionOrders(limit: number): ExecutionOrderRecord[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 51) throw new Error('Invalid reconciliation batch size');
+    const database = this.open();
+    try {
+      return (database.prepare("SELECT * FROM execution_orders WHERE mode = 'sandbox' AND status IN ('submitting', 'accepted') ORDER BY id ASC LIMIT ?")
+        .all(limit) as ExecutionOrderRow[]).map(row => this.toExecutionOrder(row));
+    } finally { database.close(); }
+  }
+
   claimExecution(scenarioId: number, chatId: string, limits?: {
-    from: string; to: string; now: string; maxOrders: number; maxRiskRub: number;
+    from: string; to: string; now: string; maxOrders: number; maxRiskRub: number; singlePosition?: boolean;
   }): ExecutionOrderRecord {
     const database = this.open();
     try {
@@ -701,6 +718,9 @@ export class ScenarioJournal {
           const killed = database.prepare('SELECT value FROM runtime_state WHERE key = ?')
             .get('execution.kill_switch') as { value: string } | undefined;
           if (killed?.value !== 'false') throw new Error('Execution kill switch is active');
+          if (limits.singlePosition && database.prepare(
+            "SELECT id FROM execution_orders WHERE status IN ('submitting', 'accepted') LIMIT 1",
+          ).get()) throw new Error('Pilot already has an unresolved order or open position');
           const reservations = this.executionReservations(database, limits.from, limits.to);
           if (reservations.length >= limits.maxOrders) throw new Error('Daily execution order limit has been reached');
           if (!riskBudgetFits(reservations, row.estimated_risk_rub, limits.maxRiskRub)) {
@@ -716,7 +736,7 @@ export class ScenarioJournal {
           )
           .run(chatId, now, row.id);
         this.appendExecutionEvent(database, Number(row.id), 'approved', { chatId }, now);
-      } else if (row.status !== 'submitting') {
+      } else {
         throw new Error(`Execution order is already ${row.status}`);
       }
 
@@ -770,8 +790,57 @@ export class ScenarioJournal {
     }
   }
 
-  markExecutionAccepted(scenarioId: number, brokerOrderId: string, detail: string): ExecutionOrderRecord {
-    return this.finishExecution(scenarioId, 'accepted', brokerOrderId, detail, 'broker_accepted');
+  markExecutionAccepted(scenarioId: number, brokerOrderId: string, detail: string, lotsExecuted = 0): ExecutionOrderRecord {
+    return this.finishExecution(scenarioId, 'accepted', brokerOrderId, detail, 'broker_accepted', lotsExecuted);
+  }
+
+  getExecutionSnapshot(scenarioId: number): SandboxOrderSnapshot | null {
+    const database = this.open();
+    try {
+      const row = database.prepare(`SELECT e.snapshot_json AS snapshot FROM execution_evidence e
+        JOIN execution_orders o ON o.id = e.execution_order_id WHERE o.scenario_id = ?`).get(scenarioId) as
+        { snapshot: string | null } | undefined;
+      return row?.snapshot ? JSON.parse(row.snapshot) as SandboxOrderSnapshot : null;
+    } finally { database.close(); }
+  }
+
+  recordExecutionReconciliation(scenarioId: number, snapshot: SandboxOrderSnapshot): ExecutionOrderRecord {
+    const database = this.open();
+    try {
+      database.exec('BEGIN IMMEDIATE');
+      const row = database.prepare('SELECT * FROM execution_orders WHERE scenario_id = ?').get(scenarioId) as ExecutionOrderRow | undefined;
+      if (!row || !['submitting', 'accepted'].includes(row.status)) throw new Error('Only an unresolved or accepted order can be reconciled');
+      const evidence = database.prepare('SELECT lots_executed, snapshot_json FROM execution_evidence WHERE execution_order_id = ?')
+        .get(row.id) as { lots_executed: number; snapshot_json: string | null } | undefined;
+      // Legacy accepted rows did not persist a fill count. A zero-fill reply
+      // cannot erase a possible position merely because that evidence is absent.
+      if (row.status === 'accepted' && !evidence && snapshot.lotsExecuted === 0) {
+        throw new Error('Legacy accepted order requires independent position evidence');
+      }
+      if (snapshot.lotsExecuted > row.lots || snapshot.lotsExecuted < (evidence?.lots_executed ?? 0)
+        || (row.broker_order_id && row.broker_order_id !== snapshot.brokerOrderId)) {
+        throw new Error('Sandbox reconciliation contradicts earlier execution evidence');
+      }
+      if (evidence?.snapshot_json) assertSnapshotProgress(JSON.parse(evidence.snapshot_json) as SandboxOrderSnapshot, snapshot);
+      const status = snapshot.terminal && snapshot.lotsExecuted === 0 ? 'failed' : 'accepted';
+      const now = new Date().toISOString();
+      const detail = `${snapshot.executionStatus}; reconciled lots ${snapshot.lotsExecuted}/${row.lots}`;
+      database.prepare('UPDATE execution_orders SET status = ?, broker_order_id = ?, detail = ?, updated_at = ? WHERE id = ?')
+        .run(status, snapshot.brokerOrderId, detail, now, row.id);
+      database.prepare(`INSERT INTO execution_evidence (execution_order_id, lots_executed, snapshot_json, updated_at)
+        VALUES (?, ?, ?, ?) ON CONFLICT(execution_order_id) DO UPDATE SET
+        lots_executed = excluded.lots_executed, snapshot_json = excluded.snapshot_json, updated_at = excluded.updated_at`)
+        .run(row.id, snapshot.lotsExecuted, JSON.stringify(snapshot), now);
+      this.appendExecutionEvent(database, Number(row.id), 'broker_reconciled', {
+        executionStatus: snapshot.executionStatus, lotsExecuted: snapshot.lotsExecuted,
+        grossNano: snapshot.grossNano, commissionNano: snapshot.commissionNano,
+      }, now);
+      database.exec('COMMIT');
+      return this.toExecutionOrder(database.prepare('SELECT * FROM execution_orders WHERE id = ?').get(row.id) as ExecutionOrderRow);
+    } catch (error: unknown) {
+      try { database.exec('ROLLBACK'); } catch { /* Keep all prior evidence on failure. */ }
+      throw error;
+    } finally { database.close(); }
   }
 
   markExecutionFailed(scenarioId: number, detail: string): ExecutionOrderRecord {
@@ -830,6 +899,7 @@ export class ScenarioJournal {
     brokerOrderId: string | null,
     detail: string,
     eventType: string,
+    lotsExecuted = 0,
   ): ExecutionOrderRecord {
     const database = this.open();
     try {
@@ -839,6 +909,7 @@ export class ScenarioJournal {
         .get(scenarioId) as ExecutionOrderRow | undefined;
       if (!row) throw new Error('Execution order was not found');
       if (row.status !== 'submitting') throw new Error(`Execution order is already ${row.status}`);
+      if (!Number.isSafeInteger(lotsExecuted) || lotsExecuted < 0 || lotsExecuted > row.lots) throw new Error('Invalid executed lot quantity');
 
       const now = new Date().toISOString();
       database
@@ -848,6 +919,9 @@ export class ScenarioJournal {
            WHERE id = ?`,
         )
         .run(status, brokerOrderId, detail.slice(0, 500), now, row.id);
+      if (status === 'accepted') database.prepare(`INSERT INTO execution_evidence (execution_order_id, lots_executed, updated_at)
+        VALUES (?, ?, ?) ON CONFLICT(execution_order_id) DO UPDATE SET lots_executed = MAX(lots_executed, excluded.lots_executed),
+        updated_at = excluded.updated_at`).run(row.id, lotsExecuted, now);
       this.appendExecutionEvent(database, Number(row.id), eventType, {
         brokerOrderId,
         detail: detail.slice(0, 500),

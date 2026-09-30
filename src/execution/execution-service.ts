@@ -10,6 +10,7 @@ import {
 import type { TInvestClient } from '../tbank/client.js';
 import { TInvestOrderClient, TInvestOrderError } from './tinvest-order-client.js';
 import { assessLivePilotRisk } from './live-pilot-risk.js';
+import { parseSandboxOrderState } from './sandbox-order-state.js';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -89,7 +90,7 @@ export class ExecutionService {
     private readonly marketClient: Pick<TInvestClient, 'getOrderBook' | 'getTradingStatus'>,
     private readonly orderClient: Pick<
       TInvestOrderClient,
-      'postLimitOrder' | 'getSandboxAccounts' | 'openSandboxAccount' | 'sandboxPayIn'
+      'postLimitOrder' | 'getSandboxAccounts' | 'openSandboxAccount' | 'sandboxPayIn' | 'getSandboxOrderState'
     >,
     private readonly journal: ScenarioJournal,
   ) {
@@ -170,6 +171,11 @@ export class ExecutionService {
 
   private async submitGuarded(scenarioId: number, chatId: string, now: Date): Promise<ExecutionSubmitResult> {
     if (!this.isReady()) throw new Error('Sandbox execution is disabled, unarmed or not fully configured');
+    // An earlier HTTP timeout is NOT permission to send again. Reading state
+    // remains possible after kill, restart or candidate expiry.
+    if (this.journal.getExecutionByScenario(scenarioId)?.status === 'submitting') {
+      return this.reconcileScenario(scenarioId, now);
+    }
     if (this.isKilled()) throw new Error('Execution kill switch is active');
 
     const scenario = this.journal.getScenario(scenarioId);
@@ -207,6 +213,7 @@ export class ExecutionService {
     const claimed = this.journal.claimExecution(scenarioId, chatId, {
       ...day, now: now.toISOString(), maxOrders: this.config.execution.maxOrdersPerDay,
       maxRiskRub: this.config.execution.maxDailyRiskRub,
+      singlePosition: this.config.livePilot.prepare,
     });
 
     let response;
@@ -221,18 +228,23 @@ export class ExecutionService {
         orderRequestId: claimed.orderRequestId,
       });
     } catch (error: unknown) {
-      if (error instanceof TInvestOrderError && error.outcomeUncertain) {
-        this.journal.recordExecutionUncertain(scenarioId, error.message);
+      if (error instanceof TInvestOrderError && !error.outcomeUncertain) {
+        this.journal.markExecutionFailed(scenarioId, 'Sandbox request failed before submission');
       } else {
-        const detail = error instanceof Error ? error.message : 'Unknown order submission error';
-        this.journal.markExecutionFailed(scenarioId, detail);
+        this.journal.recordExecutionUncertain(scenarioId, 'Sandbox submission did not confirm the outcome; risk remains reserved');
       }
-      throw error;
+      throw new Error('Sandbox submission did not confirm the outcome; use reconciliation before any retry');
     }
 
     const knownStatuses = ['EXECUTION_REPORT_STATUS_FILL', 'EXECUTION_REPORT_STATUS_PARTIALLYFILL',
       'EXECUTION_REPORT_STATUS_NEW', 'EXECUTION_REPORT_STATUS_REJECTED', 'EXECUTION_REPORT_STATUS_CANCELLED'];
-    if (!knownStatuses.includes(response.executionStatus)) {
+    if (!knownStatuses.includes(response.executionStatus)
+      || !Number.isSafeInteger(response.lotsExecuted) || response.lotsExecuted < 0 || response.lotsExecuted > claimed.lots
+      || response.lotsRequested !== claimed.lots
+      || (response.executionStatus === 'EXECUTION_REPORT_STATUS_FILL' && response.lotsExecuted !== claimed.lots)
+      || (response.executionStatus === 'EXECUTION_REPORT_STATUS_NEW' && response.lotsExecuted !== 0)
+      || (response.executionStatus === 'EXECUTION_REPORT_STATUS_PARTIALLYFILL'
+        && (response.lotsExecuted === 0 || response.lotsExecuted === claimed.lots))) {
       this.journal.recordExecutionUncertain(scenarioId, 'Unconfirmed broker execution status');
       throw new TInvestOrderError('Unconfirmed broker execution status; risk remains reserved', true);
     }
@@ -248,8 +260,42 @@ export class ExecutionService {
       scenarioId,
       response.brokerOrderId,
       `${response.executionStatus}; lots ${response.lotsExecuted}/${response.lotsRequested}`,
+      response.lotsExecuted,
     );
     return { order: accepted, executionStatus: response.executionStatus, lotsExecuted: response.lotsExecuted };
+  }
+
+  async recoverOutstanding(limit = 20, now = new Date()) {
+    if (!this.isReady()) throw new Error('Sandbox execution is not configured');
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('Invalid reconciliation batch size');
+    const orders = this.journal.listRecoverableExecutionOrders(limit + 1);
+    let confirmed = 0;
+    let unconfirmed = 0;
+    for (const order of orders.slice(0, limit)) {
+      try { await this.reconcileScenario(order.scenarioId, now); confirmed++; }
+      catch { unconfirmed++; }
+    }
+    return { attempted: confirmed + unconfirmed, confirmed, unconfirmed, morePending: orders.length > limit };
+  }
+
+  async reconcileScenario(scenarioId: number, now = new Date()): Promise<ExecutionSubmitResult> {
+    if (!this.isReady()) throw new Error('Sandbox execution is not configured');
+    const order = this.journal.getExecutionByScenario(scenarioId);
+    const scenario = this.journal.getScenario(scenarioId);
+    if (!order || order.mode !== 'sandbox' || !scenario || !['submitting', 'accepted'].includes(order.status)) {
+      throw new Error('Only an unresolved or accepted sandbox order can be reconciled');
+    }
+    try {
+      const payload = await this.orderClient.getSandboxOrderState(this.accountId!, order.orderRequestId);
+      const snapshot = parseSandboxOrderState(payload, {
+        requestId: order.orderRequestId, instrumentId: order.instrumentId, lots: order.lots, lotSize: scenario.input.lotSize,
+      }, now);
+      const updated = this.journal.recordExecutionReconciliation(scenarioId, snapshot);
+      return { order: updated, executionStatus: snapshot.executionStatus, lotsExecuted: snapshot.lotsExecuted };
+    } catch {
+      this.journal.recordExecutionUncertain(scenarioId, 'Sandbox reconciliation did not confirm the result; prior risk remains reserved');
+      throw new Error('Sandbox reconciliation is incomplete; no new order was sent and prior risk remains reserved');
+    }
   }
 
   private async ensureSandboxAccount(): Promise<void> {
