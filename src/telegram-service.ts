@@ -1,6 +1,8 @@
 import { loadConfig } from './config.js';
 import { ExecutionService } from './execution/execution-service.js';
 import { TInvestOrderClient } from './execution/tinvest-order-client.js';
+import { LivePilotPreflight } from './execution/live-pilot-preflight.js';
+import { LivePreflightClient, liveProductionEndpoint } from './execution/live-preflight-client.js';
 import { ScenarioJournal } from './journal/scenario-journal.js';
 import { IntradayScanner } from './scanner/intraday-scanner.js';
 import { TelegramBotClient } from './telegram/client.js';
@@ -29,8 +31,23 @@ const telegram = new TelegramTradingBot(
   undefined,
   undefined,
   execution,
+  new LivePilotPreflight(config, new LivePreflightClient(config.livePilot.token, liveProductionEndpoint, config.transport)),
 );
 
+// Safe startup read-back, captured by the EXISTING deployment log. This proves
+// effective settings only, not transport health, strategy edge or live readiness.
+process.stdout.write(JSON.stringify({
+  event: 'daily-pilot-profile-loaded',
+  capitalRub: config.livePilot.capitalRub,
+  maxTradeRiskRub: config.strategies.intraday.maxRiskRub,
+  maxDailyRiskRub: config.execution.maxDailyRiskRub,
+  maxPositionRub: config.strategies.intraday.maxPositionRub,
+  commissionRate: config.commissionRate,
+  executionMode: config.execution.mode,
+  liveSubmissionAllowed: false,
+  liveTokenPresent: Boolean(config.livePilot.token),
+  liveAccountConfigured: Boolean(config.livePilot.accountId),
+}) + '\n');
 scanner.addEventListener((event) => telegram.notifyScannerEvent(event));
 scanner.start();
 await telegram.start();

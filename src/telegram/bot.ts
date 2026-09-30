@@ -1,5 +1,6 @@
 import type { AppConfig } from '../config.js';
 import type { ExecutionService } from '../execution/execution-service.js';
+import type { LivePilotPreflight } from '../execution/live-pilot-preflight.js';
 import {
   type JournalScenarioRecord,
   ScenarioJournal,
@@ -155,6 +156,8 @@ function helpText(): string {
     '/pause — поставить сканер на паузу',
     '/resume — продолжить проходы',
     '/execution — состояние исполнения',
+    '/pilot — одобренные лимиты дневного пилота',
+    '/pilot_check — проверить отдельный live-счёт без заявок',
     '/orders — последние подготовленные поручения',
     '/execution_arm SANDBOX — разрешить подтверждённые заявки в песочнице',
     '/approve ID CONFIRM — подтвердить одну sandbox-заявку',
@@ -177,6 +180,7 @@ export class TelegramTradingBot {
     private readonly log: TelegramBotLog = (message) => process.stdout.write(`${message}\n`),
     private readonly renderCard: CardRenderer = renderCandidateCardPng,
     private readonly execution?: ExecutionControl,
+    private readonly pilot?: Pick<LivePilotPreflight, 'check'>,
   ) {}
 
   async start(): Promise<never> {
@@ -300,6 +304,24 @@ export class TelegramTradingBot {
       await this.client.sendMessage(normalizedChatId, this.ordersText());
       return;
     }
+    if (command === '/pilot_check') {
+      if (!this.pilot) {
+        await this.client.sendMessage(normalizedChatId, 'Проверка пилота не подключена; реальные заявки недоступны.');
+        return;
+      }
+      try {
+        const report = await this.pilot.check();
+        await this.client.sendMessage(normalizedChatId, [
+          this.pilotText(),
+          `Проверка счёта: ${report.accountChecksPassed ? 'пройдена' : 'не пройдена'}`,
+          report.availableCashRub === null ? 'Свободные деньги: не подтверждены' : `Свободные деньги: ${formatNumber(report.availableCashRub)} ₽`,
+          ...report.blockers,
+        ].join('\n'));
+      } catch {
+        await this.client.sendMessage(normalizedChatId, 'Проверка пилота не завершена. Реальная заявка не отправлена.');
+      }
+      return;
+    }
     if (command === '/execution_arm') {
       await this.armExecution(normalizedChatId, text);
       return;
@@ -397,6 +419,8 @@ export class TelegramTradingBot {
         return this.statusText();
       case '/execution':
         return this.executionText();
+      case '/pilot':
+        return this.pilotText();
       case '/pause':
         this.scanner.pause();
         return 'Сканер поставлен на паузу. Новые проходы не будут запрашивать данные рынка.';
@@ -432,6 +456,19 @@ export class TelegramTradingBot {
       return 'Первый проход рынка ещё не завершён. Повторите /market через 1–2 минуты.';
     }
     return formatMarketReport(report);
+  }
+
+  private pilotText(): string {
+    const pilot = this.config.livePilot;
+    return [
+      `Дневной пилот: ${pilot.prepare ? 'подготовка' : 'выключен'}`,
+      `Капитал: ${formatNumber(pilot.capitalRub)} ₽, включая расходы входа.`,
+      `Расчётный риск: ${formatNumber(pilot.maxTradeRiskRub)} ₽/сделка; ${formatNumber(pilot.maxDailyRiskRub)} ₽/день.`,
+      `Порог фактического дневного убытка: ${formatNumber(pilot.maxDailyLossRub)} ₽ — монитор ещё не подключён.`,
+      `Комиссия в модели: ${formatNumber(this.config.commissionRate * 100)}% на сторону плюс проскальзывание.`,
+      'Без плеча и шортов; средства недельного счёта не используются.',
+      'Реальные заявки недоступны. Лимит риска не гарантирует размер фактического убытка.',
+    ].join('\n');
   }
 
   private executionText(): string {

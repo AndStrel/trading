@@ -37,7 +37,7 @@ function recordCandidate(journal: ScenarioJournal, observedAt: string) {
       side: 'long',
       entryPrice: 100,
       stopPrice: 99,
-      targetPrice: 102.5,
+      targetPrice: 105,
       lotSize: 1,
       slippageRate: 0.0005,
     },
@@ -80,6 +80,100 @@ afterEach(() => {
 });
 
 describe('ExecutionService', () => {
+  it('rechecks tightened limits for a previously queued order before any broker call', async () => {
+    const journal = createJournal();
+    const now = new Date();
+    const candidate = recordCandidate(journal, now.toISOString());
+    const old = new ExecutionService(createConfig(), marketClient(), orderClient(), journal);
+    old.queueScenario(candidate);
+    await old.armSandbox();
+    const postLimitOrder = vi.fn();
+    const service = new ExecutionService(createConfig({ INTRADAY_MAX_RISK_RUB: '5' }), marketClient(), orderClient(postLimitOrder), journal);
+    await expect(service.submitScenario(candidate.id, '42', now)).rejects.toThrow('risk limit');
+    expect(postLimitOrder).not.toHaveBeenCalled();
+  });
+  it('retains daily risk when a cancelled order reports a partial fill', async () => {
+    const journal = createJournal();
+    const now = new Date();
+    const candidate = recordCandidate(journal, now.toISOString());
+    const postLimitOrder = vi.fn().mockResolvedValue({ brokerOrderId: 'partial-order', executionStatus: 'EXECUTION_REPORT_STATUS_CANCELLED', lotsRequested: 5, lotsExecuted: 1 });
+    const service = new ExecutionService(createConfig(), marketClient(), orderClient(postLimitOrder), journal);
+    service.queueScenario(candidate);
+    await service.armSandbox();
+    const result = await service.submitScenario(candidate.id, '42', now);
+    expect(result.order.status).toBe('accepted');
+    expect(result.lotsExecuted).toBe(1);
+  });
+
+  it('keeps unknown execution status in submitting instead of freeing the reservation', async () => {
+    const journal = createJournal();
+    const now = new Date();
+    const candidate = recordCandidate(journal, now.toISOString());
+    const postLimitOrder = vi.fn().mockResolvedValue({ brokerOrderId: 'order', executionStatus: 'EXECUTION_REPORT_STATUS_UNSPECIFIED', lotsRequested: 5, lotsExecuted: 0 });
+    const service = new ExecutionService(createConfig(), marketClient(), orderClient(postLimitOrder), journal);
+    service.queueScenario(candidate);
+    await service.armSandbox();
+    await expect(service.submitScenario(candidate.id, '42', now)).rejects.toThrow('risk remains reserved');
+    expect(journal.getExecutionByScenario(candidate.id)?.status).toBe('submitting');
+  });
+  it('reserves the daily budget atomically for concurrent confirmations', async () => {
+    const journal = createJournal();
+    const config = createConfig({ T_INVEST_EXECUTION_MAX_ORDERS_PER_DAY: '20' });
+    const now = new Date();
+    const candidates = Array.from({ length: 8 }, () => recordCandidate(journal, now.toISOString()));
+    const postLimitOrder = vi.fn().mockResolvedValue({ brokerOrderId: 'broker-order', executionStatus: 'EXECUTION_REPORT_STATUS_FILL', lotsRequested: 5, lotsExecuted: 5 });
+    const service = new ExecutionService(config, marketClient(), orderClient(postLimitOrder), journal);
+    for (const candidate of candidates) service.queueScenario(candidate);
+    await service.armSandbox();
+    const results = await Promise.allSettled(candidates.map(candidate => service.submitScenario(candidate.id, '42', now)));
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(7);
+    expect(postLimitOrder).toHaveBeenCalledTimes(7);
+    expect(results.filter(result => result.status === 'rejected')[0]).toMatchObject({ reason: expect.any(Error) });
+    expect(journal.listExecutionOrders(10).filter(order => order.status === 'pending')).toHaveLength(1);
+  });
+
+  it('does not send two requests for simultaneous confirmations of the same candidate', async () => {
+    const journal = createJournal();
+    const now = new Date();
+    const candidate = recordCandidate(journal, now.toISOString());
+    const postLimitOrder = vi.fn().mockResolvedValue({ brokerOrderId: 'order', executionStatus: 'EXECUTION_REPORT_STATUS_FILL', lotsRequested: 5, lotsExecuted: 5 });
+    const service = new ExecutionService(createConfig(), marketClient(), orderClient(postLimitOrder), journal);
+    service.queueScenario(candidate);
+    await service.armSandbox();
+    const results = await Promise.allSettled([service.submitScenario(candidate.id, '42', now), service.submitScenario(candidate.id, '42', now)]);
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(postLimitOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the reservation on its approval day even if the reply updates it later', async () => {
+    const journal = createJournal();
+    const service = new ExecutionService(createConfig(), marketClient(), orderClient(), journal);
+    const scenario = recordCandidate(journal, '2026-09-30T20:59:00.000Z');
+    service.queueScenario(scenario);
+    await service.armSandbox();
+    const from = '2026-09-29T21:00:00.000Z';
+    const to = '2026-09-30T21:00:00.000Z';
+    journal.claimExecution(scenario.id, '42', { from, to, now: '2026-09-30T20:59:00.000Z', maxOrders: 3, maxRiskRub: 60 });
+    journal.markExecutionAccepted(scenario.id, 'order', 'filled');
+    expect(journal.getExecutionDailyUsage(from, to).orderCount).toBe(1);
+    expect(journal.getExecutionDailyUsage(to, '2026-10-01T21:00:00.000Z').orderCount).toBe(0);
+  });
+
+  it('honors kill while waiting for fresh market data', async () => {
+    const journal = createJournal();
+    const now = new Date();
+    const scenario = recordCandidate(journal, now.toISOString());
+    const client = marketClient();
+    const postLimitOrder = vi.fn();
+    const service = new ExecutionService(createConfig(), client, orderClient(postLimitOrder), journal);
+    service.queueScenario(scenario);
+    await service.armSandbox();
+    const regularStatus = await client.getTradingStatus();
+    client.getTradingStatus.mockImplementation(async () => { service.kill(); return regularStatus; });
+    await expect(service.submitScenario(scenario.id, '42', now)).rejects.toThrow('kill switch');
+    expect(postLimitOrder).not.toHaveBeenCalled();
+  });
+
   it('creates and funds a dedicated sandbox account when arming for the first time', async () => {
     const journal = createJournal();
     const config = loadConfig({
@@ -92,7 +186,7 @@ describe('ExecutionService', () => {
     await service.armSandbox();
 
     expect(client.openSandboxAccount).toHaveBeenCalledWith('AndStrel trading sandbox');
-    expect(client.sandboxPayIn).toHaveBeenCalledWith('created-sandbox-account', 100_000);
+    expect(client.sandboxPayIn).toHaveBeenCalledWith('created-sandbox-account', 1_000);
     expect(service.isReady()).toBe(true);
     expect(service.isKilled()).toBe(false);
   });
@@ -112,6 +206,7 @@ describe('ExecutionService', () => {
     const second = service.queueScenario(scenario);
 
     expect(first?.status).toBe('pending');
+    expect(first?.estimatedRiskRub).toBeGreaterThan(7);
     expect(second?.id).toBe(first?.id);
     expect(second?.orderRequestId).toBe(first?.orderRequestId);
     expect(service.isKilled()).toBe(true);

@@ -13,6 +13,14 @@ const input = {
 };
 
 describe('TInvestOrderClient', () => {
+  it.each([408, 429, 500, 502, 503])('does not release risk on uncertain HTTP %s', async status => {
+    const client = new TInvestOrderClient('secret', 'https://example.test/rest', vi.fn<typeof fetch>().mockResolvedValue(new Response('{}', { status })));
+    await expect(client.postLimitOrder(input)).rejects.toMatchObject({ outcomeUncertain: true });
+  });
+  it('does not interpret a malformed fill count as zero executed lots', async () => {
+    const client = new TInvestOrderClient('secret', 'https://example.test/rest', vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ orderId: 'order', executionReportStatus: 'EXECUTION_REPORT_STATUS_CANCELLED', lotsRequested: '3' }))));
+    await expect(client.postLimitOrder(input)).rejects.toMatchObject({ outcomeUncertain: true });
+  });
   it('posts only a non-margin FOK limit order to the sandbox endpoint', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(

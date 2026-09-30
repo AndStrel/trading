@@ -48,9 +48,9 @@ function asString(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
-function asInteger(value: unknown): number {
+function asInteger(value: unknown): number | null {
   const parsed = typeof value === 'number' || typeof value === 'string' ? Number(value) : Number.NaN;
-  return Number.isSafeInteger(parsed) ? parsed : 0;
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 export class TInvestOrderClient {
@@ -84,15 +84,17 @@ export class TInvestOrderClient {
     const result = asRecord(payload);
     const brokerOrderId = asString(result?.orderId);
     const executionStatus = asString(result?.executionReportStatus);
-    if (!brokerOrderId || !executionStatus) {
+    const lotsRequested = asInteger(result?.lotsRequested);
+    const lotsExecuted = asInteger(result?.lotsExecuted);
+    if (!brokerOrderId || !executionStatus || lotsRequested !== input.lots || lotsExecuted === null || lotsExecuted > lotsRequested) {
       throw new TInvestOrderError('T-Invest returned an invalid order response', true);
     }
 
     return {
       brokerOrderId,
       executionStatus,
-      lotsRequested: asInteger(result?.lotsRequested),
-      lotsExecuted: asInteger(result?.lotsExecuted),
+      lotsRequested,
+      lotsExecuted,
     };
   }
 
@@ -162,7 +164,8 @@ export class TInvestOrderClient {
     if (!response.ok) {
       const errorBody = asRecord(payload) as ApiErrorBody | null;
       const detail = errorBody?.message ?? errorBody?.description ?? response.statusText;
-      throw new TInvestOrderError(`T-Invest order API ${response.status}: ${detail}`, false);
+      throw new TInvestOrderError(`T-Invest order API ${response.status}: ${detail}`,
+        uncertainOnNetwork && (response.status === 408 || response.status === 429 || response.status >= 500));
     }
     return payload;
   }

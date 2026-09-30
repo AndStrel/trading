@@ -25,13 +25,14 @@
     "backtest:replay:orb-rvol": "node --env-file=.env dist/backtest-orb-rvol.js",
     "backtest:replay:orb-rvol:retest": "node --env-file=.env dist/backtest-orb-rvol.js --mode retest-breadth",
     "service:telegram": "node --env-file=.env dist/telegram-service.js",
+    "preflight:pilot": "node --env-file=.env dist/pilot-preflight.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
-    "fflate": "0.8.2",
+    "fflate": "0.8.3",
     "zod": "^4.6.5"
   },
   "devDependencies": {

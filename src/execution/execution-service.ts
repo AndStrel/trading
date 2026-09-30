@@ -9,6 +9,7 @@ import {
 } from '../journal/scenario-journal.js';
 import type { TInvestClient } from '../tbank/client.js';
 import { TInvestOrderClient, TInvestOrderError } from './tinvest-order-client.js';
+import { assessLivePilotRisk } from './live-pilot-risk.js';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -81,6 +82,7 @@ function moscowDayRange(now: Date): { from: string; to: string } {
 
 export class ExecutionService {
   private accountId: string | undefined;
+  private readonly inFlight = new Set<number>();
 
   constructor(
     private readonly config: AppConfig,
@@ -131,7 +133,7 @@ export class ExecutionService {
     }
     if (scenario.input.side !== 'long') throw new Error('Short execution is disabled');
 
-    const plan = readTradePlan(scenario);
+    const plan = this.readValidatedPlan(scenario);
     const limits = this.config.strategies.intraday;
     if (plan.positionRub > limits.maxPositionRub) throw new Error('Scenario exceeds the position limit');
     if (plan.totalRiskRub > limits.maxRiskRub) throw new Error('Scenario exceeds the risk limit');
@@ -157,6 +159,16 @@ export class ExecutionService {
   }
 
   async submitScenario(scenarioId: number, chatId: string, now = new Date()): Promise<ExecutionSubmitResult> {
+    if (this.inFlight.has(scenarioId)) throw new Error('This scenario is already being submitted');
+    this.inFlight.add(scenarioId);
+    try {
+      return await this.submitGuarded(scenarioId, chatId, now);
+    } finally {
+      this.inFlight.delete(scenarioId);
+    }
+  }
+
+  private async submitGuarded(scenarioId: number, chatId: string, now: Date): Promise<ExecutionSubmitResult> {
     if (!this.isReady()) throw new Error('Sandbox execution is disabled, unarmed or not fully configured');
     if (this.isKilled()) throw new Error('Execution kill switch is active');
 
@@ -171,9 +183,13 @@ export class ExecutionService {
       throw new Error(`Candidate is older than ${this.config.execution.candidateMaxAgeMinutes} minutes`);
     }
 
-    const plan = readTradePlan(scenario);
+    const plan = this.readValidatedPlan(scenario);
+    this.assertStrategyLimits(plan);
     const existing = this.journal.getExecutionByScenario(scenarioId) ?? this.queueScenario(scenario);
     if (!existing) throw new Error('Execution order was not queued');
+    if (existing.estimatedRiskRub < plan.totalRiskRub) {
+      throw new Error('Queued order has outdated expense assumptions; create a fresh candidate');
+    }
 
     const day = moscowDayRange(now);
     const usage = this.journal.getExecutionDailyUsage(day.from, day.to);
@@ -187,7 +203,11 @@ export class ExecutionService {
     }
 
     await this.validateCurrentMarket(scenario, plan.lots);
-    const claimed = this.journal.claimExecution(scenarioId, chatId);
+    if (this.isKilled()) throw new Error('Execution kill switch is active');
+    const claimed = this.journal.claimExecution(scenarioId, chatId, {
+      ...day, now: now.toISOString(), maxOrders: this.config.execution.maxOrdersPerDay,
+      maxRiskRub: this.config.execution.maxDailyRiskRub,
+    });
 
     let response;
     try {
@@ -210,11 +230,16 @@ export class ExecutionService {
       throw error;
     }
 
-    if (
+    const knownStatuses = ['EXECUTION_REPORT_STATUS_FILL', 'EXECUTION_REPORT_STATUS_PARTIALLYFILL',
+      'EXECUTION_REPORT_STATUS_NEW', 'EXECUTION_REPORT_STATUS_REJECTED', 'EXECUTION_REPORT_STATUS_CANCELLED'];
+    if (!knownStatuses.includes(response.executionStatus)) {
+      this.journal.recordExecutionUncertain(scenarioId, 'Unconfirmed broker execution status');
+      throw new TInvestOrderError('Unconfirmed broker execution status; risk remains reserved', true);
+    }
+    if (response.lotsExecuted === 0 && (
       response.executionStatus === 'EXECUTION_REPORT_STATUS_REJECTED' ||
-      response.executionStatus === 'EXECUTION_REPORT_STATUS_CANCELLED' ||
-      response.executionStatus === 'EXECUTION_REPORT_STATUS_UNSPECIFIED'
-    ) {
+      response.executionStatus === 'EXECUTION_REPORT_STATUS_CANCELLED'
+    )) {
       const failed = this.journal.markExecutionFailed(scenarioId, response.executionStatus);
       return { order: failed, executionStatus: response.executionStatus, lotsExecuted: response.lotsExecuted };
     }
@@ -243,6 +268,34 @@ export class ExecutionService {
       );
       this.journal.setRuntimeState('execution.sandbox_funded_account_id', this.accountId);
     }
+  }
+
+  private assertStrategyLimits(plan: TradePlanSnapshot): void {
+    const limits = this.config.strategies.intraday;
+    if (plan.positionRub > limits.maxPositionRub) throw new Error('Scenario exceeds the position limit');
+    if (plan.totalRiskRub > limits.maxRiskRub) throw new Error('Scenario exceeds the risk limit');
+  }
+
+  private readValidatedPlan(scenario: JournalScenarioRecord): TradePlanSnapshot {
+    const plan = readTradePlan(scenario);
+    if (!this.config.livePilot.prepare) return plan;
+    const assessment = assessLivePilotRisk(this.config.livePilot, {
+      side: scenario.input.side,
+      entryPrice: scenario.input.entryPrice,
+      stopPrice: scenario.input.stopPrice,
+      targetPrice: scenario.input.targetPrice,
+      lots: plan.lots,
+      lotSize: scenario.input.lotSize,
+      commissionRate: this.config.commissionRate,
+      slippageRate: Math.max(this.config.scanner.slippageRate, scenario.input.slippageRate),
+      availableCashRub: this.config.livePilot.capitalRub,
+      reservedDailyRiskRub: 0,
+      realizedDailyLossRub: 0,
+      markedOpenLossRub: 0,
+    });
+    if (!assessment.allowed) throw new Error(assessment.blockers.join('; '));
+    // Never accept a cheaper historical snapshot as the monetary source of truth.
+    return { ...plan, positionRub: Math.max(plan.positionRub, assessment.positionRub), totalRiskRub: Math.max(plan.totalRiskRub, assessment.totalRiskRub) };
   }
 
   private async validateCurrentMarket(scenario: JournalScenarioRecord, lots: number): Promise<void> {

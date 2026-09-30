@@ -25,6 +25,28 @@ afterEach(() => {
 });
 
 describe('TelegramTradingBot', () => {
+  it('shows approved limits but checks the live account only for an allowed chat', async () => {
+    const journal = createJournal();
+    const config = loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42' });
+    const sent: string[] = [];
+    const client: TelegramClient = {
+      getUpdates: async () => [
+        { update_id: 1, message: { chat: { id: 7 }, text: '/pilot_check' } },
+        { update_id: 2, message: { chat: { id: 42 }, text: '/pilot' } },
+        { update_id: 3, message: { chat: { id: 42 }, text: '/pilot_check' } },
+      ],
+      sendMessage: async (_chatId, text) => { sent.push(text); }, sendPhoto: async () => undefined,
+    };
+    const pilot = { check: vi.fn().mockResolvedValue({ liveSubmissionAllowed: false, accountChecksPassed: false, availableCashRub: null, blockers: ['Не задан отдельный live-токен.'] }) };
+    const scanner = { isPaused: () => false, pause: () => undefined, resume: () => undefined };
+    const bot = new TelegramTradingBot(config, client, scanner, journal, () => undefined, undefined, undefined, pilot);
+    await bot.pollOnce();
+    expect(pilot.check).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toContain('20 ₽/сделка; 60 ₽/день');
+    expect(sent[0]).toContain('Реальные заявки недоступны');
+    expect(sent[1]).toContain('не пройдена');
+  });
   it('accepts only allowlisted commands and persists the update offset', async () => {
     const journal = createJournal();
     const config = loadConfig({

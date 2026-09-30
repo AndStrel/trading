@@ -1,6 +1,7 @@
 import { z } from 'zod/v4';
 
 import type { TInvestTransport } from './tbank/client.js';
+import { pilotPositionBudget } from './execution/live-pilot-risk.js';
 
 export type Strategy = 'intraday' | 'swing';
 export type ExecutionMode = 'disabled' | 'sandbox';
@@ -49,6 +50,17 @@ export type BacktestConfig = {
   maxConcurrentPositions: number;
 };
 
+// Preparation only: this profile never enables live order submission.
+export type LivePilotConfig = {
+  prepare: boolean;
+  token?: string;
+  accountId?: string;
+  capitalRub: number;
+  maxTradeRiskRub: number;
+  maxDailyRiskRub: number;
+  maxDailyLossRub: number;
+};
+
 export type StrategyLimits = {
   accountId?: string;
   maxRiskRub: number;
@@ -69,12 +81,13 @@ export type AppConfig = {
   scanner: ScannerConfig;
   telegram: TelegramConfig;
   execution: ExecutionConfig;
+  livePilot: LivePilotConfig;
   backtest: BacktestConfig;
   strategies: Record<Strategy, StrategyLimits>;
 };
 
 const optionalNonEmpty = z.preprocess(
-  (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+  (value) => (typeof value === 'string' ? value.trim() || undefined : value),
   z.string().min(1).optional(),
 );
 
@@ -132,7 +145,7 @@ const envSchema = z.object({
     .refine((value) => new URL(value).protocol === 'https:', 'T_INVEST_HISTORY_DATA_URL must use HTTPS')
     .default('https://invest-public-api.tbank.ru/history-data'),
   T_INVEST_TRANSPORT: z.enum(['fetch', 'system-curl']).default('fetch'),
-  T_INVEST_COMMISSION_RATE: z.coerce.number().min(0).max(0.1).default(0.0005),
+  T_INVEST_COMMISSION_RATE: z.coerce.number().min(0).max(0.1).default(0.003),
   T_INVEST_JOURNAL_PATH: z.string().trim().min(1).default('.trading/journal.sqlite'),
   T_INVEST_MARKET_DATA_PATH: z.string().trim().min(1).default('.trading/market-data.sqlite'),
   T_INVEST_INTRADAY_WATCHLIST: z.string().default('[]'),
@@ -160,6 +173,13 @@ const envSchema = z.object({
   T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB: z.coerce.number().positive().max(10_000).default(1_000),
   T_INVEST_EXECUTION_CANDIDATE_MAX_AGE_MINUTES: z.coerce.number().int().min(1).max(60).default(10),
   T_INVEST_SANDBOX_INITIAL_BALANCE_RUB: z.coerce.number().positive().max(1_000_000).default(100_000),
+  T_INVEST_LIVE_PILOT_PREPARE: z.enum(['true', 'false']).default('true'),
+  T_INVEST_LIVE_TOKEN: optionalNonEmpty,
+  T_INVEST_LIVE_ACCOUNT_ID: optionalNonEmpty,
+  T_INVEST_LIVE_CAPITAL_RUB: z.coerce.number().positive().max(1_000).default(1_000),
+  T_INVEST_LIVE_MAX_TRADE_RISK_RUB: z.coerce.number().positive().max(20).default(20),
+  T_INVEST_LIVE_MAX_DAILY_RISK_RUB: z.coerce.number().positive().max(60).default(60),
+  T_INVEST_LIVE_MAX_DAILY_LOSS_RUB: z.coerce.number().positive().max(60).default(60),
   T_INVEST_BACKTEST_STARTING_CAPITAL_RUB: z.coerce.number().positive().max(1_000_000).default(100_000),
   T_INVEST_BACKTEST_MAX_CONCURRENT_POSITIONS: z.coerce.number().int().min(1).max(5).default(2),
   T_INVEST_INTRADAY_ACCOUNT_ID: optionalNonEmpty,
@@ -178,12 +198,25 @@ const envSchema = z.object({
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = envSchema.parse(env);
+  const prepare = parsed.T_INVEST_LIVE_PILOT_PREPARE === 'true';
+  const commissionRate = prepare ? Math.max(0.003, parsed.T_INVEST_COMMISSION_RATE) : parsed.T_INVEST_COMMISSION_RATE;
+  if (parsed.T_INVEST_LIVE_TOKEN && [parsed.T_INVEST_TOKEN, parsed.T_INVEST_TRADING_TOKEN].includes(parsed.T_INVEST_LIVE_TOKEN)) {
+    throw new Error('Live, sandbox and read-only tokens must be separate');
+  }
+  if (parsed.T_INVEST_LIVE_ACCOUNT_ID && [parsed.T_INVEST_SWING_ACCOUNT_ID, parsed.T_INVEST_SANDBOX_ACCOUNT_ID].includes(parsed.T_INVEST_LIVE_ACCOUNT_ID)) {
+    throw new Error('Daily live pilot must not use the weekly or sandbox account');
+  }
+  if (parsed.T_INVEST_LIVE_MAX_TRADE_RISK_RUB > parsed.T_INVEST_LIVE_MAX_DAILY_RISK_RUB) {
+    throw new Error('Live per-trade risk must not exceed the daily risk budget');
+  }
+  // Leave cash for entry fees and estimated slippage; never round this budget up.
+  const pilotPositionRub = pilotPositionBudget(parsed.T_INVEST_LIVE_CAPITAL_RUB, commissionRate, parsed.T_INVEST_SCANNER_SLIPPAGE_RATE);
   return {
     ...(parsed.T_INVEST_TOKEN ? { token: parsed.T_INVEST_TOKEN } : {}),
     baseUrl: parsed.T_INVEST_BASE_URL.replace(/\/$/, ''),
     historyDataUrl: parsed.T_INVEST_HISTORY_DATA_URL,
     transport: parsed.T_INVEST_TRANSPORT,
-    commissionRate: parsed.T_INVEST_COMMISSION_RATE,
+    commissionRate,
     journalPath: parsed.T_INVEST_JOURNAL_PATH,
     marketDataPath: parsed.T_INVEST_MARKET_DATA_PATH,
     scanner: {
@@ -213,9 +246,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         ? { accountId: parsed.T_INVEST_SANDBOX_ACCOUNT_ID }
         : {}),
       maxOrdersPerDay: parsed.T_INVEST_EXECUTION_MAX_ORDERS_PER_DAY,
-      maxDailyRiskRub: parsed.T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB,
+      maxDailyRiskRub: prepare ? Math.min(parsed.T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB, parsed.T_INVEST_LIVE_MAX_DAILY_RISK_RUB) : parsed.T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB,
       candidateMaxAgeMinutes: parsed.T_INVEST_EXECUTION_CANDIDATE_MAX_AGE_MINUTES,
-      sandboxInitialBalanceRub: parsed.T_INVEST_SANDBOX_INITIAL_BALANCE_RUB,
+      sandboxInitialBalanceRub: prepare ? Math.min(parsed.T_INVEST_SANDBOX_INITIAL_BALANCE_RUB, parsed.T_INVEST_LIVE_CAPITAL_RUB) : parsed.T_INVEST_SANDBOX_INITIAL_BALANCE_RUB,
+    },
+    livePilot: {
+      prepare,
+      ...(parsed.T_INVEST_LIVE_TOKEN ? { token: parsed.T_INVEST_LIVE_TOKEN } : {}),
+      ...(parsed.T_INVEST_LIVE_ACCOUNT_ID ? { accountId: parsed.T_INVEST_LIVE_ACCOUNT_ID } : {}),
+      capitalRub: parsed.T_INVEST_LIVE_CAPITAL_RUB,
+      maxTradeRiskRub: parsed.T_INVEST_LIVE_MAX_TRADE_RISK_RUB,
+      maxDailyRiskRub: parsed.T_INVEST_LIVE_MAX_DAILY_RISK_RUB,
+      maxDailyLossRub: parsed.T_INVEST_LIVE_MAX_DAILY_LOSS_RUB,
     },
     backtest: {
       startingCapitalRub: parsed.T_INVEST_BACKTEST_STARTING_CAPITAL_RUB,
@@ -226,11 +268,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         ...(parsed.T_INVEST_INTRADAY_ACCOUNT_ID
           ? { accountId: parsed.T_INVEST_INTRADAY_ACCOUNT_ID }
           : {}),
-        maxRiskRub: parsed.INTRADAY_MAX_RISK_RUB,
-        maxPositionRub: parsed.INTRADAY_MAX_POSITION_RUB,
+        maxRiskRub: prepare ? Math.min(parsed.INTRADAY_MAX_RISK_RUB, parsed.T_INVEST_LIVE_MAX_TRADE_RISK_RUB) : parsed.INTRADAY_MAX_RISK_RUB,
+        maxPositionRub: prepare ? Math.min(parsed.INTRADAY_MAX_POSITION_RUB, pilotPositionRub) : parsed.INTRADAY_MAX_POSITION_RUB,
         maxSpreadPct: parsed.INTRADAY_MAX_SPREAD_PCT,
         maxEntryDeviationPct: parsed.INTRADAY_MAX_ENTRY_DEVIATION_PCT,
-        allowShort: parsed.INTRADAY_ALLOW_SHORT === 'true',
+        allowShort: !prepare && parsed.INTRADAY_ALLOW_SHORT === 'true',
       },
       swing: {
         ...(parsed.T_INVEST_SWING_ACCOUNT_ID ? { accountId: parsed.T_INVEST_SWING_ACCOUNT_ID } : {}),
