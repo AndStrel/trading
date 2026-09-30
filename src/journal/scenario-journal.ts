@@ -5,6 +5,9 @@ import { DatabaseSync } from 'node:sqlite';
 import type { ExecutionMode, Strategy } from '../config.js';
 import { riskBudgetFits } from '../execution/live-pilot-risk.js';
 import { assertSnapshotProgress, type SandboxOrderSnapshot } from '../execution/sandbox-order-state.js';
+import { decimalPriceNano, type SandboxStopIntent, type SandboxStopObservation } from '../execution/sandbox-stop-state.js';
+
+export type NativeStopRecord = { intent: SandboxStopIntent; observation: SandboxStopObservation | null };
 
 export type JournalScenarioInput = {
   observedAt: string;
@@ -267,6 +270,14 @@ const schema = `
     execution_order_id INTEGER PRIMARY KEY REFERENCES execution_orders(id),
     lots_executed INTEGER NOT NULL CHECK(lots_executed >= 0),
     snapshot_json TEXT,
+    updated_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS native_stop_intents (
+    scenario_id INTEGER PRIMARY KEY REFERENCES scenario_journal(id),
+    request_id TEXT NOT NULL UNIQUE,
+    intent_json TEXT NOT NULL,
+    observation_json TEXT,
     updated_at TEXT NOT NULL
   ) STRICT;
 `;
@@ -802,6 +813,89 @@ export class ScenarioJournal {
         { snapshot: string | null } | undefined;
       return row?.snapshot ? JSON.parse(row.snapshot) as SandboxOrderSnapshot : null;
     } finally { database.close(); }
+  }
+
+  getNativeStop(scenarioId: number): NativeStopRecord | null {
+    const db = this.open();
+    try {
+      const row = db.prepare('SELECT intent_json, observation_json FROM native_stop_intents WHERE scenario_id = ?').get(scenarioId) as
+        { intent_json: string; observation_json: string | null } | undefined;
+      return row ? { intent: JSON.parse(row.intent_json) as SandboxStopIntent,
+        observation: row.observation_json ? JSON.parse(row.observation_json) as SandboxStopObservation : null } : null;
+    } finally { db.close(); }
+  }
+
+  claimNativeStop(intent: SandboxStopIntent): { claimed: boolean; record: NativeStopRecord } {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const prior = db.prepare('SELECT intent_json, observation_json FROM native_stop_intents WHERE scenario_id = ?').get(intent.scenarioId) as
+        { intent_json: string; observation_json: string | null } | undefined;
+      if (prior) {
+        const persisted = JSON.parse(prior.intent_json) as SandboxStopIntent;
+        if (persisted.accountId !== intent.accountId || persisted.instrumentId !== intent.instrumentId
+          || persisted.entryRequestId !== intent.entryRequestId || persisted.lots !== intent.lots
+          || persisted.stopNano !== intent.stopNano || persisted.limitNano !== intent.limitNano) throw new Error('Stop intent contradicts earlier evidence');
+        db.exec('COMMIT');
+        return { claimed: false, record: { intent: persisted,
+          observation: prior.observation_json ? JSON.parse(prior.observation_json) as SandboxStopObservation : null } };
+      }
+      const row = db.prepare(`SELECT o.*, s.stop_price AS planned_stop FROM execution_orders o
+        JOIN scenario_journal s ON s.id = o.scenario_id WHERE o.scenario_id = ?`).get(intent.scenarioId) as
+        (ExecutionOrderRow & { planned_stop: number }) | undefined;
+      const evidence = db.prepare(`SELECT e.snapshot_json FROM execution_evidence e
+        JOIN execution_orders o ON o.id = e.execution_order_id WHERE o.scenario_id = ?`).get(intent.scenarioId) as
+        { snapshot_json: string | null } | undefined;
+      const snapshot = evidence?.snapshot_json ? JSON.parse(evidence.snapshot_json) as SandboxOrderSnapshot : null;
+      if (!row || row.mode !== 'sandbox' || row.side !== 'long' || row.status !== 'accepted' || !row.approved_by_chat_id
+        || !snapshot?.terminal || snapshot.lotsExecuted <= 0 || snapshot.lotsExecuted !== intent.lots
+        || row.instrument_id !== intent.instrumentId || row.order_request_id !== intent.entryRequestId
+        || intent.brokerStopId !== null || intent.stopNano !== decimalPriceNano(row.planned_stop)
+        || intent.limitNano !== intent.stopNano) throw new Error('Stop requires confirmed terminal fills for an approved sandbox entry');
+      db.prepare('INSERT INTO native_stop_intents (scenario_id, request_id, intent_json, updated_at) VALUES (?, ?, ?, ?)')
+        .run(intent.scenarioId, intent.requestId, JSON.stringify(intent), intent.createdAt);
+      this.appendExecutionEvent(db, Number(row.id), 'native_stop_claimed', { requestId: intent.requestId, lots: intent.lots }, intent.createdAt);
+      db.exec('COMMIT'); return { claimed: true, record: { intent, observation: null } };
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+    finally { db.close(); }
+  }
+
+  acknowledgeNativeStop(scenarioId: number, requestId: string, brokerStopId: string): void {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const row = db.prepare('SELECT intent_json FROM native_stop_intents WHERE scenario_id = ?').get(scenarioId) as { intent_json: string } | undefined;
+      if (!row) throw new Error('Stop intent was not found');
+      const intent = JSON.parse(row.intent_json) as SandboxStopIntent;
+      if (intent.requestId !== requestId || intent.brokerStopId !== null || !brokerStopId || brokerStopId.length > 256
+        || /[\u0000-\u001f\u007f]/.test(brokerStopId)) throw new Error('Stop acknowledgement contradicts earlier evidence');
+      intent.brokerStopId = brokerStopId;
+      db.prepare('UPDATE native_stop_intents SET intent_json = ?, updated_at = ? WHERE scenario_id = ?')
+        .run(JSON.stringify(intent), new Date().toISOString(), scenarioId);
+      const entry = db.prepare('SELECT id FROM execution_orders WHERE scenario_id = ?').get(scenarioId) as { id: number };
+      this.appendExecutionEvent(db, entry.id, 'native_stop_acknowledged', { requestId, brokerStopId });
+      db.exec('COMMIT');
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+    finally { db.close(); }
+  }
+
+  observeNativeStop(scenarioId: number, observation: SandboxStopObservation): void {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const row = db.prepare('SELECT intent_json, observation_json FROM native_stop_intents WHERE scenario_id = ?').get(scenarioId) as
+        { intent_json: string; observation_json: string | null } | undefined;
+      if (!row || !(JSON.parse(row.intent_json) as SandboxStopIntent).brokerStopId) throw new Error('Stop acknowledgement is missing');
+      const prior = row.observation_json ? JSON.parse(row.observation_json) as SandboxStopObservation : null;
+      if (prior && ((prior.status !== 'STOP_ORDER_STATUS_ACTIVE' && observation.status !== prior.status)
+        || (prior.childOrderId && prior.childOrderId !== observation.childOrderId))) throw new Error('Stop observation contradicts earlier evidence');
+      db.prepare('UPDATE native_stop_intents SET observation_json = ?, updated_at = ? WHERE scenario_id = ?')
+        .run(JSON.stringify(observation), new Date().toISOString(), scenarioId);
+      const entry = db.prepare('SELECT id FROM execution_orders WHERE scenario_id = ?').get(scenarioId) as { id: number };
+      this.appendExecutionEvent(db, entry.id, 'native_stop_observed', observation);
+      db.exec('COMMIT');
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+    finally { db.close(); }
   }
 
   recordExecutionReconciliation(scenarioId: number, snapshot: SandboxOrderSnapshot): ExecutionOrderRecord {
