@@ -1,6 +1,8 @@
 import { numberToQuotation } from '../domain/money.js';
 import { postWithSystemCurl, type TInvestTransport } from '../tbank/client.js';
 
+export const liveProductionEndpoint = 'https://invest-public-api.tbank.ru/rest';
+
 // An intentionally read-only preparation surface using a SEPARATE live token.
 // No generic public request, PostOrder, cancel, stop creation or account funding.
 export class LivePreflightClient {
