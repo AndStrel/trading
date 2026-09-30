@@ -7,6 +7,8 @@ import { riskBudgetFits } from '../execution/live-pilot-risk.js';
 import { assertSnapshotProgress, type SandboxOrderSnapshot } from '../execution/sandbox-order-state.js';
 import { decimalPriceNano, type SandboxStopIntent, type SandboxStopObservation } from '../execution/sandbox-stop-state.js';
 import { analyzeSandboxRoundTrip } from '../execution/sandbox-round-trip.js';
+import { randomUUID } from 'node:crypto';
+import { moscowLossDay, type SandboxLossAssessment, type SandboxLossProof } from '../execution/sandbox-loss-policy.js';
 
 export type NativeStopRecord = { intent: SandboxStopIntent; observation: SandboxStopObservation | null };
 export type SandboxExitEvidence = { snapshot: SandboxOrderSnapshot; flatConfirmedAt: string | null; observedAt: string };
@@ -724,6 +726,7 @@ export class ScenarioJournal {
 
   claimExecution(scenarioId: number, chatId: string, limits?: {
     from: string; to: string; now: string; maxOrders: number; maxRiskRub: number; singlePosition?: boolean;
+    lossGuard?: { proofId: string; accountId: string; maxDailyLossRub: number; maxTradeLossRub: number };
   }): ExecutionOrderRecord {
     const database = this.open();
     try {
@@ -738,6 +741,7 @@ export class ScenarioJournal {
           const killed = database.prepare('SELECT value FROM runtime_state WHERE key = ?')
             .get('execution.kill_switch') as { value: string } | undefined;
           if (killed?.value !== 'false') throw new Error('Execution kill switch is active');
+          if (limits.lossGuard) this.assertLossProof(database, row, limits.now, limits.lossGuard);
           if (limits.singlePosition && database.prepare(
             "SELECT id FROM execution_orders WHERE status IN ('submitting', 'accepted') LIMIT 1",
           ).get()) throw new Error('Pilot already has an unresolved order or open position');
@@ -756,6 +760,7 @@ export class ScenarioJournal {
           )
           .run(chatId, now, row.id);
         this.appendExecutionEvent(database, Number(row.id), 'approved', { chatId }, now);
+        this.bumpSandboxRevision(database);
       } else {
         throw new Error(`Execution order is already ${row.status}`);
       }
@@ -864,6 +869,7 @@ export class ScenarioJournal {
       db.prepare('INSERT INTO native_stop_intents (scenario_id, request_id, intent_json, updated_at) VALUES (?, ?, ?, ?)')
         .run(intent.scenarioId, intent.requestId, JSON.stringify(intent), intent.createdAt);
       this.appendExecutionEvent(db, Number(row.id), 'native_stop_claimed', { requestId: intent.requestId, lots: intent.lots }, intent.createdAt);
+      this.bumpSandboxRevision(db);
       db.exec('COMMIT'); return { claimed: true, record: { intent, observation: null } };
     } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
     finally { db.close(); }
@@ -883,6 +889,7 @@ export class ScenarioJournal {
         .run(JSON.stringify(intent), new Date().toISOString(), scenarioId);
       const entry = db.prepare('SELECT id FROM execution_orders WHERE scenario_id = ?').get(scenarioId) as { id: number };
       this.appendExecutionEvent(db, entry.id, 'native_stop_acknowledged', { requestId, brokerStopId });
+      this.bumpSandboxRevision(db);
       db.exec('COMMIT');
     } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
     finally { db.close(); }
@@ -902,6 +909,7 @@ export class ScenarioJournal {
         .run(JSON.stringify(observation), new Date().toISOString(), scenarioId);
       const entry = db.prepare('SELECT id FROM execution_orders WHERE scenario_id = ?').get(scenarioId) as { id: number };
       this.appendExecutionEvent(db, entry.id, 'native_stop_observed', observation);
+      if (!prior || JSON.stringify(prior) !== JSON.stringify(observation)) this.bumpSandboxRevision(db);
       db.exec('COMMIT');
     } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
     finally { db.close(); }
@@ -936,7 +944,8 @@ export class ScenarioJournal {
       const result = analyzeSandboxRoundTrip(entry, exit, row.lot_size);
       if (flatConfirmedAt !== null && (!result.fullySold || !Number.isFinite(Date.parse(flatConfirmedAt))
         || Date.parse(flatConfirmedAt) < Date.parse(result.closedAt!) || Date.parse(flatConfirmedAt) > now.getTime() + 60_000)) throw new Error();
-      const prior = db.prepare('SELECT snapshot_json FROM sandbox_exit_evidence WHERE scenario_id = ?').get(scenarioId) as { snapshot_json: string } | undefined;
+      const prior = db.prepare('SELECT snapshot_json, flat_confirmed_at FROM sandbox_exit_evidence WHERE scenario_id = ?').get(scenarioId) as
+        { snapshot_json: string; flat_confirmed_at: string | null } | undefined;
       if (prior) assertSnapshotProgress(JSON.parse(prior.snapshot_json) as SandboxOrderSnapshot, exit);
       const serialized = JSON.stringify(exit);
       db.prepare(`INSERT INTO sandbox_exit_evidence (scenario_id, snapshot_json, flat_confirmed_at, observed_at) VALUES (?, ?, ?, ?)
@@ -945,6 +954,7 @@ export class ScenarioJournal {
       if (!prior || prior.snapshot_json !== serialized) this.appendExecutionEvent(db, row.id, 'sandbox_exit_reconciled', {
         executionStatus: exit.executionStatus, lotsExecuted: exit.lotsExecuted, grossNano: exit.grossNano, commissionNano: exit.commissionNano,
       }, now.toISOString());
+      if (!prior || prior.snapshot_json !== serialized || (prior.flat_confirmed_at === null) !== (flatConfirmedAt === null)) this.bumpSandboxRevision(db);
       db.exec('COMMIT');
       return { ...result, flatConfirmedAt, observedAt: now.toISOString(), complete: result.fullySold && result.netPnlNano !== null && flatConfirmedAt !== null };
     } catch { try { db.exec('ROLLBACK'); } catch {} throw new Error('Sandbox exit contradicts the approved stop or earlier evidence'); }
@@ -999,6 +1009,7 @@ export class ScenarioJournal {
         executionStatus: snapshot.executionStatus, lotsExecuted: snapshot.lotsExecuted,
         grossNano: snapshot.grossNano, commissionNano: snapshot.commissionNano,
       }, now);
+      if (!evidence || evidence.snapshot_json !== JSON.stringify(snapshot) || row.status !== status) this.bumpSandboxRevision(database);
       database.exec('COMMIT');
       return this.toExecutionOrder(database.prepare('SELECT * FROM execution_orders WHERE id = ?').get(row.id) as ExecutionOrderRow);
     } catch (error: unknown) {
@@ -1014,6 +1025,7 @@ export class ScenarioJournal {
   recordExecutionUncertain(scenarioId: number, detail: string): void {
     const database = this.open();
     try {
+      database.exec('BEGIN IMMEDIATE');
       const row = database
         .prepare('SELECT id FROM execution_orders WHERE scenario_id = ?')
         .get(scenarioId) as { id: number | bigint } | undefined;
@@ -1021,6 +1033,11 @@ export class ScenarioJournal {
       this.appendExecutionEvent(database, Number(row.id), 'submission_uncertain', {
         detail: detail.slice(0, 500),
       });
+      this.bumpSandboxRevision(database);
+      database.exec('COMMIT');
+    } catch (error) {
+      try { database.exec('ROLLBACK'); } catch {}
+      throw error;
     } finally {
       database.close();
     }
@@ -1047,6 +1064,94 @@ export class ScenarioJournal {
       WHERE e.approved_at >= ? AND e.approved_at < ? AND o.status IN ('submitting', 'accepted')`)
       .all(from, to) as Array<{ risk: number }>;
     return rows.map(row => row.risk);
+  }
+
+  private bumpSandboxRevision(db: DatabaseSync): void {
+    db.prepare(`INSERT INTO runtime_state (key, value, updated_at) VALUES ('execution.sandbox_ledger_revision', '1', ?)
+      ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT), updated_at=excluded.updated_at`).run(new Date().toISOString());
+  }
+
+  private sandboxRevision(db: DatabaseSync): string {
+    const row = db.prepare("SELECT value FROM runtime_state WHERE key='execution.sandbox_ledger_revision'").get() as { value: string } | undefined;
+    return row?.value ?? '0';
+  }
+
+  getSandboxLossLedger(limit = 50) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('Invalid sandbox loss-ledger bound');
+    const db = this.open();
+    try {
+      db.exec('BEGIN'); const revision = this.sandboxRevision(db);
+      const rows = db.prepare(`SELECT o.scenario_id, o.status, o.side, o.approved_by_chat_id, o.order_request_id, o.instrument_id, o.lots,
+        s.lot_size, s.slippage_rate, e.snapshot_json AS entry_json, x.snapshot_json AS exit_json, x.flat_confirmed_at, x.observed_at,
+        n.intent_json, n.observation_json FROM execution_orders o JOIN scenario_journal s ON s.id=o.scenario_id
+        LEFT JOIN execution_evidence e ON e.execution_order_id=o.id LEFT JOIN sandbox_exit_evidence x ON x.scenario_id=o.scenario_id
+        LEFT JOIN native_stop_intents n ON n.scenario_id=o.scenario_id
+        WHERE o.mode='sandbox' AND o.status IN ('accepted','submitting') ORDER BY o.id LIMIT ?`).all(limit + 1) as
+        Array<{ scenario_id: number; status: 'accepted' | 'submitting'; side: 'long' | 'short'; approved_by_chat_id: string | null;
+          order_request_id: string; instrument_id: string; lots: number; lot_size: number; slippage_rate: number;
+          entry_json: string | null; exit_json: string | null; flat_confirmed_at: string | null; observed_at: string | null;
+          intent_json: string | null; observation_json: string | null }>;
+      const orders = rows.slice(0, limit).map(row => ({ scenarioId: row.scenario_id, status: row.status, side: row.side,
+        approved: Boolean(row.approved_by_chat_id), requestId: row.order_request_id, instrumentId: row.instrument_id,
+        lots: row.lots, lotSize: row.lot_size, slippageRate: row.slippage_rate,
+        entry: row.entry_json ? JSON.parse(row.entry_json) as SandboxOrderSnapshot : null,
+        exit: row.exit_json ? { snapshot: JSON.parse(row.exit_json) as SandboxOrderSnapshot, flatConfirmedAt: row.flat_confirmed_at,
+          observedAt: row.observed_at! } : null,
+        native: row.intent_json ? { intent: JSON.parse(row.intent_json) as SandboxStopIntent,
+          observation: row.observation_json ? JSON.parse(row.observation_json) as SandboxStopObservation : null } : null }));
+      db.exec('COMMIT'); return { revision, orders, morePending: rows.length > limit };
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  getSandboxLossProof(): SandboxLossProof | null {
+    try {
+      const raw = this.getRuntimeState('execution.sandbox_loss_guard'); return raw ? JSON.parse(raw) as SandboxLossProof : null;
+    } catch { return null; }
+  }
+
+  getSandboxLossProofState(): { proof: SandboxLossProof | null; current: boolean } {
+    const db = this.open();
+    try {
+      // One SQL read snapshot: a stale proof cannot look current after a newer
+      // fill or fee invalidated its ledger revision.
+      const rows = db.prepare("SELECT key,value FROM runtime_state WHERE key IN ('execution.sandbox_loss_guard','execution.sandbox_ledger_revision')")
+        .all() as Array<{ key: string; value: string }>;
+      const raw = rows.find(row => row.key === 'execution.sandbox_loss_guard')?.value;
+      const proof = raw ? JSON.parse(raw) as SandboxLossProof : null;
+      return { proof, current: Boolean(proof && proof.ledgerRevision === (rows.find(row => row.key === 'execution.sandbox_ledger_revision')?.value ?? '0')) };
+    } catch { return { proof: null, current: false }; } finally { db.close(); }
+  }
+
+  recordSandboxLossAssessment(accountId: string, revision: string, assessment: SandboxLossAssessment): SandboxLossProof {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      if (revision !== this.sandboxRevision(db)) throw new Error('Sandbox loss assessment raced newer execution evidence');
+      const proof: SandboxLossProof = { ...assessment, accountId, ledgerRevision: revision, proofId: randomUUID() };
+      db.prepare(`INSERT INTO runtime_state (key, value, updated_at) VALUES ('execution.sandbox_loss_guard', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).run(JSON.stringify(proof), assessment.checkedAt);
+      if (proof.status !== 'ok') db.prepare(`INSERT INTO runtime_state (key,value,updated_at) VALUES ('execution.kill_switch','true',?)
+        ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at`).run(assessment.checkedAt);
+      db.exec('COMMIT'); return proof;
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  private assertLossProof(db: DatabaseSync, order: ExecutionOrderRow, now: string,
+    expected: { proofId: string; accountId: string; maxDailyLossRub: number; maxTradeLossRub: number }): void {
+    try {
+      const row = db.prepare("SELECT value FROM runtime_state WHERE key='execution.sandbox_loss_guard'").get() as { value: string } | undefined;
+      const proof = row ? JSON.parse(row.value) as SandboxLossProof : null;
+      const date = new Date(now); const age = date.getTime() - Date.parse(proof?.checkedAt ?? '');
+      if (order.mode !== 'sandbox' || !proof || proof.status !== 'ok' || proof.proofId !== expected.proofId || proof.accountId !== expected.accountId
+        || proof.ledgerRevision !== this.sandboxRevision(db) || proof.day !== moscowLossDay(date) || !Number.isFinite(age) || age < 0 || age > 30_000
+        || proof.day !== moscowLossDay(new Date(proof.checkedAt))
+        || !proof.closedLossNano || !proof.openLossNano || !proof.maxTradeLossNano
+        || [proof.closedLossNano, proof.openLossNano, proof.maxTradeLossNano].some(amount => !/^\d{1,40}$/.test(amount))
+        || expected.maxDailyLossRub <= 0 || expected.maxDailyLossRub > 60 || expected.maxTradeLossRub <= 0 || expected.maxTradeLossRub > 20) throw new Error();
+      const loss = BigInt(proof.closedLossNano) + BigInt(proof.openLossNano);
+      if (loss >= BigInt(decimalPriceNano(expected.maxDailyLossRub)) || BigInt(proof.maxTradeLossNano) >= BigInt(decimalPriceNano(expected.maxTradeLossRub))
+        || loss + BigInt(decimalPriceNano(order.estimated_risk_rub)) > BigInt(decimalPriceNano(expected.maxDailyLossRub))) throw new Error();
+    } catch { throw new Error('Fresh sandbox loss proof or remaining daily loss allowance is not confirmed'); }
   }
 
   isExecutionKilled(): boolean {
@@ -1090,6 +1195,7 @@ export class ScenarioJournal {
         brokerOrderId,
         detail: detail.slice(0, 500),
       });
+      this.bumpSandboxRevision(database);
       database.exec('COMMIT');
 
       const finished = database.prepare('SELECT * FROM execution_orders WHERE id = ?').get(row.id) as ExecutionOrderRow;
