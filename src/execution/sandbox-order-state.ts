@@ -93,7 +93,7 @@ export function parseSandboxOrderState(payload: unknown, expected: {
 export function assertSnapshotProgress(previous: SandboxOrderSnapshot, next: SandboxOrderSnapshot): void {
   if (previous.brokerOrderId !== next.brokerOrderId || previous.lotsExecuted > next.lotsExecuted
     || BigInt(previous.grossNano) > BigInt(next.grossNano)
-    || (previous.terminal && previous.executionStatus !== next.executionStatus)
+    || (previous.terminal && (previous.executionStatus !== next.executionStatus || previous.lotsExecuted !== next.lotsExecuted))
     || (previous.commissionNano !== null
       && (next.commissionNano === null || BigInt(next.commissionNano) < BigInt(previous.commissionNano)))) {
     throw new Error('Sandbox reconciliation contradicts earlier execution evidence');

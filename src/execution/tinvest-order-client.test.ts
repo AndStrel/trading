@@ -13,6 +13,39 @@ const input = {
 };
 
 describe('TInvestOrderClient', () => {
+  const stopInput = { mode: 'sandbox' as const, accountId: 'local-account', instrumentId: 'local-instrument',
+    requestId: input.orderRequestId, lots: 3, stopNano: '9900000001', limitNano: '9900000001' };
+  it('posts exactly one non-margin sandbox SELL stop-limit with a durable request UUID', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ stopOrderId: 'local-stop', orderRequestId: stopInput.requestId })));
+    const client = new TInvestOrderClient('isolated-token', 'https://example.test/rest', fetcher);
+    expect(await client.postSandboxStopLimit(stopInput)).toBe('local-stop');
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls[0]?.[0]).toBe('https://example.test/rest/tinkoff.public.invest.api.contract.v1.SandboxService/PostSandboxStopOrder');
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({ accountId: 'local-account', instrumentId: 'local-instrument',
+      quantity: '3', stopPrice: { units: '9', nano: 900000001 }, price: { units: '9', nano: 900000001 },
+      direction: 'STOP_ORDER_DIRECTION_SELL', stopOrderType: 'STOP_ORDER_TYPE_STOP_LIMIT',
+      expirationType: 'STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL', exchangeOrderType: 'EXCHANGE_ORDER_TYPE_LIMIT',
+      priceType: 'PRICE_TYPE_CURRENCY', orderId: stopInput.requestId, confirmMarginTrade: false });
+  });
+  it.each([{ mode: 'live' }, { lots: 0 }, { lots: 1.5 }, { lots: 1000001 }, { requestId: 'not-a-uuid' }])
+    ('rejects invalid stop before network: %j', async changes => {
+      const fetcher = vi.fn<typeof fetch>(); const client = new TInvestOrderClient('isolated-token', 'https://example.test/rest', fetcher);
+      await expect(client.postSandboxStopLimit({ ...stopInput, ...changes } as typeof stopInput)).rejects.toThrow();
+      expect(fetcher).not.toHaveBeenCalled();
+    });
+  it.each([{}, { stopOrderId: 'local-stop', orderRequestId: 'foreign' }, { stopOrderId: 'bad\nID', orderRequestId: input.orderRequestId }])
+    ('keeps an incomplete stop response uncertain and never retries: %j', async payload => {
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(payload)));
+      await expect(new TInvestOrderClient('isolated-token', 'https://example.test/rest', fetcher).postSandboxStopLimit(stopInput))
+        .rejects.toMatchObject({ outcomeUncertain: true });
+      expect(fetcher).toHaveBeenCalledOnce();
+    });
+  it('reads ALL sandbox stops without writing or switching endpoints', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response('{}'));
+    await new TInvestOrderClient('isolated-token', 'https://example.test/rest', fetcher).getSandboxStopOrders('local-account');
+    expect(fetcher.mock.calls[0]?.[0]).toContain('SandboxService/GetSandboxStopOrders');
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({ accountId: 'local-account', status: 'STOP_ORDER_STATUS_ALL' });
+  });
   it.each([{}, { accounts: [{}] }])('does not interpret an incomplete account response as no accounts: %j', payload => {
     const client = new TInvestOrderClient('local-secret', 'https://example.test/rest',
       vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(payload))));

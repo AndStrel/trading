@@ -11,6 +11,7 @@ import type { TInvestClient } from '../tbank/client.js';
 import { TInvestOrderClient, TInvestOrderError } from './tinvest-order-client.js';
 import { assessLivePilotRisk } from './live-pilot-risk.js';
 import { parseSandboxOrderState } from './sandbox-order-state.js';
+import type { SandboxProtectionService } from './sandbox-protection-service.js';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -93,6 +94,7 @@ export class ExecutionService {
       'postLimitOrder' | 'getSandboxAccounts' | 'openSandboxAccount' | 'sandboxPayIn' | 'getSandboxOrderState'
     >,
     private readonly journal: ScenarioJournal,
+    private readonly protection?: Pick<SandboxProtectionService, 'protect' | 'preflightForEntry'>,
   ) {
     this.accountId =
       config.execution.accountId ?? journal.getRuntimeState('execution.sandbox_account_id') ?? undefined;
@@ -209,6 +211,10 @@ export class ExecutionService {
     }
 
     await this.validateCurrentMarket(scenario, plan.lots);
+    if (this.config.execution.sandboxProtectionEnabled) {
+      if (!this.protection) throw new Error('Sandbox protective module is not connected; no entry was sent');
+      await this.protection.preflightForEntry(this.accountId!, scenario, plan.lots);
+    }
     if (this.isKilled()) throw new Error('Execution kill switch is active');
     const claimed = this.journal.claimExecution(scenarioId, chatId, {
       ...day, now: now.toISOString(), maxOrders: this.config.execution.maxOrdersPerDay,
@@ -262,6 +268,9 @@ export class ExecutionService {
       `${response.executionStatus}; lots ${response.lotsExecuted}/${response.lotsRequested}`,
       response.lotsExecuted,
     );
+    if (this.config.execution.sandboxProtectionEnabled && response.lotsExecuted > 0) {
+      await this.protection!.protect(this.accountId!, scenarioId, now);
+    }
     return { order: accepted, executionStatus: response.executionStatus, lotsExecuted: response.lotsExecuted };
   }
 
@@ -276,6 +285,22 @@ export class ExecutionService {
       catch { unconfirmed++; }
     }
     return { attempted: confirmed + unconfirmed, confirmed, unconfirmed, morePending: orders.length > limit };
+  }
+
+  async protectOutstanding(now = new Date()) {
+    if (!this.isReady() || !this.config.execution.sandboxProtectionEnabled || !this.protection) throw new Error('Sandbox protection is not configured');
+    const orders = this.journal.listRecoverableExecutionOrders(21);
+    const result = { active: 0, triggered: 0, unconfirmed: 0, morePending: orders.length > 20 };
+    for (const order of orders.slice(0, 20)) {
+      if (order.status !== 'accepted') { result.unconfirmed++; continue; }
+      try {
+        const observed = await this.protection.protect(this.accountId!, order.scenarioId, now);
+        if (observed.status === 'STOP_ORDER_STATUS_ACTIVE') result.active++;
+        else if (observed.status === 'STOP_ORDER_STATUS_EXECUTED') result.triggered++;
+        else result.unconfirmed++;
+      } catch { result.unconfirmed++; }
+    }
+    return result;
   }
 
   async reconcileScenario(scenarioId: number, now = new Date()): Promise<ExecutionSubmitResult> {

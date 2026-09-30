@@ -1,6 +1,7 @@
 import type { ExecutionMode } from '../config.js';
 import { numberToQuotation } from '../domain/money.js';
 import { postWithSystemCurl, type CurlPost, type TInvestTransport } from '../tbank/client.js';
+import { nanoQuotation } from './sandbox-stop-state.js';
 
 type FetchLike = typeof fetch;
 
@@ -117,6 +118,39 @@ export class TInvestOrderClient {
     return this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxOrderState', {
       accountId, orderId: orderRequestId, orderIdType: 'ORDER_ID_TYPE_REQUEST', priceType: 'PRICE_TYPE_CURRENCY',
     }, false);
+  }
+
+  getSandboxPositions(accountId: string): Promise<unknown> {
+    return this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxPositions', { accountId }, false);
+  }
+
+  getSandboxOrders(accountId: string): Promise<unknown> {
+    return this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxOrders', { accountId }, false);
+  }
+
+  getSandboxStopOrders(accountId: string): Promise<unknown> {
+    return this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxStopOrders',
+      { accountId, status: 'STOP_ORDER_STATUS_ALL' }, false);
+  }
+
+  async postSandboxStopLimit(input: { mode: 'sandbox'; accountId: string; instrumentId: string;
+    requestId: string; lots: number; stopNano: string; limitNano: string }): Promise<string> {
+    if (input.mode !== 'sandbox' || !Number.isSafeInteger(input.lots) || input.lots <= 0 || input.lots > 1_000_000
+      || !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(input.requestId)) {
+      throw new TInvestOrderError('Invalid sandbox stop intent', false);
+    }
+    const result = asRecord(await this.request('tinkoff.public.invest.api.contract.v1.SandboxService/PostSandboxStopOrder', {
+      accountId: input.accountId, instrumentId: input.instrumentId, quantity: String(input.lots),
+      stopPrice: nanoQuotation(input.stopNano), price: nanoQuotation(input.limitNano),
+      direction: 'STOP_ORDER_DIRECTION_SELL', stopOrderType: 'STOP_ORDER_TYPE_STOP_LIMIT',
+      expirationType: 'STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL', exchangeOrderType: 'EXCHANGE_ORDER_TYPE_LIMIT',
+      priceType: 'PRICE_TYPE_CURRENCY', orderId: input.requestId, confirmMarginTrade: false,
+    }, true));
+    const brokerId = asString(result?.stopOrderId);
+    if (!brokerId || brokerId.length > 256 || /[\u0000-\u001f\u007f]/.test(brokerId) || result?.orderRequestId !== input.requestId) {
+      throw new TInvestOrderError('Sandbox stop response does not confirm the request', true);
+    }
+    return brokerId;
   }
 
   async openSandboxAccount(name: string): Promise<string> {

@@ -10,6 +10,7 @@ import { TelegramTradingBot } from './telegram/bot.js';
 import { TInvestClient } from './tbank/client.js';
 import { createMiniAppServer } from './web/mini-app-server.js';
 import { buildMiniAppView } from './web/mini-app-view.js';
+import { SandboxProtectionService } from './execution/sandbox-protection-service.js';
 
 const config = loadConfig();
 if (!config.telegram.token) {
@@ -18,11 +19,14 @@ if (!config.telegram.token) {
 
 const journal = new ScenarioJournal(config.journalPath);
 const tInvestClient = new TInvestClient(config.token, config.baseUrl, { transport: config.transport });
+const orderClient = new TInvestOrderClient(config.execution.token, config.baseUrl, undefined, { transport: config.transport });
+const protection = config.execution.sandboxProtectionEnabled ? new SandboxProtectionService(config, orderClient, journal) : undefined;
 const execution = new ExecutionService(
   config,
   tInvestClient,
-  new TInvestOrderClient(config.execution.token, config.baseUrl, undefined, { transport: config.transport }),
+  orderClient,
   journal,
+  protection,
 );
 const scanner = new IntradayScanner(config, tInvestClient, journal);
 const telegram = new TelegramTradingBot(
@@ -69,5 +73,17 @@ if (config.telegram.miniApp.enabled) {
     server.listen(config.telegram.miniApp.port, config.telegram.miniApp.host, resolve);
   });
   process.stdout.write(JSON.stringify({ event: 'mini-app-listening', liveSubmissionAllowed: false }) + '\n');
+}
+if (config.execution.sandboxProtectionEnabled && config.execution.mode === 'sandbox') {
+  const monitor = async () => {
+    try {
+      if (execution.isReady()) {
+        const status = await execution.protectOutstanding();
+        process.stdout.write(JSON.stringify({ event: 'sandbox-native-stop-monitor', ...status, liveSubmissionAllowed: false }) + '\n');
+      }
+    } catch { process.stdout.write(JSON.stringify({ event: 'sandbox-native-stop-monitor-failed', liveSubmissionAllowed: false }) + '\n'); }
+    setTimeout(() => { void monitor(); }, 30_000);
+  };
+  void monitor();
 }
 await telegram.start();

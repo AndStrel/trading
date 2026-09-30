@@ -55,4 +55,8 @@ describe('Sandbox order evidence', () => {
     expect(() => assertSnapshotProgress(prior, { ...prior, stages: [{ ...prior.stages[0]!, priceNano: '100' }] })).toThrow('contradicts');
     expect(() => assertSnapshotProgress(prior, prior)).not.toThrow();
   });
+  it('rejects increased fills after terminal cancellation even if status is unchanged', () => {
+    const prior = parseSandboxOrderState(payload({ executionReportStatus: 'EXECUTION_REPORT_STATUS_CANCELLED' }), expected, now);
+    expect(() => assertSnapshotProgress(prior, { ...prior, lotsExecuted: 4 })).toThrow('contradicts');
+  });
 });
