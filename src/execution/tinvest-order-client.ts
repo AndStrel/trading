@@ -159,6 +159,38 @@ export class TInvestOrderClient {
     return brokerId;
   }
 
+  async cancelSandboxStop(input: { mode: 'sandbox'; accountId: string; stopId: string }): Promise<void> {
+    if (input.mode !== 'sandbox' || !input.accountId || !input.stopId || input.stopId.length > 256
+      || /[\u0000-\u001f\u007f]/.test(input.stopId)) throw new TInvestOrderError('Invalid sandbox stop cancellation', false);
+    const result = asRecord(await this.request('tinkoff.public.invest.api.contract.v1.SandboxService/CancelSandboxStopOrder',
+      { accountId: input.accountId, stopOrderId: input.stopId }, true));
+    if (typeof result?.time !== 'string' || !Number.isFinite(Date.parse(result.time))) {
+      throw new TInvestOrderError('Sandbox stop cancellation was not acknowledged', true);
+    }
+    // HTTP acknowledgement is NOT proof that a racing stop never triggered.
+    // The caller must read the exact stop and account state before any SELL.
+  }
+
+  async postSandboxSessionExit(input: { mode: 'sandbox'; accountId: string; instrumentId: string;
+    requestId: string; lots: number; limitNano: string }): Promise<string> {
+    if (input.mode !== 'sandbox' || !input.accountId || !input.instrumentId || !Number.isSafeInteger(input.lots)
+      || input.lots <= 0 || input.lots > 1_000_000 || !/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(input.requestId)) {
+      throw new TInvestOrderError('Invalid sandbox session exit', false);
+    }
+    const result = asRecord(await this.request('tinkoff.public.invest.api.contract.v1.SandboxService/PostSandboxOrder', {
+      accountId: input.accountId, instrumentId: input.instrumentId, quantity: String(input.lots), price: nanoQuotation(input.limitNano),
+      direction: 'ORDER_DIRECTION_SELL', orderType: 'ORDER_TYPE_LIMIT', orderId: input.requestId,
+      timeInForce: 'TIME_IN_FORCE_FILL_OR_KILL', priceType: 'PRICE_TYPE_CURRENCY', confirmMarginTrade: false,
+    }, true));
+    const id = asString(result?.orderId);
+    if (!id || id.length > 256 || /[\u0000-\u001f\u007f]/.test(id) || result?.orderRequestId !== input.requestId
+      || result?.instrumentUid !== input.instrumentId || result?.direction !== 'ORDER_DIRECTION_SELL' || result?.orderType !== 'ORDER_TYPE_LIMIT'
+      || asInteger(result?.lotsRequested) !== input.lots || asInteger(result?.lotsExecuted) === null || asInteger(result?.lotsExecuted)! > input.lots) {
+      throw new TInvestOrderError('Sandbox session exit identity was not acknowledged', true);
+    }
+    return id;
+  }
+
   async openSandboxAccount(name: string): Promise<string> {
     const payload = asRecord(
       await this.request(

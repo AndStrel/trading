@@ -15,6 +15,10 @@ import type { SandboxProtectionService } from './sandbox-protection-service.js';
 import type { SandboxExitService } from './sandbox-exit-service.js';
 import type { SandboxLossGuard } from './sandbox-loss-guard.js';
 import { sandboxBidValue } from './sandbox-loss-policy.js';
+import type { SandboxSessionClose } from './sandbox-session-close.js';
+import { sandboxSessionEntryAllowed } from './sandbox-session-policy.js';
+import { decimalPriceNano } from './sandbox-stop-state.js';
+import { assertSandboxInstrument } from './sandbox-instrument.js';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -92,7 +96,7 @@ export class ExecutionService {
 
   constructor(
     private readonly config: AppConfig,
-    private readonly marketClient: Pick<TInvestClient, 'getOrderBook' | 'getTradingStatus'>,
+    private readonly marketClient: Pick<TInvestClient, 'getOrderBook' | 'getTradingStatus'> & Partial<Pick<TInvestClient,'getInstrumentBy'>>,
     private readonly orderClient: Pick<
       TInvestOrderClient,
       'postLimitOrder' | 'getSandboxAccounts' | 'openSandboxAccount' | 'sandboxPayIn' | 'getSandboxOrderState'
@@ -101,6 +105,7 @@ export class ExecutionService {
     private readonly protection?: Pick<SandboxProtectionService, 'protect' | 'preflightForEntry'>,
     private readonly exitReconciler?: Pick<SandboxExitService, 'reconcile'>,
     private readonly lossGuard?: Pick<SandboxLossGuard, 'assess'>,
+    private readonly sessionClose?: Pick<SandboxSessionClose, 'advance'>,
   ) {
     this.accountId =
       config.execution.accountId ?? journal.getRuntimeState('execution.sandbox_account_id') ?? undefined;
@@ -141,6 +146,7 @@ export class ExecutionService {
       throw new Error('Only recorded intraday candidates can be queued');
     }
     if (scenario.input.side !== 'long') throw new Error('Short execution is disabled');
+    this.assertSessionMetadata(scenario);
 
     const plan = this.readValidatedPlan(scenario);
     const limits = this.config.strategies.intraday;
@@ -185,6 +191,10 @@ export class ExecutionService {
       return this.reconcileScenario(scenarioId, now);
     }
     if (this.isKilled()) throw new Error('Execution kill switch is active');
+    if (this.config.execution.sandboxSessionCloseEnabled && (!this.sessionClose || !this.config.execution.sandboxProtectionEnabled
+      || !this.config.execution.sandboxLossGuardEnabled || !sandboxSessionEntryAllowed(now))) {
+      throw new Error('Sandbox session entry window or closing protection is not confirmed');
+    }
 
     const scenario = this.journal.getScenario(scenarioId);
     if (!scenario || scenario.decision !== 'candidate' || scenario.strategy !== 'intraday') {
@@ -199,6 +209,7 @@ export class ExecutionService {
 
     const plan = this.readValidatedPlan(scenario);
     this.assertStrategyLimits(plan);
+    this.assertSessionMetadata(scenario);
     const existing = this.journal.getExecutionByScenario(scenarioId) ?? this.queueScenario(scenario);
     if (!existing) throw new Error('Execution order was not queued');
     if (existing.estimatedRiskRub < plan.totalRiskRub) {
@@ -234,6 +245,9 @@ export class ExecutionService {
       if (finalAge < 0 || finalAge > this.config.execution.candidateMaxAgeMinutes * 60_000) throw new Error('Candidate expired during sandbox loss preflight');
     }
     if (this.isKilled()) throw new Error('Execution kill switch is active');
+    if (this.config.execution.sandboxSessionCloseEnabled && !sandboxSessionEntryAllowed(claimNow)) {
+      throw new Error('Sandbox entry window ended during preflight');
+    }
     const claimed = this.journal.claimExecution(scenarioId, chatId, {
       ...(lossProof ? moscowDayRange(claimNow) : day), now: claimNow.toISOString(), maxOrders: this.config.execution.maxOrdersPerDay,
       maxRiskRub: this.config.execution.maxDailyRiskRub,
@@ -307,13 +321,22 @@ export class ExecutionService {
     return { attempted: confirmed + unconfirmed, confirmed, unconfirmed, morePending: orders.length > limit };
   }
 
-  async protectOutstanding(now = new Date()) {
+  async protectOutstanding(now?: Date) {
     if (!this.isReady() || !this.config.execution.sandboxProtectionEnabled || !this.protection) throw new Error('Sandbox protection is not configured');
     const orders = this.journal.listRecoverableExecutionOrders(21);
     const result = { active: 0, triggered: 0, closed: 0, unconfirmed: 0, morePending: orders.length > 20 };
     for (const order of orders.slice(0, 20)) {
       if (order.status !== 'accepted') { result.unconfirmed++; continue; }
       try {
+        if (this.config.execution.sandboxSessionCloseEnabled && this.journal.getNativeStop(order.scenarioId)) {
+          if (!this.sessionClose) throw new Error('Sandbox session closing module is not connected');
+          const closed = await this.sessionClose.advance(this.accountId!, order.scenarioId, now);
+          if (closed) {
+            if (closed.kind === 'native') result.triggered++;
+            if (closed.complete) result.closed++; else result.unconfirmed++;
+            continue;
+          }
+        }
         const observed = await this.protection.protect(this.accountId!, order.scenarioId, now);
         if (observed.status === 'STOP_ORDER_STATUS_ACTIVE') result.active++;
         else if (observed.status === 'STOP_ORDER_STATUS_EXECUTED') {
@@ -345,7 +368,7 @@ export class ExecutionService {
       const updated = this.journal.recordExecutionReconciliation(scenarioId, snapshot);
       const native = this.journal.getNativeStop(scenarioId);
       const sandboxExit = this.exitReconciler && this.config.execution.sandboxProtectionEnabled
-        && native?.observation?.status === 'STOP_ORDER_STATUS_EXECUTED'
+        && (native?.observation?.status === 'STOP_ORDER_STATUS_EXECUTED' || this.journal.getSandboxSessionExit(scenarioId)?.phase === 'submitted')
         ? await this.exitReconciler.reconcile(this.accountId!, scenarioId, now) : undefined;
       return { order: updated, executionStatus: snapshot.executionStatus, lotsExecuted: snapshot.lotsExecuted,
         ...(sandboxExit ? { sandboxExit } : {}) };
@@ -402,10 +425,15 @@ export class ExecutionService {
   }
 
   private async validateCurrentMarket(scenario: JournalScenarioRecord, lots: number): Promise<void> {
-    const [orderBookPayload, statusPayload] = await Promise.all([
+    const [orderBookPayload, statusPayload, instrumentPayload] = await Promise.all([
       this.marketClient.getOrderBook(scenario.instrumentId, 20),
       this.marketClient.getTradingStatus(scenario.instrumentId),
+      this.config.execution.sandboxSessionCloseEnabled ? this.marketClient.getInstrumentBy?.(scenario.instrumentId) : undefined,
     ]);
+    if (this.config.execution.sandboxSessionCloseEnabled) {
+      const item=this.config.scanner.intradayWatchlist.find(item=>item.instrumentId===scenario.instrumentId)!;
+      assertSandboxInstrument(instrumentPayload,{instrumentId:scenario.instrumentId,lotSize:scenario.input.lotSize,priceStep:item.priceStep},true);
+    }
     if (this.config.execution.sandboxLossGuardEnabled) {
       sandboxBidValue(orderBookPayload, statusPayload, scenario.instrumentId, lots, scenario.input.lotSize, new Date());
     }
@@ -430,6 +458,16 @@ export class ExecutionService {
     const entryDeviationPct = (Math.abs(scenario.input.entryPrice - ask.price) / ask.price) * 100;
     if (entryDeviationPct > this.config.strategies.intraday.maxEntryDeviationPct) {
       throw new Error('Current best ask moved too far from the planned entry');
+    }
+  }
+
+  private assertSessionMetadata(scenario: JournalScenarioRecord): void {
+    if (!this.config.execution.sandboxSessionCloseEnabled) return;
+    const items = this.config.scanner.intradayWatchlist.filter(item => item.instrumentId === scenario.instrumentId);
+    const item = items[0];
+    if (items.length !== 1 || !item || item.lotSize !== scenario.input.lotSize
+      || [scenario.input.entryPrice, scenario.input.stopPrice].some(price => BigInt(decimalPriceNano(price)) % BigInt(decimalPriceNano(item.priceStep)) !== 0n)) {
+      throw new Error('Configured lot size and price tick for sandbox closing are not confirmed');
     }
   }
 }

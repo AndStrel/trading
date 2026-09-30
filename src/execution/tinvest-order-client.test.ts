@@ -13,6 +13,39 @@ const input = {
 };
 
 describe('TInvestOrderClient', () => {
+  const exitInput={mode:'sandbox' as const,accountId:'local-account',instrumentId:'local-instrument',requestId:input.orderRequestId,lots:3,limitNano:'9900000001'};
+  const exitAck=()=>({orderId:'local-sell',orderRequestId:exitInput.requestId,instrumentUid:exitInput.instrumentId,direction:'ORDER_DIRECTION_SELL',
+    orderType:'ORDER_TYPE_LIMIT',executionReportStatus:'EXECUTION_REPORT_STATUS_FILL',lotsRequested:'3',lotsExecuted:'3'});
+  it('posts one exact-nano non-margin FOK sandbox session SELL and requires its request identity',async()=>{
+    const fetcher=vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(exitAck())));
+    expect(await new TInvestOrderClient('isolated','https://example.test/rest',fetcher).postSandboxSessionExit(exitInput)).toBe('local-sell');
+    expect(fetcher).toHaveBeenCalledOnce();expect(fetcher.mock.calls[0]?.[0]).toContain('SandboxService/PostSandboxOrder');
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({accountId:'local-account',instrumentId:'local-instrument',quantity:'3',
+      price:{units:'9',nano:900000001},direction:'ORDER_DIRECTION_SELL',orderType:'ORDER_TYPE_LIMIT',orderId:exitInput.requestId,
+      timeInForce:'TIME_IN_FORCE_FILL_OR_KILL',priceType:'PRICE_TYPE_CURRENCY',confirmMarginTrade:false});
+  });
+  it.each([{mode:'live'},{lots:0},{lots:1.5},{requestId:'foreign'},{limitNano:'-1'}])('rejects an invalid session SELL before network: %j',async changes=>{
+    const fetcher=vi.fn<typeof fetch>();await expect(new TInvestOrderClient('isolated','https://example.test/rest',fetcher)
+      .postSandboxSessionExit({...exitInput,...changes} as typeof exitInput)).rejects.toThrow();expect(fetcher).not.toHaveBeenCalled();
+  });
+  it.each([{orderRequestId:undefined},{instrumentUid:'other'},{direction:'ORDER_DIRECTION_BUY'},{lotsExecuted:'4'},{orderId:'bad\nID'}])
+    ('rejects a mismatched session SELL acknowledgement without retry: %j',async changes=>{
+      const fetcher=vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({...exitAck(),...changes})));
+      await expect(new TInvestOrderClient('isolated','https://example.test/rest',fetcher).postSandboxSessionExit(exitInput)).rejects.toMatchObject({outcomeUncertain:true});
+      expect(fetcher).toHaveBeenCalledOnce();
+    });
+  it('cancels only a sandbox stop once; the timestamp acknowledgement is not a sale',async()=>{
+    const fetcher=vi.fn<typeof fetch>().mockResolvedValue(new Response('{"time":"2026-10-01T15:30:00Z"}'));
+    await new TInvestOrderClient('isolated','https://example.test/rest',fetcher).cancelSandboxStop({mode:'sandbox',accountId:'local-account',stopId:'local-stop'});
+    expect(fetcher).toHaveBeenCalledOnce();expect(fetcher.mock.calls[0]?.[0]).toContain('SandboxService/CancelSandboxStopOrder');
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({accountId:'local-account',stopOrderId:'local-stop'});
+  });
+  it.each(['bad-ack','timeout','http'])('uncertain cancellation %s is never retried',async failure=>{
+    const fetcher=vi.fn<typeof fetch>();if(failure==='timeout')fetcher.mockRejectedValue(new Error('private secret'));
+    else fetcher.mockResolvedValue(new Response('{}',{status:failure==='http'?500:200}));
+    await expect(new TInvestOrderClient('isolated','https://example.test/rest',fetcher).cancelSandboxStop({mode:'sandbox',accountId:'local-account',stopId:'local-stop'}))
+      .rejects.toMatchObject({outcomeUncertain:true});expect(fetcher).toHaveBeenCalledOnce();
+  });
   const stopInput = { mode: 'sandbox' as const, accountId: 'local-account', instrumentId: 'local-instrument',
     requestId: input.orderRequestId, lots: 3, stopNano: '9900000001', limitNano: '9900000001' };
   it('posts exactly one non-margin sandbox SELL stop-limit with a durable request UUID', async () => {

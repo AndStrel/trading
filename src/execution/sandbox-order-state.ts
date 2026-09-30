@@ -58,13 +58,24 @@ export function parseSandboxExitOrderState(payload: unknown, expected: {
   return parseOrderState(payload, { ...expected, kind: 'exit' }, now);
 }
 
+// Our session exit is looked up by its durable request UUID, never by a
+// similarly priced SELL. The known exchange acknowledgement must also match.
+export function parseSandboxSessionExitOrderState(payload: unknown, expected: {
+  requestId: string; brokerOrderId: string | null; instrumentId: string; lots: number; lotSize: number; notBefore: string;
+}, now = new Date()): SandboxOrderSnapshot {
+  return parseOrderState(payload, { ...expected, kind: 'session-exit' }, now);
+}
+
 function parseOrderState(payload: unknown, expected: { instrumentId: string; lots: number; lotSize: number } &
-  ({ kind: 'entry'; requestId: string } | { kind: 'exit'; brokerOrderId: string; notBefore: string }), now: Date): SandboxOrderSnapshot {
+  ({ kind: 'entry'; requestId: string } | { kind: 'exit'; brokerOrderId: string; notBefore: string }
+    | { kind: 'session-exit'; requestId: string; brokerOrderId: string | null; notBefore: string }), now: Date): SandboxOrderSnapshot {
   try {
     const parsed = state.parse(payload);
     if ((expected.kind === 'entry' && (parsed.orderRequestId !== expected.requestId || parsed.direction !== 'ORDER_DIRECTION_BUY'))
       || (expected.kind === 'exit' && (parsed.orderId !== expected.brokerOrderId || parsed.direction !== 'ORDER_DIRECTION_SELL'
         || !Number.isFinite(Date.parse(expected.notBefore))))
+      || (expected.kind === 'session-exit' && (parsed.orderRequestId !== expected.requestId || parsed.direction !== 'ORDER_DIRECTION_SELL'
+        || (expected.brokerOrderId !== null && parsed.orderId !== expected.brokerOrderId) || !Number.isFinite(Date.parse(expected.notBefore))))
       || parsed.instrumentUid !== expected.instrumentId
       || parsed.lotsRequested !== expected.lots || parsed.lotsExecuted > expected.lots
       || !Number.isFinite(now.getTime())
@@ -85,7 +96,7 @@ function parseOrderState(payload: unknown, expected: { instrumentId: string; lot
       const price = nano(item.price);
       const executedAt = new Date(item.executionTime);
       if (ids.has(item.tradeId) || price <= 0n || executedAt.getTime() > now.getTime() + 60_000
-        || (expected.kind === 'exit' && executedAt.getTime() < Date.parse(expected.notBefore))) {
+        || (expected.kind !== 'entry' && executedAt.getTime() < Date.parse(expected.notBefore))) {
         throw new Error('Invalid execution stage');
       }
       ids.add(item.tradeId);

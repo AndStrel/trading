@@ -13,6 +13,7 @@ import { buildMiniAppView } from './web/mini-app-view.js';
 import { SandboxProtectionService } from './execution/sandbox-protection-service.js';
 import { SandboxExitService } from './execution/sandbox-exit-service.js';
 import { SandboxLossGuard } from './execution/sandbox-loss-guard.js';
+import { SandboxSessionClose } from './execution/sandbox-session-close.js';
 
 const config = loadConfig();
 if (!config.telegram.token) {
@@ -25,6 +26,7 @@ const orderClient = new TInvestOrderClient(config.execution.token, config.baseUr
 const protection = config.execution.sandboxProtectionEnabled ? new SandboxProtectionService(config, orderClient, journal) : undefined;
 const exits = config.execution.sandboxProtectionEnabled ? new SandboxExitService(config, orderClient, journal) : undefined;
 const lossGuard = config.execution.sandboxLossGuardEnabled && exits ? new SandboxLossGuard(config, orderClient, tInvestClient, exits, journal) : undefined;
+const sessionClose = config.execution.sandboxSessionCloseEnabled && exits ? new SandboxSessionClose(config, orderClient, tInvestClient, exits, journal) : undefined;
 const execution = new ExecutionService(
   config,
   tInvestClient,
@@ -33,6 +35,7 @@ const execution = new ExecutionService(
   protection,
   exits,
   lossGuard,
+  sessionClose,
 );
 const scanner = new IntradayScanner(config, tInvestClient, journal);
 const telegram = new TelegramTradingBot(

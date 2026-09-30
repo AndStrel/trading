@@ -17,7 +17,7 @@ const partial: SandboxOrderSnapshot = { brokerOrderId: 'sell', executionStatus: 
 
 describe('Conservative sandbox loss amounts', () => {
   it('values every lot across BID depth with the per-unit lot size', () => {
-    expect(sandboxBidValue(book(), status, 'fixture', 5, 10, now)).toEqual({ grossNano: '470000000000', quoteAt: now.toISOString() });
+    expect(sandboxBidValue(book(), status, 'fixture', 5, 10, now)).toEqual({ grossNano: '470000000000', quoteAt: now.toISOString(), worstBidNano: '9000000000' });
   });
   it.each(['insufficient', 'stale', 'future', 'missing-time', 'wrong-uid', 'duplicate', 'unsorted', 'crossed', 'zero-price', 'fractional-volume', 'no-bid'])
     ('never substitutes a last price for %s', condition => {

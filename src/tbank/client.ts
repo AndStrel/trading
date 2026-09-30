@@ -219,6 +219,12 @@ export class TInvestClient {
     });
   }
 
+  public getInstrumentBy(instrumentId: string): Promise<unknown> {
+    return this.post('tinkoff.public.invest.api.contract.v1.InstrumentsService/GetInstrumentBy', {
+      idType: 'INSTRUMENT_ID_TYPE_UID', id: instrumentId,
+    });
+  }
+
   public async getLastPrices(instrumentIds: string[]): Promise<unknown> {
     return this.post('tinkoff.public.invest.api.contract.v1.MarketDataService/GetLastPrices', {
       instrumentId: instrumentIds,
