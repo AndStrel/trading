@@ -3,6 +3,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { TInvestClient, type CurlPost } from './client.js';
 
 describe('TInvestClient', () => {
+  it('reads instrument metadata by UID without exposing any trading endpoint',async()=>{
+    const fetcher=vi.fn<typeof fetch>().mockResolvedValue(new Response('{"instrument":{}}'));
+    const client=new TInvestClient('read-only-token','https://example.test/rest',{fetchImpl:fetcher});
+    await client.getInstrumentBy('local-share');
+    expect(fetcher).toHaveBeenCalledOnce();expect(fetcher.mock.calls[0]?.[0]).toBe('https://example.test/rest/tinkoff.public.invest.api.contract.v1.InstrumentsService/GetInstrumentBy');
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({idType:'INSTRUMENT_ID_TYPE_UID',id:'local-share'});
+  });
   it('requires a token before making a request', async () => {
     const fetchMock = vi.fn<typeof fetch>();
     const client = new TInvestClient(undefined, 'https://example.test/rest', { fetchImpl: fetchMock });

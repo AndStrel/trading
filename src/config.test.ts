@@ -24,6 +24,7 @@ describe('loadConfig', () => {
       sandboxInitialBalanceRub: 1_000,
       sandboxProtectionEnabled: false,
       sandboxLossGuardEnabled: false,
+      sandboxSessionCloseEnabled: false,
     });
     expect(config.backtest).toEqual({ startingCapitalRub: 100_000, maxConcurrentPositions: 2 });
     expect(config.strategies.intraday.maxSpreadPct).toBe(0.3);
@@ -128,6 +129,7 @@ describe('loadConfig', () => {
       token: 'trade-token',
       sandboxProtectionEnabled: false,
       sandboxLossGuardEnabled: false,
+      sandboxSessionCloseEnabled: false,
       accountId: 'sandbox-account',
       maxOrdersPerDay: 2,
       maxDailyRiskRub: 60,

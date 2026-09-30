@@ -31,14 +31,14 @@ export function sandboxBidValue(payload: unknown, status: unknown, instrumentId:
       }
     }
     if (asNano(b.bids[0]!.price) > asNano(b.asks[0]!.price)) throw new Error();
-    let remaining = BigInt(lots); let value = 0n;
+    let remaining = BigInt(lots); let value = 0n; let worstBid = 0n;
     for (const item of b.bids) {
       const filled = remaining < BigInt(item.quantity) ? remaining : BigInt(item.quantity);
-      value += filled * BigInt(lotSize) * asNano(item.price); remaining -= filled;
+      value += filled * BigInt(lotSize) * asNano(item.price); remaining -= filled; worstBid = asNano(item.price);
       if (!remaining) break;
     }
     if (remaining) throw new Error();
-    return { grossNano: String(value), quoteAt: b.orderbookTs };
+    return { grossNano: String(value), quoteAt: b.orderbookTs, worstBidNano: String(worstBid) };
   } catch { throw new Error('Executable sandbox BID depth or freshness is not confirmed'); }
 }
 

@@ -56,7 +56,8 @@ export class SandboxLossGuard {
           || stop.stopOrderId === order.native!.intent.brokerStopId) };
         const stop = parseSandboxStop(scoped, order.native.intent, now());
         this.journal.observeNativeStop(order.scenarioId, stop);
-        if (stop.status === 'STOP_ORDER_STATUS_EXECUTED') await this.exits.reconcile(accountId, order.scenarioId, now());
+        if (stop.status === 'STOP_ORDER_STATUS_EXECUTED' || (stop.status === 'STOP_ORDER_STATUS_CANCELED' && order.session?.phase === 'submitted'
+          && order.session.accountId === accountId && order.session.stopId === order.native.intent.brokerStopId)) await this.exits.reconcile(accountId, order.scenarioId, now());
         else if (stop.status !== 'STOP_ORDER_STATUS_ACTIVE' || order.exit) throw new Error();
       }
       const ledger = this.journal.getSandboxLossLedger();
@@ -90,7 +91,8 @@ export class SandboxLossGuard {
           || BigInt(share.balance) + BigInt(share.blocked) !== BigInt(remaining) * BigInt(order.lotSize)
           || p.blocked.some(money => BigInt(money.units) * 1_000_000_000n + BigInt(money.nano) !== 0n)) throw new Error();
         const ids = orderBook.parse(activeOrders).orders.map(item => item.orderId);
-        if (new Set(ids).size !== ids.length || ids.some(id => id !== order.native!.observation?.childOrderId)) throw new Error();
+        const knownSell = order.session?.phase === 'submitted' ? order.session.brokerOrderId : order.native!.observation?.childOrderId;
+        if (new Set(ids).size !== ids.length || ids.some(id => id !== knownSell)) throw new Error();
         if (exit && !exit.terminal && !ids.includes(exit.brokerOrderId)) throw new Error();
         if (share.blocked > 0 && (!exit || exit.terminal || !ids.includes(exit.brokerOrderId))) throw new Error();
         const stop = parseSandboxStop(latestStops, order.native!.intent, now());
