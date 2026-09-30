@@ -19,14 +19,18 @@ describe('loadConfig', () => {
     expect(config.execution).toEqual({
       mode: 'disabled',
       maxOrdersPerDay: 3,
-      maxDailyRiskRub: 1_000,
+      maxDailyRiskRub: 60,
       candidateMaxAgeMinutes: 10,
-      sandboxInitialBalanceRub: 100_000,
+      sandboxInitialBalanceRub: 1_000,
     });
     expect(config.backtest).toEqual({ startingCapitalRub: 100_000, maxConcurrentPositions: 2 });
     expect(config.strategies.intraday.maxSpreadPct).toBe(0.3);
     expect(config.strategies.intraday.maxEntryDeviationPct).toBe(0.5);
     expect(config.strategies.intraday.allowShort).toBe(false);
+    expect(config.commissionRate).toBe(0.003);
+    expect(config.strategies.intraday.maxRiskRub).toBe(20);
+    expect(config.strategies.intraday.maxPositionRub).toBeLessThan(1_000);
+    expect(config.livePilot).toEqual({ prepare: true, capitalRub: 1_000, maxTradeRiskRub: 20, maxDailyRiskRub: 60, maxDailyLossRub: 60 });
     expect(config.strategies.swing.maxSpreadPct).toBe(0.5);
     expect(config.strategies.swing.maxEntryDeviationPct).toBe(1);
     expect(config.strategies.swing.allowShort).toBe(false);
@@ -87,6 +91,7 @@ describe('loadConfig', () => {
 
   it('requires an explicit configuration value to enable short scenarios', () => {
     const config = loadConfig({
+      T_INVEST_LIVE_PILOT_PREPARE: 'false',
       INTRADAY_ALLOW_SHORT: 'true',
       SWING_ALLOW_SHORT: 'false',
     });
@@ -111,9 +116,28 @@ describe('loadConfig', () => {
       token: 'trade-token',
       accountId: 'sandbox-account',
       maxOrdersPerDay: 2,
-      maxDailyRiskRub: 750,
+      maxDailyRiskRub: 60,
       candidateMaxAgeMinutes: 10,
-      sandboxInitialBalanceRub: 100_000,
+      sandboxInitialBalanceRub: 1_000,
     });
+  });
+
+  it('does not allow stale environment settings to relax the approved pilot limits', () => {
+    const config = loadConfig({ T_INVEST_COMMISSION_RATE: '0.0005', INTRADAY_MAX_RISK_RUB: '500', INTRADAY_MAX_POSITION_RUB: '50000', INTRADAY_ALLOW_SHORT: 'true' });
+    expect(config.commissionRate).toBe(0.003);
+    expect(config.strategies.intraday.maxRiskRub).toBe(20);
+    expect(config.strategies.intraday.maxPositionRub).toBeLessThan(1_000);
+    expect(config.strategies.intraday.allowShort).toBe(false);
+  });
+
+  it.each(['T_INVEST_LIVE_CAPITAL_RUB', 'T_INVEST_LIVE_MAX_TRADE_RISK_RUB', 'T_INVEST_LIVE_MAX_DAILY_RISK_RUB', 'T_INVEST_LIVE_MAX_DAILY_LOSS_RUB'])('rejects unauthorized expansion of %s', key => {
+    expect(() => loadConfig({ [key]: '1001' })).toThrow();
+  });
+
+  it('rejects reused tokens and the weekly account for the daily live pilot', () => {
+    expect(() => loadConfig({ T_INVEST_TOKEN: 'secret', T_INVEST_LIVE_TOKEN: 'secret' })).toThrow('tokens must be separate');
+    expect(() => loadConfig({ T_INVEST_TRADING_TOKEN: 'secret', T_INVEST_LIVE_TOKEN: 'secret' })).toThrow('tokens must be separate');
+    expect(() => loadConfig({ T_INVEST_SWING_ACCOUNT_ID: 'weekly', T_INVEST_LIVE_ACCOUNT_ID: 'weekly' })).toThrow('weekly or sandbox');
+    expect(() => loadConfig({ T_INVEST_EXECUTION_MODE: 'live' })).toThrow();
   });
 });

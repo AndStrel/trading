@@ -47,6 +47,9 @@ afterEach(() => {
 describe('IntradayScanner', () => {
   it('records one candidate from a qualifying long setup and then applies cooldown', async () => {
     const config = loadConfig({
+      // Legacy low-cost fixture proves scanner/cooldown mechanics, not pilot admission.
+      T_INVEST_LIVE_PILOT_PREPARE: 'false',
+      T_INVEST_COMMISSION_RATE: '0.0005',
       T_INVEST_TOKEN: 'test-token',
       T_INVEST_INTRADAY_UNIVERSE: 'watchlist',
       T_INVEST_SCANNER_MIN_AVERAGE_CANDLE_TURNOVER_RUB: '1000',

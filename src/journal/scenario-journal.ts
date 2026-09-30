@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import type { ExecutionMode, Strategy } from '../config.js';
+import { riskBudgetFits } from '../execution/live-pilot-risk.js';
 
 export type JournalScenarioInput = {
   observedAt: string;
@@ -684,7 +685,9 @@ export class ScenarioJournal {
     }
   }
 
-  claimExecution(scenarioId: number, chatId: string): ExecutionOrderRecord {
+  claimExecution(scenarioId: number, chatId: string, limits?: {
+    from: string; to: string; now: string; maxOrders: number; maxRiskRub: number;
+  }): ExecutionOrderRecord {
     const database = this.open();
     try {
       database.exec('BEGIN IMMEDIATE');
@@ -694,7 +697,17 @@ export class ScenarioJournal {
       if (!row) throw new Error('Execution order was not found');
 
       if (row.status === 'pending') {
-        const now = new Date().toISOString();
+        if (limits) {
+          const killed = database.prepare('SELECT value FROM runtime_state WHERE key = ?')
+            .get('execution.kill_switch') as { value: string } | undefined;
+          if (killed?.value !== 'false') throw new Error('Execution kill switch is active');
+          const reservations = this.executionReservations(database, limits.from, limits.to);
+          if (reservations.length >= limits.maxOrders) throw new Error('Daily execution order limit has been reached');
+          if (!riskBudgetFits(reservations, row.estimated_risk_rub, limits.maxRiskRub)) {
+            throw new Error('Daily execution risk limit would be exceeded');
+          }
+        }
+        const now = limits?.now ?? new Date().toISOString();
         database
           .prepare(
             `UPDATE execution_orders
@@ -702,7 +715,7 @@ export class ScenarioJournal {
              WHERE id = ? AND status = 'pending'`,
           )
           .run(chatId, now, row.id);
-        this.appendExecutionEvent(database, Number(row.id), 'approved', { chatId });
+        this.appendExecutionEvent(database, Number(row.id), 'approved', { chatId }, now);
       } else if (row.status !== 'submitting') {
         throw new Error(`Execution order is already ${row.status}`);
       }
@@ -783,18 +796,24 @@ export class ScenarioJournal {
   getExecutionDailyUsage(from: string, to: string): { orderCount: number; riskRub: number } {
     const database = this.open();
     try {
-      const row = database
-        .prepare(
-          `SELECT COUNT(*) AS order_count, COALESCE(SUM(estimated_risk_rub), 0) AS risk_rub
-           FROM execution_orders
-           WHERE updated_at >= ? AND updated_at < ?
-             AND status IN ('submitting', 'accepted')`,
-        )
-        .get(from, to) as { order_count: number | bigint; risk_rub: number };
-      return { orderCount: Number(row.order_count), riskRub: row.risk_rub };
+      const reservations = this.executionReservations(database, from, to);
+      return { orderCount: reservations.length, riskRub: reservations.reduce((sum, risk) => sum + risk, 0) };
     } finally {
       database.close();
     }
+  }
+
+  private executionReservations(database: DatabaseSync, from: string, to: string): number[] {
+    // Approval time is immutable: a broker reply/retry after midnight must not
+    // move already consumed risk into a different Moscow calendar day.
+    const rows = database.prepare(`SELECT o.estimated_risk_rub AS risk
+      FROM execution_orders o JOIN (
+        SELECT execution_order_id, MIN(created_at) AS approved_at FROM execution_events
+        WHERE event_type = 'approved' GROUP BY execution_order_id
+      ) e ON e.execution_order_id = o.id
+      WHERE e.approved_at >= ? AND e.approved_at < ? AND o.status IN ('submitting', 'accepted')`)
+      .all(from, to) as Array<{ risk: number }>;
+    return rows.map(row => row.risk);
   }
 
   isExecutionKilled(): boolean {
@@ -854,13 +873,14 @@ export class ScenarioJournal {
     executionOrderId: number,
     eventType: string,
     detail: unknown,
+    createdAt = new Date().toISOString(),
   ): void {
     database
       .prepare(
         `INSERT INTO execution_events (execution_order_id, event_type, created_at, detail_json)
          VALUES (?, ?, ?, ?)`,
       )
-      .run(executionOrderId, eventType, new Date().toISOString(), JSON.stringify(detail));
+      .run(executionOrderId, eventType, createdAt, JSON.stringify(detail));
   }
 
   private open(): DatabaseSync {

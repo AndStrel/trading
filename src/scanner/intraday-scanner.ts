@@ -3,6 +3,7 @@ import { analyzeCandles, type CandleAnalysis } from '../domain/candle-analysis.j
 import { proposeIntradayLong } from '../domain/intraday-proposal.js';
 import { assessTradeScenario } from '../domain/trade-scenario.js';
 import { calculateTradePlan } from '../domain/trade-plan.js';
+import { assessLivePilotRisk } from '../execution/live-pilot-risk.js';
 import { ScenarioJournal } from '../journal/scenario-journal.js';
 import { TInvestClient } from '../tbank/client.js';
 import {
@@ -497,6 +498,20 @@ export class IntradayScanner {
       maxRiskRub: limits.maxRiskRub,
       maxPositionRub: limits.maxPositionRub,
     });
+    if (this.config.livePilot.prepare && tradePlan.lots > 0) {
+      const pilotRisk = assessLivePilotRisk(this.config.livePilot, {
+        side: 'long', entryPrice: proposal.entryPrice, stopPrice: proposal.stopPrice,
+        targetPrice: proposal.targetPrice, lotSize: instrument.lotSize, lots: tradePlan.lots,
+        commissionRate: this.config.commissionRate, slippageRate: this.config.scanner.slippageRate,
+        availableCashRub: this.config.livePilot.capitalRub,
+        reservedDailyRiskRub: 0, realizedDailyLossRub: 0, markedOpenLossRub: 0,
+      });
+      tradePlan.allowed = tradePlan.allowed && pilotRisk.allowed;
+      tradePlan.reasons.push(...pilotRisk.blockers);
+      tradePlan.totalRiskRub = Math.max(tradePlan.totalRiskRub, pilotRisk.totalRiskRub);
+      tradePlan.netRewardRub = Math.min(tradePlan.netRewardRub, pilotRisk.netRewardRub);
+      tradePlan.rewardToRisk = tradePlan.netRewardRub / tradePlan.totalRiskRub;
+    }
     const assessment = assessTradeScenario({
       side: 'long',
       entryPrice: proposal.entryPrice,

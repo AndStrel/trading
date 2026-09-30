@@ -1,6 +1,8 @@
 import { loadConfig } from './config.js';
 import { ExecutionService } from './execution/execution-service.js';
 import { TInvestOrderClient } from './execution/tinvest-order-client.js';
+import { LivePilotPreflight } from './execution/live-pilot-preflight.js';
+import { LivePreflightClient } from './execution/live-preflight-client.js';
 import { ScenarioJournal } from './journal/scenario-journal.js';
 import { IntradayScanner } from './scanner/intraday-scanner.js';
 import { TelegramBotClient } from './telegram/client.js';
@@ -29,6 +31,7 @@ const telegram = new TelegramTradingBot(
   undefined,
   undefined,
   execution,
+  new LivePilotPreflight(config, new LivePreflightClient(config.livePilot.token, config.baseUrl, config.transport)),
 );
 
 scanner.addEventListener((event) => telegram.notifyScannerEvent(event));
