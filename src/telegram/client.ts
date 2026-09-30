@@ -1,7 +1,7 @@
 export type TelegramUpdate = {
   update_id: number;
   message?: {
-    chat?: { id?: number };
+    chat?: { id?: number; type?: string };
     text?: string;
   };
   callback_query?: {
@@ -12,12 +12,16 @@ export type TelegramUpdate = {
 };
 
 export type TelegramInlineKeyboard = {
-  inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
+  inline_keyboard: Array<Array<{ text: string; callback_data: string; web_app?: never } | { text: string; web_app: { url: string }; callback_data?: never }>>;
+};
+
+export type TelegramReplyKeyboard = {
+  keyboard: Array<Array<{ text: string }>>; is_persistent: true; resize_keyboard: true; input_field_placeholder: string;
 };
 
 export type TelegramClient = {
   getUpdates(input: { offset: number; timeoutSeconds: number }): Promise<TelegramUpdate[]>;
-  sendMessage(chatId: string, text: string): Promise<void>;
+  sendMessage(chatId: string, text: string, options?: { replyMarkup?: TelegramReplyKeyboard | TelegramInlineKeyboard }): Promise<void>;
   sendPhoto(input: {
     chatId: string;
     png: Uint8Array;
@@ -25,6 +29,7 @@ export type TelegramClient = {
     replyMarkup?: TelegramInlineKeyboard;
   }): Promise<void>;
   answerCallbackQuery?(callbackQueryId: string, text: string): Promise<void>;
+  setChatMenuButton?(chatId: string, url: string): Promise<void>;
 };
 
 type TelegramApiResponse<T> = {
@@ -58,12 +63,12 @@ export class TelegramBotClient implements TelegramClient {
     return result as TelegramUpdate[];
   }
 
-  async sendMessage(chatId: string, text: string): Promise<void> {
+  async sendMessage(chatId: string, text: string, options?: { replyMarkup?: TelegramReplyKeyboard | TelegramInlineKeyboard }): Promise<void> {
     if (text.length > 4_096) {
       throw new Error('Telegram message exceeds the 4096 character limit');
     }
 
-    await this.request('sendMessage', { chat_id: chatId, text }, 15_000);
+    await this.request('sendMessage', { chat_id: chatId, text, ...(options?.replyMarkup ? { reply_markup: options.replyMarkup } : {}) }, 15_000);
   }
 
   async sendPhoto(input: {
@@ -93,6 +98,11 @@ export class TelegramBotClient implements TelegramClient {
     );
   }
 
+  async setChatMenuButton(chatId: string, url: string): Promise<void> {
+    await this.request('setChatMenuButton', { chat_id: chatId,
+      menu_button: { type: 'web_app', text: 'Панель', web_app: { url } } }, 15_000);
+  }
+
   private async request<T>(method: string, body: unknown, timeoutMs: number): Promise<T> {
     return this.parseResponse(
       await this.fetchJson(method, body, timeoutMs),
@@ -109,8 +119,7 @@ export class TelegramBotClient implements TelegramClient {
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error: unknown) {
-      const detail = error instanceof Error ? error.message : 'Unknown network failure';
-      throw new Error(`Telegram network error: ${detail}`);
+      throw new Error('Telegram upload did not return a confirmed response');
     }
 
     return this.parseResponse<T>(response);
@@ -125,16 +134,14 @@ export class TelegramBotClient implements TelegramClient {
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error: unknown) {
-      const detail = error instanceof Error ? error.message : 'Unknown network failure';
-      throw new Error(`Telegram network error: ${detail}`);
+      throw new Error('Telegram request did not return a confirmed response');
     }
   }
 
   private async parseResponse<T>(response: Response): Promise<T> {
     const payload = (await response.json().catch(() => ({}))) as TelegramApiResponse<T>;
     if (!response.ok || payload.ok !== true) {
-      const description = typeof payload.description === 'string' ? payload.description : response.statusText;
-      throw new Error(`Telegram API ${response.status}: ${description}`);
+      throw new Error(`Telegram API returned HTTP ${response.status} without a confirmed result`);
     }
 
     return payload.result as T;

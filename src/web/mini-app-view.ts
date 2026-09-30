@@ -1,0 +1,35 @@
+import type { AppConfig } from '../config.js';
+import type { ExecutionService } from '../execution/execution-service.js';
+import type { ScenarioJournal } from '../journal/scenario-journal.js';
+import type { IntradayScanner } from '../scanner/intraday-scanner.js';
+
+export function buildMiniAppView(config: AppConfig, scanner: Pick<IntradayScanner, 'isPaused' | 'getLatestReport'>,
+  execution: Pick<ExecutionService, 'mode' | 'isKilled'>, journal: ScenarioJournal, now = new Date()) {
+  const report = scanner.getLatestReport();
+  const age = report ? now.getTime() - Date.parse(report.observedAt) : Infinity;
+  const maxAge = (config.scanner.intervalSeconds + 60) * 1000;
+  return {
+    observedAt: now.toISOString(),
+    scanner: { paused: scanner.isPaused(), lastScanAt: report?.observedAt ?? null,
+      fresh: age >= 0 && age <= maxAge, scanned: report?.scanned ?? 0, errors: report?.errors ?? 0 },
+    execution: { mode: execution.mode(), killed: execution.isKilled(), liveSubmissionAllowed: false,
+      actualPnlRub: null, lossMonitorReady: false },
+    limits: { capitalRub: config.livePilot.capitalRub, tradeRiskRub: config.strategies.intraday.maxRiskRub,
+      dailyRiskRub: config.execution.maxDailyRiskRub, dailyLossRub: config.livePilot.maxDailyLossRub,
+      positionRub: config.strategies.intraday.maxPositionRub, commissionRate: config.commissionRate,
+      slippageRate: config.scanner.slippageRate },
+    candidates: journal.list(30, 'intraday').filter(item => item.decision === 'candidate'
+      && now.getTime() - Date.parse(item.observedAt) >= 0
+      && now.getTime() - Date.parse(item.observedAt) <= config.execution.candidateMaxAgeMinutes * 60_000).slice(0, 5)
+      .map(item => {
+        const snapshot = typeof item.snapshot === 'object' && item.snapshot !== null ? item.snapshot as Record<string, unknown> : {};
+        const instrument = typeof snapshot.instrument === 'object' && snapshot.instrument !== null
+          ? snapshot.instrument as Record<string, unknown> : {};
+        const label = instrument.ticker ?? instrument.label ?? config.scanner.intradayWatchlist.find(entry => entry.instrumentId === item.instrumentId)?.label;
+        return { id: item.id, ticker: typeof label === 'string' && /^[A-Z0-9.-]{1,16}$/.test(label) ? label : 'Инструмент',
+          observedAt: item.observedAt, entryRub: item.input.entryPrice, stopRub: item.input.stopPrice, targetRub: item.input.targetPrice };
+      }),
+  };
+}
+
+export type MiniAppView = ReturnType<typeof buildMiniAppView>;

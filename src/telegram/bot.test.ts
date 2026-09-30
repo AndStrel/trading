@@ -25,6 +25,44 @@ afterEach(() => {
 });
 
 describe('TelegramTradingBot', () => {
+  it('announces each menu phase once to private IDs and retries a failed menu update', async () => {
+    const journal = createJournal();
+    const base = { TELEGRAM_BOT_TOKEN: 'test', TELEGRAM_ALLOWED_CHAT_IDS: '42,-9' };
+    const client: TelegramClient = { getUpdates: async () => [], sendMessage: vi.fn(), sendPhoto: vi.fn(),
+      setChatMenuButton: vi.fn().mockRejectedValueOnce(new Error('not available')).mockResolvedValue(undefined) };
+    const scanner = { isPaused: () => false, pause: vi.fn(), resume: vi.fn() };
+    const buttons = new TelegramTradingBot(loadConfig(base), client, scanner, journal, () => undefined);
+    await buttons.announceMenu(); await buttons.announceMenu();
+    expect(client.sendMessage).toHaveBeenCalledTimes(1);
+    const app = new TelegramTradingBot(loadConfig({ ...base, TELEGRAM_MINI_APP_ENABLED: 'true',
+      TELEGRAM_MINI_APP_URL: 'https://bot.brewnote.net' }), client, scanner, journal, () => undefined);
+    await app.announceMenu();
+    expect(journal.getRuntimeState('telegram.menu.v1.miniapp.42')).toBeNull();
+    await app.announceMenu(); await app.announceMenu();
+    expect(client.sendMessage).toHaveBeenCalledTimes(3);
+    expect(client.setChatMenuButton).toHaveBeenCalledTimes(2);
+    expect(client.setChatMenuButton).toHaveBeenLastCalledWith('42', 'https://bot.brewnote.net');
+    expect(journal.getRuntimeState('telegram.menu.v1.miniapp.-9')).toBeNull();
+  });
+  it('shows buttons and launches the Mini App only for an allowed private chat', async () => {
+    const config = loadConfig({ TELEGRAM_BOT_TOKEN: 'test', TELEGRAM_ALLOWED_CHAT_IDS: '42,-9',
+      TELEGRAM_MINI_APP_ENABLED: 'true', TELEGRAM_MINI_APP_URL: 'https://bot.brewnote.net' });
+    const client: TelegramClient = { getUpdates: async () => [
+      { update_id: 1, message: { chat: { id: 7, type: 'private' }, text: '📱 Мини-приложение' } },
+      { update_id: 2, message: { chat: { id: 42, type: 'private' }, text: '/menu' } },
+      { update_id: 3, message: { chat: { id: 42, type: 'private' }, text: '📱 Мини-приложение' } },
+      { update_id: 4, message: { chat: { id: -9, type: 'group' }, text: '📱 Мини-приложение' } },
+      { update_id: 5, message: { chat: { id: 42, type: 'private' }, text: '⏸ Пауза' } },
+    ], sendMessage: vi.fn(), sendPhoto: vi.fn() };
+    const scanner = { isPaused: () => false, pause: vi.fn(), resume: vi.fn() };
+    const bot = new TelegramTradingBot(config, client, scanner, createJournal(), () => undefined);
+    await bot.pollOnce();
+    expect(client.sendMessage).toHaveBeenCalledTimes(4);
+    expect(client.sendMessage).toHaveBeenNthCalledWith(1, '42', expect.any(String), expect.objectContaining({ replyMarkup: expect.objectContaining({ is_persistent: true }) }));
+    expect(client.sendMessage).toHaveBeenNthCalledWith(2, '42', expect.any(String), { replyMarkup: { inline_keyboard: [[{ text: 'Открыть Mini App', web_app: { url: 'https://bot.brewnote.net' } }]] } });
+    expect(client.sendMessage).toHaveBeenNthCalledWith(3, '-9', expect.stringContaining('личного чата'));
+    expect(scanner.pause).toHaveBeenCalledTimes(1);
+  });
   it('shows approved limits but checks the live account only for an allowed chat', async () => {
     const journal = createJournal();
     const config = loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42' });

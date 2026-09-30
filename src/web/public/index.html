@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light"><title>Trading · Дневной пилот</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header><div><p class="eyebrow">TRADING / ЛИЧНЫЙ ПИЛОТ</p><h1>Держим риск<br>под контролем.</h1></div><button id="refresh" class="icon-button" aria-label="Обновить данные" disabled>↻</button></header>
+    <div class="status-line"><span class="dot"></span><span id="mode">Проверяем доступ</span><span class="badge">LIVE OFF</span></div>
+    <p id="notice" class="notice" role="status" aria-live="polite">Подключение к Telegram…</p>
+    <section id="overview" class="panel" aria-labelledby="overview-title">
+      <div class="section-head"><h2 id="overview-title">Обзор</h2><span id="updated">—</span></div>
+      <article class="capital-card"><span class="label">Лимит капитала</span><div class="capital" id="capital">—</div><p>Это установленный лимит, не баланс брокерского счёта.</p></article>
+      <div class="metrics"><article><span class="label">Риск / сделка</span><strong id="trade-risk">—</strong></article><article><span class="label">Риск / день</span><strong id="day-risk">—</strong></article></div>
+      <article class="scanner-card"><div class="section-head"><h3>Сканер рынка</h3><span id="scanner-state" class="tag">Нет данных</span></div><p id="scanner-summary">Данные появятся после авторизации.</p><p id="scanner-date" class="muted">—</p><button id="scanner-toggle" class="button" disabled>Управление сканером</button></article>
+      <article class="info-card"><h3>Реальное исполнение закрыто</h3><p>Карточка кандидата — не команда купить. Прибыльная стратегия ещё не подтверждена. Фактический PnL и защитное сопровождение не подключены.</p></article>
+    </section>
+    <section id="candidates" class="panel" hidden aria-labelledby="candidates-title"><div class="section-head"><h2 id="candidates-title">Кандидаты</h2><span id="candidate-count">—</span></div><p class="muted">Только свежие ситуации из журнала. Ручная проверка обязательна.</p><div id="candidate-list" class="candidate-list"><article class="empty">Нет подтверждённых данных.</article></div></section>
+    <section id="risk" class="panel" hidden aria-labelledby="risk-title"><div class="section-head"><h2 id="risk-title">Ограничения</h2><span class="tag">Без плеча</span></div><article class="risk-card"><dl><div><dt>Максимум позиции</dt><dd id="position-limit">—</dd></div><div><dt>Комиссия на сторону</dt><dd id="commission">—</dd></div><div><dt>Проскальзывание в модели</dt><dd id="slippage">—</dd></div><div><dt>Порог дневного убытка</dt><dd id="loss-limit">—</dd></div><div><dt>Контроль фактического убытка</dt><dd>Не подключён</dd></div><div><dt>Реальные заявки</dt><dd>Заблокированы</dd></div></dl></article><p class="notice">Расчётный риск не гарантирует размер фактического убытка при резком движении рынка. Недельный счёт не используется.</p><button id="kill" class="button danger" disabled>Запретить новые входы</button><p class="muted">Запрет сохраняется после перезапуска. Эта кнопка не закрывает позиции и не отменяет уже принятые заявки.</p></section>
+    <footer>Наблюдение ≠ доказанная прибыльность</footer>
+  </main>
+  <nav aria-label="Разделы"><button data-tab="overview" aria-current="page">◉ <span>Обзор</span></button><button data-tab="candidates">⌁ <span>Кандидаты</span></button><button data-tab="risk">◇ <span>Риски</span></button></nav>
+  <dialog id="confirm-kill"><h2>Запретить новые входы?</h2><p>Новые заявки будут заблокированы. Уже открытые позиции эта кнопка не закрывает.</p><div class="dialog-actions"><button id="cancel-kill" class="button">Отмена</button><button id="confirm-kill-button" class="button danger">Запретить входы</button></div></dialog>
+</body>
+</html>

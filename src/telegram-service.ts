@@ -8,6 +8,8 @@ import { IntradayScanner } from './scanner/intraday-scanner.js';
 import { TelegramBotClient } from './telegram/client.js';
 import { TelegramTradingBot } from './telegram/bot.js';
 import { TInvestClient } from './tbank/client.js';
+import { createMiniAppServer } from './web/mini-app-server.js';
+import { buildMiniAppView } from './web/mini-app-view.js';
 
 const config = loadConfig();
 if (!config.telegram.token) {
@@ -50,4 +52,16 @@ process.stdout.write(JSON.stringify({
 }) + '\n');
 scanner.addEventListener((event) => telegram.notifyScannerEvent(event));
 scanner.start();
+if (config.telegram.miniApp.enabled) {
+  const server = createMiniAppServer({
+    token: config.telegram.token, origin: config.telegram.miniApp.url!, allowedPrivateIds: config.telegram.allowedChatIds,
+    view: () => buildMiniAppView(config, scanner, execution, journal),
+    action: action => { if (action === 'pause') scanner.pause(); else if (action === 'resume') scanner.resume(); else execution.kill(); },
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(config.telegram.miniApp.port, config.telegram.miniApp.host, resolve);
+  });
+  process.stdout.write(JSON.stringify({ event: 'mini-app-listening', liveSubmissionAllowed: false }) + '\n');
+}
 await telegram.start();
