@@ -14,6 +14,40 @@ function broker() {
   };
 }
 describe('daily live preparation readiness', () => {
+  it('accepts exactly 500 RUB cash for the reduced pilot while keeping live submission forbidden', async () => {
+    const reducedConfig = loadConfig({ T_INVEST_LIVE_TOKEN: 'live-secret', T_INVEST_LIVE_ACCOUNT_ID: 'daily-private-id', T_INVEST_LIVE_CAPITAL_RUB: '500' });
+    const client = broker();
+    const positions = await client.getPositions();
+    client.getPositions.mockClear();
+    client.getPositions.mockResolvedValue({ ...positions, money: [{ currency: 'rub', units: '500', nano: 0 }] });
+
+    const report = await new LivePilotPreflight(reducedConfig, client).check();
+
+    expect(report).toMatchObject({ liveSubmissionAllowed: false, accountChecksPassed: true, availableCashRub: 500 });
+    expect(report.blockers).toHaveLength(1);
+    expect(report.blockers[0]).toContain('sandbox');
+    expect(client.getAccounts).toHaveBeenCalledOnce();
+    expect(client.getUserInfo).toHaveBeenCalledOnce();
+    expect(client.getPositions).toHaveBeenCalledOnce();
+    expect(client.getOrders).toHaveBeenCalledOnce();
+    expect(client.getStopOrders).toHaveBeenCalledOnce();
+    expect(JSON.stringify(report)).not.toContain('private');
+    expect(JSON.stringify(report)).not.toContain('secret');
+  });
+
+  it('rejects 499.99 RUB cash for the 500 RUB pilot without relaxing the live submission gate', async () => {
+    const reducedConfig = loadConfig({ T_INVEST_LIVE_TOKEN: 'live-secret', T_INVEST_LIVE_ACCOUNT_ID: 'daily-private-id', T_INVEST_LIVE_CAPITAL_RUB: '500' });
+    const client = broker();
+    const positions = await client.getPositions();
+    client.getPositions.mockResolvedValue({ ...positions, money: [{ currency: 'rub', units: '499', nano: 990_000_000 }] });
+
+    const report = await new LivePilotPreflight(reducedConfig, client).check();
+
+    expect(report).toMatchObject({ liveSubmissionAllowed: false, accountChecksPassed: false, availableCashRub: 499.99 });
+    expect(report.blockers.join(';')).toContain('Счёт ещё не пополнен до суммы дневного пилота.');
+    expect(report.blockers.join(';')).toContain('sandbox');
+  });
+
   it('never marks live submission ready even when the account checks pass', async () => {
     const report = await new LivePilotPreflight(config, broker()).check();
     expect(report).toMatchObject({ liveSubmissionAllowed: false, accountChecksPassed: true, availableCashRub: 1000 });

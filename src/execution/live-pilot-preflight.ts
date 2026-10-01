@@ -37,7 +37,7 @@ export class LivePilotPreflight {
     const pilot = this.config.livePilot;
     const report: PilotPreflightReport = { liveSubmissionAllowed: false, accountChecksPassed: false, availableCashRub: null, blockers: [] };
     if (!pilot.prepare) report.blockers.push('Подготовка дневного пилота выключена.');
-    if (!pilot.token) report.blockers.push('Не задан отдельный live-токен.');
+    if (!pilot.token) report.blockers.push('Не настроен токен для проверки реального дневного счёта: выберите live-роль существующего торгового токена или задайте live-токен.');
     if (!pilot.accountId) report.blockers.push('Не выбран отдельный дневной счёт.');
     if (report.blockers.length === 0 && pilot.accountId) {
       try {

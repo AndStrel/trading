@@ -3,7 +3,8 @@ import { postWithSystemCurl, type TInvestTransport } from '../tbank/client.js';
 
 export const liveProductionEndpoint = 'https://invest-public-api.tbank.ru/rest';
 
-// An intentionally read-only preparation surface using a SEPARATE live token.
+// Read-only preparation with the resolved production credential, isolated from
+// the main read-only client and the sandbox credential regardless of env aliases.
 // No generic public request, PostOrder, cancel, stop creation or account funding.
 export class LivePreflightClient {
   constructor(
@@ -38,7 +39,7 @@ export class LivePreflightClient {
   }
 
   private async read(method: string, body: unknown): Promise<unknown> {
-    if (!this.token) throw new Error('Separate live token is not configured');
+    if (!this.token) throw new Error('Production preflight credential is not configured');
     const url = `${this.baseUrl}/tinkoff.public.invest.api.contract.v1.${method}`;
     const serialized = JSON.stringify(body);
     // Do not echo broker responses/errors: they can contain account identifiers.

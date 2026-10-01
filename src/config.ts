@@ -96,6 +96,18 @@ const optionalNonEmpty = z.preprocess(
   z.string().min(1).optional(),
 );
 
+function resolveCredentialAliases(
+  role: 'sandbox' | 'live',
+  canonical: string | undefined,
+  alias: string | undefined,
+): string | undefined {
+  if (canonical && alias && canonical !== alias) {
+    // Never include credential values in configuration diagnostics.
+    throw new Error(`Conflicting ${role} credential aliases`);
+  }
+  return canonical ?? alias;
+}
+
 const intradayWatchlistItemSchema = z.object({
   instrumentId: z.string().trim().min(1).max(256),
   label: z.string().trim().min(1).max(64).optional(),
@@ -177,6 +189,9 @@ const envSchema = z.object({
   TELEGRAM_MINI_APP_PORT: z.coerce.number().int().min(1024).max(65535).default(8080),
   T_INVEST_EXECUTION_MODE: z.enum(['disabled', 'sandbox']).default('disabled'),
   T_INVEST_TRADING_TOKEN: optionalNonEmpty,
+  // Preserve the legacy sandbox role unless migration is explicitly selected.
+  T_INVEST_TRADING_TOKEN_ROLE: z.enum(['sandbox', 'live']).default('sandbox'),
+  T_INVEST_SANDBOX_TOKEN: optionalNonEmpty,
   T_INVEST_SANDBOX_ACCOUNT_ID: optionalNonEmpty,
   T_INVEST_SANDBOX_PROTECTION_ENABLED: z.enum(['true', 'false']).default('false'),
   T_INVEST_SANDBOX_LOSS_GUARD_ENABLED: z.enum(['true', 'false']).default('false'),
@@ -224,7 +239,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new Error('Mini App requires its public HTTPS origin and a configured bot');
   }
   const commissionRate = prepare ? Math.max(0.003, parsed.T_INVEST_COMMISSION_RATE) : parsed.T_INVEST_COMMISSION_RATE;
-  if (parsed.T_INVEST_LIVE_TOKEN && [parsed.T_INVEST_TOKEN, parsed.T_INVEST_TRADING_TOKEN].includes(parsed.T_INVEST_LIVE_TOKEN)) {
+  const sandboxToken = resolveCredentialAliases('sandbox', parsed.T_INVEST_SANDBOX_TOKEN,
+    parsed.T_INVEST_TRADING_TOKEN_ROLE === 'sandbox' ? parsed.T_INVEST_TRADING_TOKEN : undefined);
+  const liveToken = resolveCredentialAliases('live', parsed.T_INVEST_LIVE_TOKEN,
+    parsed.T_INVEST_TRADING_TOKEN_ROLE === 'live' ? parsed.T_INVEST_TRADING_TOKEN : undefined);
+  const roleTokens = [parsed.T_INVEST_TOKEN, sandboxToken, liveToken].filter((token): token is string => Boolean(token));
+  if (new Set(roleTokens).size !== roleTokens.length) {
     throw new Error('Live, sandbox and read-only tokens must be separate');
   }
   if (parsed.T_INVEST_LIVE_ACCOUNT_ID && [parsed.T_INVEST_SWING_ACCOUNT_ID, parsed.T_INVEST_SANDBOX_ACCOUNT_ID].includes(parsed.T_INVEST_LIVE_ACCOUNT_ID)) {
@@ -272,21 +292,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       mode: parsed.T_INVEST_EXECUTION_MODE,
       // Sandbox execution must not reuse or redirect production read-only data.
       baseUrl: 'https://sandbox-invest-public-api.tbank.ru/rest',
-      ...(parsed.T_INVEST_TRADING_TOKEN ? { token: parsed.T_INVEST_TRADING_TOKEN } : {}),
+      ...(sandboxToken ? { token: sandboxToken } : {}),
       ...(parsed.T_INVEST_SANDBOX_ACCOUNT_ID
         ? { accountId: parsed.T_INVEST_SANDBOX_ACCOUNT_ID }
         : {}),
       maxOrdersPerDay: parsed.T_INVEST_EXECUTION_MAX_ORDERS_PER_DAY,
       maxDailyRiskRub: prepare ? Math.min(parsed.T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB, parsed.T_INVEST_LIVE_MAX_DAILY_RISK_RUB) : parsed.T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB,
       candidateMaxAgeMinutes: parsed.T_INVEST_EXECUTION_CANDIDATE_MAX_AGE_MINUTES,
-      sandboxInitialBalanceRub: prepare ? Math.min(parsed.T_INVEST_SANDBOX_INITIAL_BALANCE_RUB, parsed.T_INVEST_LIVE_CAPITAL_RUB) : parsed.T_INVEST_SANDBOX_INITIAL_BALANCE_RUB,
+      // Live cash changes must not rewrite the separately prepared sandbox baseline.
+      sandboxInitialBalanceRub: prepare ? Math.min(parsed.T_INVEST_SANDBOX_INITIAL_BALANCE_RUB, 1_000) : parsed.T_INVEST_SANDBOX_INITIAL_BALANCE_RUB,
       sandboxProtectionEnabled: parsed.T_INVEST_SANDBOX_PROTECTION_ENABLED === 'true',
       sandboxLossGuardEnabled: parsed.T_INVEST_SANDBOX_LOSS_GUARD_ENABLED === 'true',
       sandboxSessionCloseEnabled: parsed.T_INVEST_SANDBOX_SESSION_CLOSE_ENABLED === 'true',
     },
     livePilot: {
       prepare,
-      ...(parsed.T_INVEST_LIVE_TOKEN ? { token: parsed.T_INVEST_LIVE_TOKEN } : {}),
+      ...(liveToken ? { token: liveToken } : {}),
       ...(parsed.T_INVEST_LIVE_ACCOUNT_ID ? { accountId: parsed.T_INVEST_LIVE_ACCOUNT_ID } : {}),
       capitalRub: parsed.T_INVEST_LIVE_CAPITAL_RUB,
       maxTradeRiskRub: parsed.T_INVEST_LIVE_MAX_TRADE_RISK_RUB,

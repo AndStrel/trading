@@ -34,7 +34,7 @@ function createConfig(overrides: NodeJS.ProcessEnv = {}) {
   });
 }
 
-function recordCandidate(journal: ScenarioJournal, observedAt: string) {
+function recordCandidate(journal: ScenarioJournal, observedAt: string, lots = 5) {
   return journal.record({
     observedAt,
     strategy: 'intraday',
@@ -51,7 +51,7 @@ function recordCandidate(journal: ScenarioJournal, observedAt: string) {
     blockers: [],
     warnings: [],
     snapshot: {
-      tradePlan: { lots: 5, positionRub: 500, totalRiskRub: 7 },
+      tradePlan: { lots, positionRub: lots * 100, totalRiskRub: 7 },
     },
   });
 }
@@ -102,6 +102,102 @@ afterEach(() => {
 });
 
 describe('ExecutionService', () => {
+  it('arms the prepared 1000 RUB sandbox read-only when the live pilot capital is 500 RUB', async () => {
+    const journal = createJournal(); const client = orderClient();
+    const prepared = journal.getRuntimeState(sandboxBootstrapKey);
+    const account = journal.getRuntimeState(sandboxAccountKey);
+    const config = createConfig({ T_INVEST_LIVE_CAPITAL_RUB: '500' });
+    const service = new ExecutionService(config, marketClient(), client, journal);
+
+    expect(config.livePilot.capitalRub).toBe(500);
+    expect(config.execution.sandboxInitialBalanceRub).toBe(1000);
+    await service.armSandbox();
+
+    expect(service.isKilled()).toBe(false);
+    expect(client.getSandboxAccounts).toHaveBeenCalledOnce();
+    expect(client.getSandboxPositions).toHaveBeenCalledOnce();
+    expect(client.getSandboxOrders).toHaveBeenCalledOnce();
+    expect(client.getSandboxStopOrders).toHaveBeenCalledOnce();
+    expect(client.openSandboxAccount).not.toHaveBeenCalled();
+    expect(client.sandboxPayIn).not.toHaveBeenCalled();
+    expect(client.postLimitOrder).not.toHaveBeenCalled();
+    expect(client.getSandboxOrderState).not.toHaveBeenCalled();
+    expect(journal.getRuntimeState(sandboxBootstrapKey)).toBe(prepared);
+    expect(journal.getRuntimeState(sandboxAccountKey)).toBe(account);
+  });
+
+  it.each([500, 999, 1001])('does not reinterpret %i RUB as the acknowledged sandbox initial cash when live capital is 500 RUB', async cash => {
+    const journal = createJournal(); const client = orderClient();
+    const prepared = journal.getRuntimeState(sandboxBootstrapKey);
+    const account = journal.getRuntimeState(sandboxAccountKey);
+    client.getSandboxPositions.mockResolvedValue({ accountId: 'sandbox-account', limitsLoadingInProgress: false,
+      securities: [], futures: [], options: [], money: [{ currency: 'rub', units: String(cash), nano: 0 }], blocked: [] });
+    const service = new ExecutionService(createConfig({ T_INVEST_LIVE_CAPITAL_RUB: '500' }), marketClient(), client, journal);
+
+    await expect(service.armSandbox()).rejects.toThrow('not confirmed');
+
+    expect(service.isKilled()).toBe(true);
+    expect(client.getSandboxAccounts).toHaveBeenCalledOnce();
+    expect(client.getSandboxPositions).toHaveBeenCalledOnce();
+    expect(client.getSandboxOrders).toHaveBeenCalledOnce();
+    expect(client.getSandboxStopOrders).toHaveBeenCalledOnce();
+    expect(client.openSandboxAccount).not.toHaveBeenCalled();
+    expect(client.sandboxPayIn).not.toHaveBeenCalled();
+    expect(client.postLimitOrder).not.toHaveBeenCalled();
+    expect(client.getSandboxOrderState).not.toHaveBeenCalled();
+    expect(journal.getRuntimeState(sandboxBootstrapKey)).toBe(prepared);
+    expect(journal.getRuntimeState(sandboxAccountKey)).toBe(account);
+  });
+
+  it('blocks a previously queued five-lot plan before broker calls after tightening live capital to 500 RUB', async () => {
+    const journal = createJournal(); const now = new Date();
+    const candidate = recordCandidate(journal, now.toISOString());
+    const old = new ExecutionService(createConfig(), marketClient(), orderClient(), journal);
+    const queued = old.queueScenario(candidate)!;
+    await old.armSandbox();
+    const client = orderClient(); const market = marketClient();
+    const service = new ExecutionService(createConfig({ T_INVEST_LIVE_CAPITAL_RUB: '500' }), market, client, journal);
+
+    await expect(service.submitScenario(candidate.id, '42', now)).rejects.toThrow('Cash including entry costs is insufficient');
+
+    expect(journal.getExecutionByScenario(candidate.id)).toMatchObject({ status: 'pending', orderRequestId: queued.orderRequestId, lots: 5 });
+    expect(market.getOrderBook).not.toHaveBeenCalled();
+    expect(market.getTradingStatus).not.toHaveBeenCalled();
+    expect(client.getSandboxAccounts).not.toHaveBeenCalled();
+    expect(client.getSandboxPositions).not.toHaveBeenCalled();
+    expect(client.getSandboxOrders).not.toHaveBeenCalled();
+    expect(client.getSandboxStopOrders).not.toHaveBeenCalled();
+    expect(client.openSandboxAccount).not.toHaveBeenCalled();
+    expect(client.sandboxPayIn).not.toHaveBeenCalled();
+    expect(client.postLimitOrder).not.toHaveBeenCalled();
+    expect(client.getSandboxOrderState).not.toHaveBeenCalled();
+  });
+
+  it('keeps four lots within the 500 RUB expense-aware policy despite sandbox cash of 1000 RUB', async () => {
+    const journal = createJournal(); const now = new Date();
+    const candidate = recordCandidate(journal, now.toISOString(), 4);
+    const client = orderClient(vi.fn().mockResolvedValue({ brokerOrderId: 'four-lot-order',
+      executionStatus: 'EXECUTION_REPORT_STATUS_FILL', lotsRequested: 4, lotsExecuted: 4 }));
+    const config = createConfig({ T_INVEST_LIVE_CAPITAL_RUB: '500' });
+    const service = new ExecutionService(config, marketClient(), client, journal);
+
+    expect(config.strategies.intraday.maxPositionRub).toBe(498.25);
+    expect(config.strategies.intraday.maxRiskRub).toBe(20);
+    expect(config.execution.maxDailyRiskRub).toBe(60);
+    expect(config.commissionRate).toBe(0.003);
+    expect(config.strategies.intraday.allowShort).toBe(false);
+    service.queueScenario(candidate);
+    await service.armSandbox();
+    const result = await service.submitScenario(candidate.id, '42', now);
+
+    expect(result.order.status).toBe('accepted');
+    expect(result.lotsExecuted).toBe(4);
+    expect(client.postLimitOrder).toHaveBeenCalledOnce();
+    expect(client.postLimitOrder).toHaveBeenCalledWith(expect.objectContaining({ mode: 'sandbox', lots: 4, limitPrice: 100, direction: 'buy' }));
+    expect(client.openSandboxAccount).not.toHaveBeenCalled();
+    expect(client.sandboxPayIn).not.toHaveBeenCalled();
+  });
+
   it.each(['disabled', 'missing-token', 'same-read-token', 'same-live-token', 'wrong-endpoint', 'configured-account'])
     ('refuses %s configuration before reading or mutating the broker', async condition => {
       const journal = createJournal(); const config = createConfig(); const client = orderClient();

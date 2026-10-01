@@ -45,7 +45,7 @@ Executor использует заданный `T_INVEST_TRANSPORT`, в том �
 
 ## Защитные ограничения
 
-- отдельный `T_INVEST_TRADING_TOKEN`, который не передаётся MCP и сканеру;
+- отдельный `T_INVEST_SANDBOX_TOKEN`, который не передаётся MCP, сканеру или live-подготовке;
 - торговые записи только в `SandboxService`: `PostSandboxOrder`, опциональный `PostSandboxStopOrder` и, при отдельно включённом выходе из сессии, `CancelSandboxStopOrder` для собственного подтверждённого стопа; live-endpoint в клиенте отсутствует;
 - только long, лимитная заявка, `TIME_IN_FORCE_FILL_OR_KILL`, `confirmMarginTrade=false`;
 - один заранее рассчитанный размер и цена из карточки;
@@ -61,13 +61,15 @@ Executor использует заданный `T_INVEST_TRANSPORT`, в том �
 
 ## Настройка
 
-Сохраните на сервере два разных токена:
+Назначьте существующим токенам разные роли. Для песочницы:
 
 ```dotenv
 T_INVEST_TOKEN=токен-только-для-чтения
 T_INVEST_BASE_URL=https://invest-public-api.tbank.ru/rest
 T_INVEST_EXECUTION_MODE=sandbox
-T_INVEST_TRADING_TOKEN=отдельный-токен-с-правом-торговли
+T_INVEST_SANDBOX_TOKEN=выделенный-токен-песочницы
+# If an existing TRADING_TOKEN is a production token, do not send it to sandbox.
+T_INVEST_TRADING_TOKEN_ROLE=live
 T_INVEST_SANDBOX_ACCOUNT_ID=
 T_INVEST_SANDBOX_INITIAL_BALANCE_RUB=1000
 T_INVEST_EXECUTION_MAX_ORDERS_PER_DAY=3
@@ -83,6 +85,15 @@ Sandbox-клиент использует отдельный фиксирова�
 `https://sandbox-invest-public-api.tbank.ru/rest`; он не наследует этот env-параметр.
 Не переключайте основной адрес на песочницу и не меняйте режим исполнения ради
 создания или пополнения счёта.
+
+Старые установки с `T_INVEST_TRADING_TOKEN` без селектора сохраняют sandbox-роль.
+Production-токен в этом поле требует явного `T_INVEST_TRADING_TOKEN_ROLE=live`;
+песочница тогда получает только `T_INVEST_SANDBOX_TOKEN`. При отсутствии этого
+ключа подготовленный виртуальный счёт сохраняется, но его исполнение недоступно.
+Не копируйте один секрет между ролями. Начальный виртуальный остаток независим
+от live-капитала: при подготовке он не превышает 1 000 ₽; live-капитал 500 ₽
+ограничивает размер сделки, а не меняет требуемые 1 000 ₽ для активации готовой
+песочницы. Отправка реальных заявок этим конфигом не разрешается.
 
 1. `/execution` — режим `sandbox`, токен задан, kill switch включён.
 2. После отдельной подтверждённой подготовки — `/execution_arm SANDBOX`. Команда только читает данные, ничего не создаёт и не пополняет. Kill switch выключается только после всех проверок.

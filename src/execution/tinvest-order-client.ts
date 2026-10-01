@@ -59,7 +59,7 @@ export class TInvestOrderClient {
   ) {}
 
   async postLimitOrder(input: LimitOrderInput): Promise<LimitOrderResult> {
-    if (!this.token) throw new TInvestOrderError('T_INVEST_TRADING_TOKEN is not configured', false);
+    if (!this.token) throw new TInvestOrderError('Sandbox credential is not configured', false);
     if (input.mode !== 'sandbox') {
       throw new TInvestOrderError('Only sandbox execution is implemented', false);
     }
@@ -216,7 +216,7 @@ export class TInvestOrderClient {
   }
 
   private async request(path: string, body: unknown, uncertainOnNetwork: boolean): Promise<unknown> {
-    if (!this.token) throw new TInvestOrderError('T_INVEST_TRADING_TOKEN is not configured', false);
+    if (!this.token) throw new TInvestOrderError('Sandbox credential is not configured', false);
 
     let status: number;
     let payload: unknown;
