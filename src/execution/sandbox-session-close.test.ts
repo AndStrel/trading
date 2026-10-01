@@ -10,6 +10,8 @@ import { SandboxExitService } from './sandbox-exit-service.js';
 import { SandboxLossGuard } from './sandbox-loss-guard.js';
 import { SandboxSafetyMonitor } from './sandbox-safety-monitor.js';
 import { ExecutionService } from './execution-service.js';
+import { seedPreparedSandbox } from './sandbox-prepared.test-helper.js';
+import { sandboxEndpoint } from './sandbox-prepared-account.js';
 import { parseSandboxOrderState } from './sandbox-order-state.js';
 import { sandboxSessionCloseDue, sandboxSessionEntryAllowed } from './sandbox-session-policy.js';
 
@@ -18,8 +20,9 @@ const dirs:string[]=[];
 afterEach(()=>{vi.restoreAllMocks();vi.useRealTimers();for(const dir of dirs.splice(0)) rmSync(dir,{recursive:true,force:true});});
 function setup() {
   const dir=mkdtempSync(join(tmpdir(),'trading-session-'));dirs.push(dir);const path=join(dir,'journal.sqlite');const journal=new ScenarioJournal(path);
+  seedPreparedSandbox(journal, 'local-account');
   const config=loadConfig({T_INVEST_TOKEN:'local-read',T_INVEST_TRADING_TOKEN:'local-trading',T_INVEST_EXECUTION_MODE:'sandbox',
-    T_INVEST_SANDBOX_ACCOUNT_ID:'local-account',T_INVEST_SANDBOX_PROTECTION_ENABLED:'true',T_INVEST_SANDBOX_LOSS_GUARD_ENABLED:'true',
+    T_INVEST_BASE_URL:sandboxEndpoint,T_INVEST_SANDBOX_ACCOUNT_ID:'local-account',T_INVEST_SANDBOX_PROTECTION_ENABLED:'true',T_INVEST_SANDBOX_LOSS_GUARD_ENABLED:'true',
     T_INVEST_SANDBOX_SESSION_CLOSE_ENABLED:'true',T_INVEST_INTRADAY_WATCHLIST:'[{"instrumentId":"local-instrument","lotSize":10,"priceStep":0.01}]'});
   const scenario=journal.record({observedAt:entryAt,strategy:'intraday',instrumentId:'local-instrument',
     input:{side:'long',entryPrice:10,stopPrice:9.9,targetPrice:11,lotSize:10,slippageRate:0.0005},decision:'candidate',blockers:[],warnings:[],

@@ -9,13 +9,17 @@ import { loadConfig } from '../config.js';
 import { ScenarioJournal } from '../journal/scenario-journal.js';
 import { ExecutionService } from './execution-service.js';
 import { TInvestOrderError } from './tinvest-order-client.js';
+import { seedPreparedSandbox } from './sandbox-prepared.test-helper.js';
+import { sandboxAccountKey, sandboxBootstrapKey, sandboxEndpoint } from './sandbox-prepared-account.js';
 
 const temporaryDirectories: string[] = [];
 
 function createJournal(): ScenarioJournal {
   const directory = mkdtempSync(join(tmpdir(), 'andstrel-execution-'));
   temporaryDirectories.push(directory);
-  return new ScenarioJournal(join(directory, 'journal.sqlite'));
+  const journal = new ScenarioJournal(join(directory, 'journal.sqlite'));
+  seedPreparedSandbox(journal, 'sandbox-account');
+  return journal;
 }
 
 function createConfig(overrides: NodeJS.ProcessEnv = {}) {
@@ -23,6 +27,7 @@ function createConfig(overrides: NodeJS.ProcessEnv = {}) {
     T_INVEST_EXECUTION_MODE: 'sandbox',
     T_INVEST_TRADING_TOKEN: 'trade-token',
     T_INVEST_SANDBOX_ACCOUNT_ID: 'sandbox-account',
+    T_INVEST_BASE_URL: sandboxEndpoint,
     T_INVEST_INTRADAY_WATCHLIST:
       '[{"instrumentId":"sber","label":"SBER","lotSize":1,"priceStep":0.01}]',
     ...overrides,
@@ -68,7 +73,11 @@ function marketClient() {
 function orderClient(postLimitOrder = vi.fn()) {
   return {
     postLimitOrder,
-    getSandboxAccounts: vi.fn().mockResolvedValue([]),
+    getSandboxAccounts: vi.fn().mockResolvedValue([{ id: 'sandbox-account', name: 'daily-pilot-00000000-0000-4000-8000-000000000001' }]),
+    getSandboxPositions: vi.fn().mockResolvedValue({ accountId: 'sandbox-account', limitsLoadingInProgress: false,
+      securities: [], futures: [], options: [], money: [{ currency: 'rub', units: '1000', nano: 0 }], blocked: [] }),
+    getSandboxOrders: vi.fn().mockResolvedValue({ orders: [] }),
+    getSandboxStopOrders: vi.fn().mockResolvedValue({ stopOrders: [] }),
     openSandboxAccount: vi.fn().mockResolvedValue('created-sandbox-account'),
     sandboxPayIn: vi.fn().mockResolvedValue(undefined),
     getSandboxOrderState: vi.fn(),
@@ -85,12 +94,134 @@ function statePayload(requestId: string, lotsExecuted = 5, status = 'EXECUTION_R
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
 });
 
 describe('ExecutionService', () => {
+  it.each(['disabled', 'missing-token', 'same-read-token', 'same-live-token', 'wrong-endpoint', 'configured-account'])
+    ('refuses %s configuration before reading or mutating the broker', async condition => {
+      const journal = createJournal(); const config = createConfig(); const client = orderClient();
+      if (condition === 'disabled') config.execution.mode = 'disabled';
+      if (condition === 'missing-token') delete config.execution.token;
+      if (condition === 'same-read-token') config.token = config.execution.token!;
+      if (condition === 'same-live-token') config.livePilot.token = config.execution.token!;
+      if (condition === 'wrong-endpoint') config.baseUrl = 'https://invest-public-api.tbank.ru/rest';
+      if (condition === 'configured-account') config.execution.accountId = 'other';
+      const service = new ExecutionService(config, marketClient(), client, journal);
+      await expect(service.armSandbox()).rejects.toThrow('not confirmed');
+      expect(journal.isExecutionKilled()).toBe(true); expect(client.getSandboxAccounts).not.toHaveBeenCalled();
+      expect(client.openSandboxAccount).not.toHaveBeenCalled(); expect(client.sandboxPayIn).not.toHaveBeenCalled(); expect(client.postLimitOrder).not.toHaveBeenCalled();
+    });
+
+  it.each(['missing', 'corrupt', 'open-claimed', 'opened', 'payin-claimed', 'wrong-nonce', 'wrong-name', 'wrong-endpoint', 'wrong-id', 'legacy-only'])
+    ('refuses %s preparation without any broker write or account adoption', async condition => {
+      const journal = createJournal(); const state = seedPreparedSandbox(journal, 'sandbox-account');
+      let raw = JSON.stringify(state);
+      if (condition === 'missing' || condition === 'legacy-only') raw = 'null';
+      if (condition === 'corrupt') raw = '{';
+      if (['open-claimed', 'opened', 'payin-claimed'].includes(condition)) raw = JSON.stringify({ ...state, phase: condition });
+      if (condition === 'wrong-nonce') raw = JSON.stringify({ ...state, nonce: 'invalid' });
+      if (condition === 'wrong-name') raw = JSON.stringify({ ...state, name: 'AndStrel trading sandbox' });
+      if (condition === 'wrong-endpoint') raw = JSON.stringify({ ...state, endpoint: 'https://example.test/rest' });
+      if (condition === 'wrong-id') raw = JSON.stringify({ ...state, accountId: 'other' });
+      journal.setRuntimeState(sandboxBootstrapKey, raw);
+      journal.setRuntimeState('execution.sandbox_funded_account_id', 'sandbox-account');
+      journal.setExecutionKilled(false);
+      const client = orderClient(); const service = new ExecutionService(createConfig(), marketClient(), client, journal);
+      await expect(service.armSandbox()).rejects.toThrow('not confirmed');
+      expect(service.isKilled()).toBe(true); expect(client.getSandboxAccounts).not.toHaveBeenCalled();
+      expect(client.openSandboxAccount).not.toHaveBeenCalled(); expect(client.sandboxPayIn).not.toHaveBeenCalled();
+      expect(client.postLimitOrder).not.toHaveBeenCalled(); expect(journal.getRuntimeState(sandboxBootstrapKey)).toBe(raw);
+    });
+
+  it.each(['missing-account', 'foreign-account', 'foreign-name', 'cash', 'positions', 'blocked', 'missing-positions', 'orders', 'missing-orders', 'stops', 'missing-stops', 'private-error'])
+    ('refuses %s fresh account proof and keeps kill pinned', async condition => {
+      const journal = createJournal(); const client = orderClient();
+      if (condition === 'missing-account') client.getSandboxAccounts.mockResolvedValue([]);
+      if (condition === 'foreign-account') client.getSandboxAccounts.mockResolvedValue([{ id: 'other', name: 'same' }]);
+      if (condition === 'foreign-name') client.getSandboxAccounts.mockResolvedValue([{ id: 'sandbox-account', name: 'other' }]);
+      const positions = await client.getSandboxPositions(); client.getSandboxPositions.mockClear();
+      if (condition === 'cash') client.getSandboxPositions.mockResolvedValue({ ...positions, money: [{ currency: 'rub', units: '999', nano: 0 }] });
+      if (condition === 'positions') client.getSandboxPositions.mockResolvedValue({ ...positions, securities: [{}] });
+      if (condition === 'blocked') client.getSandboxPositions.mockResolvedValue({ ...positions, blocked: [{ currency: 'rub', units: '1', nano: 0 }] });
+      if (condition === 'missing-positions') client.getSandboxPositions.mockResolvedValue({});
+      if (condition === 'orders') client.getSandboxOrders.mockResolvedValue({ orders: [{}] });
+      if (condition === 'missing-orders') client.getSandboxOrders.mockResolvedValue({});
+      if (condition === 'stops') client.getSandboxStopOrders.mockResolvedValue({ stopOrders: [{}] });
+      if (condition === 'missing-stops') client.getSandboxStopOrders.mockResolvedValue({});
+      if (condition === 'private-error') client.getSandboxAccounts.mockRejectedValue(new Error('Sandbox arming private-id private-token'));
+      const service = new ExecutionService(createConfig(), marketClient(), client, journal);
+      await expect(service.armSandbox()).rejects.toThrow(/^Sandbox arming is not confirmed;/);
+      expect(service.isKilled()).toBe(true);
+      expect(client.openSandboxAccount).not.toHaveBeenCalled(); expect(client.sandboxPayIn).not.toHaveBeenCalled(); expect(client.postLimitOrder).not.toHaveBeenCalled();
+    });
+
+  it.each(['kill', 'direct-safety-kill', 'preparation', 'account', 'pending-recovery', 'stale'])
+    ('cannot clear kill after %s changes during arming', async condition => {
+      vi.useFakeTimers({ toFake: ['Date'] }); const journal = createJournal(); const client = orderClient();
+      const service = new ExecutionService(createConfig(), marketClient(), client, journal);
+      const positions = await client.getSandboxPositions();
+      client.getSandboxPositions.mockImplementation(async () => {
+        if (condition === 'kill') service.kill();
+        if (condition === 'direct-safety-kill') {
+          const db = new DatabaseSync(join(temporaryDirectories.at(-1)!, 'journal.sqlite'));
+          try { db.prepare("UPDATE runtime_state SET value='true' WHERE key='execution.kill_switch'").run(); } finally { db.close(); }
+        }
+        if (condition === 'preparation') journal.setRuntimeState(sandboxBootstrapKey, JSON.stringify({ ...seedPreparedSandbox(journal, 'sandbox-account'), phase: 'payin-claimed' }));
+        if (condition === 'account') journal.setRuntimeState(sandboxAccountKey, 'other');
+        if (condition === 'pending-recovery') { const c = recordCandidate(journal, new Date().toISOString()); service.queueScenario(c); journal.claimExecution(c.id, '42'); }
+        if (condition === 'stale') vi.setSystemTime(new Date(Date.now() + 30_001));
+        return positions;
+      });
+      await expect(service.armSandbox()).rejects.toThrow('not confirmed');
+      expect(service.isKilled()).toBe(true); expect(client.sandboxPayIn).not.toHaveBeenCalled(); expect(client.postLimitOrder).not.toHaveBeenCalled();
+    });
+
+  it('an older arming pass cannot overwrite a newer safety decision from another instance', async () => {
+    const journal = createJournal(); const client = orderClient();
+    let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+    const accounts = await client.getSandboxAccounts();
+    client.getSandboxAccounts.mockImplementation(async () => { await gate; return accounts; });
+    const older = new ExecutionService(createConfig(), marketClient(), client, journal);
+    const newer = new ExecutionService(createConfig(), marketClient(), orderClient(), new ScenarioJournal(join(temporaryDirectories.at(-1)!, 'journal.sqlite')));
+    const pending = older.armSandbox(); const rejection = expect(pending).rejects.toThrow('not confirmed');
+    await newer.armSandbox(); newer.kill(); release(); await rejection;
+    expect(journal.isExecutionKilled()).toBe(true); expect(client.sandboxPayIn).not.toHaveBeenCalled();
+  });
+
+  it('legacy or uncertain preparation blocks new entries but retains read-only recovery', async () => {
+    const journal = createJournal(); const now = new Date(); const candidate = recordCandidate(journal, now.toISOString());
+    const client = orderClient(); const service = new ExecutionService(createConfig(), marketClient(), client, journal);
+    journal.setRuntimeState(sandboxBootstrapKey, 'null'); journal.setExecutionKilled(false); service.queueScenario(candidate);
+    await expect(service.submitScenario(candidate.id, '42', now)).rejects.toThrow('no new order');
+    expect(journal.isExecutionKilled()).toBe(true); expect(client.postLimitOrder).not.toHaveBeenCalled();
+    journal.claimExecution(candidate.id, '42');
+    const request = journal.getExecutionByScenario(candidate.id)!.orderRequestId;
+    client.getSandboxOrderState.mockResolvedValue(statePayload(request, 0, 'EXECUTION_REPORT_STATUS_CANCELLED'));
+    expect((await service.submitScenario(candidate.id, '42', now)).order.status).toBe('failed');
+    expect(client.getSandboxOrderState).toHaveBeenCalledOnce(); expect(client.postLimitOrder).not.toHaveBeenCalled();
+  });
+
+  it.each(['preparation', 'account', 'kill-cycle'])('atomically rejects %s changes during entry market preflight', async condition => {
+    const journal = createJournal(); const market = marketClient(); const client = orderClient(); const now = new Date();
+    const candidate = recordCandidate(journal, now.toISOString()); const service = new ExecutionService(createConfig(), market, client, journal);
+    service.queueScenario(candidate); await service.armSandbox();
+    const status = await market.getTradingStatus();
+    market.getTradingStatus.mockImplementation(async () => {
+      if (condition === 'preparation') journal.setRuntimeState(sandboxBootstrapKey, 'null');
+      if (condition === 'account') journal.setRuntimeState(sandboxAccountKey, 'other');
+      if (condition === 'kill-cycle') { service.kill(); journal.setExecutionKilled(false); }
+      return status;
+    });
+    await expect(service.submitScenario(candidate.id, '42', now)).rejects.toThrow('changed');
+    expect(journal.isExecutionKilled()).toBe(true);
+    expect(journal.getExecutionByScenario(candidate.id)?.status).toBe('pending'); expect(client.postLimitOrder).not.toHaveBeenCalled();
+  });
+
   it('bounds startup recovery, preserves unresolved orders and performs no broker writes after kill', async () => {
     const journal = createJournal(); const now = new Date();
     const client = orderClient(); const service = new ExecutionService(createConfig(), marketClient(), client, journal);
@@ -178,12 +309,15 @@ describe('ExecutionService', () => {
     const path = join(directory, 'journal.sqlite'); const journal = new ScenarioJournal(path); const now = new Date();
     const candidate = recordCandidate(journal, now.toISOString()); const client = orderClient();
     const service = new ExecutionService(createConfig(), marketClient(), client, journal);
-    const queued = service.queueScenario(candidate)!; await service.armSandbox();
+    const queued = service.queueScenario(candidate)!;
+    // Existing legacy intent can be read after restart, but is not authority to arm.
     journal.claimExecution(candidate.id, '42'); journal.markExecutionAccepted(candidate.id, 'broker-order', 'legacy filled');
     const db = new DatabaseSync(path); db.exec('DELETE FROM execution_evidence'); db.close();
     client.getSandboxOrderState.mockResolvedValue(statePayload(queued.orderRequestId, 0, 'EXECUTION_REPORT_STATUS_CANCELLED'));
     await expect(service.reconcileScenario(candidate.id, now)).rejects.toThrow('prior risk remains reserved');
     expect(journal.getExecutionByScenario(candidate.id)?.status).toBe('accepted');
+    expect(journal.isExecutionKilled()).toBe(true);
+    expect(client.openSandboxAccount).not.toHaveBeenCalled(); expect(client.sandboxPayIn).not.toHaveBeenCalled();
   });
   it('persists monotonic trade evidence and rolls back a contradictory later snapshot', async () => {
     const journal = createJournal(); const now = new Date(); const candidate = recordCandidate(journal, now.toISOString());
@@ -243,7 +377,7 @@ describe('ExecutionService', () => {
   it('reserves the daily budget atomically for concurrent confirmations', async () => {
     const journal = createJournal();
     const config = createConfig({ T_INVEST_EXECUTION_MAX_ORDERS_PER_DAY: '20',
-      T_INVEST_LIVE_PILOT_PREPARE: 'false', T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB: '49' });
+      T_INVEST_LIVE_PILOT_PREPARE: 'false', T_INVEST_SANDBOX_INITIAL_BALANCE_RUB: '1000', T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB: '49' });
     const now = new Date();
     const candidates = Array.from({ length: 8 }, () => recordCandidate(journal, now.toISOString()));
     const postLimitOrder = vi.fn().mockResolvedValue({ brokerOrderId: 'broker-order', executionStatus: 'EXECUTION_REPORT_STATUS_FILL', lotsRequested: 5, lotsExecuted: 5 });
@@ -299,19 +433,18 @@ describe('ExecutionService', () => {
     expect(postLimitOrder).not.toHaveBeenCalled();
   });
 
-  it('creates and funds a dedicated sandbox account when arming for the first time', async () => {
+  it('only verifies a separately prepared account; never creates, adopts by name or funds while arming', async () => {
     const journal = createJournal();
-    const config = loadConfig({
-      T_INVEST_EXECUTION_MODE: 'sandbox',
-      T_INVEST_TRADING_TOKEN: 'trade-token',
-    });
+    const config = createConfig({ T_INVEST_SANDBOX_ACCOUNT_ID: undefined });
     const client = orderClient();
     const service = new ExecutionService(config, marketClient(), client, journal);
 
     await service.armSandbox();
 
-    expect(client.openSandboxAccount).toHaveBeenCalledWith('AndStrel trading sandbox');
-    expect(client.sandboxPayIn).toHaveBeenCalledWith('created-sandbox-account', 1_000);
+    expect(journal.getRuntimeState('execution.sandbox_funded_account_id')).toBeNull();
+    expect(client.openSandboxAccount).not.toHaveBeenCalled();
+    expect(client.sandboxPayIn).not.toHaveBeenCalled();
+    expect(client.postLimitOrder).not.toHaveBeenCalled();
     expect(service.isReady()).toBe(true);
     expect(service.isKilled()).toBe(false);
   });

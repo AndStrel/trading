@@ -540,7 +540,7 @@ export class TelegramTradingBot {
     return [
       `Исполнение: ${this.execution.mode()}`,
       `Токен: ${this.execution.isConfigured() ? 'задан' : 'не задан'}`,
-      `Sandbox-счёт: ${this.execution.isReady() ? 'готов' : 'будет создан при включении'}`,
+      `Sandbox-счёт: ${this.execution.isReady() ? 'настроен; активация требует отдельной проверки' : 'требуется отдельная подготовка'}`,
       `Kill switch: ${this.execution.isKilled() ? 'включён' : 'выключен'}`,
       'Live-режим отсутствует; доступна только песочница с подтверждением каждой заявки.',
     ].join('\n');

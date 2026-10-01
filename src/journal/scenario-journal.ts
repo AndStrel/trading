@@ -12,6 +12,10 @@ import { moscowLossDay, type SandboxLossAssessment, type SandboxLossProof } from
 import { sandboxSessionCloseDue, type SandboxSessionExitIntent } from '../execution/sandbox-session-policy.js';
 import { nanoQuotation } from '../execution/sandbox-stop-state.js';
 
+export class SandboxPreparationChangedError extends Error {
+  constructor() { super('Sandbox arming or preparation changed during entry preflight'); }
+}
+
 export type NativeStopRecord = { intent: SandboxStopIntent; observation: SandboxStopObservation | null };
 export type SandboxExitEvidence = { snapshot: SandboxOrderSnapshot; flatConfirmedAt: string | null; observedAt: string };
 export type SandboxSafetyReason = 'protection-unconfirmed' | 'loss-incomplete' | 'loss-limit' | 'monitor-unavailable';
@@ -242,6 +246,23 @@ const schema = `
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
   ) STRICT;
+
+  -- Cover safety paths that write kill directly as well as the public setter.
+  -- A fresh generation detects repeated true writes with identical timestamps.
+  CREATE TRIGGER IF NOT EXISTS execution_kill_insert_generation
+  AFTER INSERT ON runtime_state WHEN NEW.key = 'execution.kill_switch'
+  BEGIN
+    INSERT INTO runtime_state (key,value,updated_at)
+    VALUES ('execution.kill_generation',lower(hex(randomblob(16))),NEW.updated_at)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at;
+  END;
+  CREATE TRIGGER IF NOT EXISTS execution_kill_update_generation
+  AFTER UPDATE ON runtime_state WHEN NEW.key = 'execution.kill_switch'
+  BEGIN
+    INSERT INTO runtime_state (key,value,updated_at)
+    VALUES ('execution.kill_generation',lower(hex(randomblob(16))),NEW.updated_at)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at;
+  END;
 
   CREATE TABLE IF NOT EXISTS sandbox_safety_incidents (
     id TEXT PRIMARY KEY,
@@ -811,6 +832,7 @@ export class ScenarioJournal {
   claimExecution(scenarioId: number, chatId: string, limits?: {
     from: string; to: string; now: string; maxOrders: number; maxRiskRub: number; singlePosition?: boolean;
     lossGuard?: { proofId: string; accountId: string; maxDailyLossRub: number; maxTradeLossRub: number };
+    preparedSandbox?: { raw: string; accountId: string; generation: string | null };
   }): ExecutionOrderRecord {
     const database = this.open();
     try {
@@ -825,6 +847,14 @@ export class ScenarioJournal {
           const killed = database.prepare('SELECT value FROM runtime_state WHERE key = ?')
             .get('execution.kill_switch') as { value: string } | undefined;
           if (killed?.value !== 'false') throw new Error('Execution kill switch is active');
+          if (limits.preparedSandbox) {
+            const state = (key: string) => (database.prepare('SELECT value FROM runtime_state WHERE key=?').get(key) as {value:string}|undefined)?.value;
+            const expected = limits.preparedSandbox;
+            if (!expected.generation || state('execution.kill_generation') !== expected.generation
+              || state('execution.sandbox_bootstrap_v1') !== expected.raw || state('execution.sandbox_account_id') !== expected.accountId) {
+              throw new SandboxPreparationChangedError();
+            }
+          }
           if (limits.lossGuard) this.assertLossProof(database, row, limits.now, limits.lossGuard);
           if (limits.singlePosition && database.prepare(
             "SELECT id FROM execution_orders WHERE status IN ('submitting', 'accepted') LIMIT 1",
@@ -1343,6 +1373,34 @@ export class ScenarioJournal {
 
   setExecutionKilled(killed: boolean): void {
     this.setRuntimeState('execution.kill_switch', killed ? 'true' : 'false');
+  }
+
+  beginSandboxArming(): string {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      db.prepare(`INSERT INTO runtime_state (key,value,updated_at) VALUES ('execution.kill_switch','true',?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`).run(new Date().toISOString());
+      const row = db.prepare("SELECT value FROM runtime_state WHERE key='execution.kill_generation'").get() as {value:string};
+      db.exec('COMMIT'); return row.value;
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+    finally { db.close(); }
+  }
+
+  finishSandboxArming(generation: string, expected: { raw: string; accountId: string }): void {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const state = (key: string) => (db.prepare('SELECT value FROM runtime_state WHERE key=?').get(key) as {value:string}|undefined)?.value;
+      if (!generation || state('execution.kill_switch') !== 'true' || state('execution.kill_generation') !== generation
+        || state('execution.sandbox_bootstrap_v1') !== expected.raw || state('execution.sandbox_account_id') !== expected.accountId
+        || db.prepare("SELECT id FROM execution_orders WHERE mode='sandbox' AND status IN ('submitting','accepted') LIMIT 1").get()) {
+        throw new Error('Sandbox arming was superseded or requires recovery; execution remains killed');
+      }
+      db.prepare("UPDATE runtime_state SET value='false',updated_at=? WHERE key='execution.kill_switch'").run(new Date().toISOString());
+      db.exec('COMMIT');
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+    finally { db.close(); }
   }
 
   private finishExecution(
