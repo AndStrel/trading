@@ -7,6 +7,8 @@ import { ScenarioJournal } from '../journal/scenario-journal.js';
 import { SandboxProtectionService } from './sandbox-protection-service.js';
 import { nanoQuotation } from './sandbox-stop-state.js';
 import { ExecutionService } from './execution-service.js';
+import { seedPreparedSandbox } from './sandbox-prepared.test-helper.js';
+import { sandboxEndpoint } from './sandbox-prepared-account.js';
 
 const directories: string[] = [];
 const now = new Date('2026-09-30T12:00:00.000Z');
@@ -15,8 +17,9 @@ afterEach(() => { for (const directory of directories.splice(0)) rmSync(director
 function setup(accepted = true, lotsExecuted = 5, status = 'EXECUTION_REPORT_STATUS_FILL') {
   const directory = mkdtempSync(join(tmpdir(), 'trading-native-stop-')); directories.push(directory);
   const journal = new ScenarioJournal(join(directory, 'journal.sqlite'));
+  seedPreparedSandbox(journal, 'local-account');
   const config = loadConfig({ T_INVEST_TOKEN: 'read-token', T_INVEST_TRADING_TOKEN: 'isolated-sandbox-token',
-    T_INVEST_EXECUTION_MODE: 'sandbox', T_INVEST_SANDBOX_ACCOUNT_ID: 'local-account', T_INVEST_SANDBOX_PROTECTION_ENABLED: 'true' });
+    T_INVEST_BASE_URL: sandboxEndpoint, T_INVEST_EXECUTION_MODE: 'sandbox', T_INVEST_SANDBOX_ACCOUNT_ID: 'local-account', T_INVEST_SANDBOX_PROTECTION_ENABLED: 'true' });
   const scenario = journal.record({ observedAt: now.toISOString(), strategy: 'intraday', instrumentId: 'local-instrument',
     input: { side: 'long', entryPrice: 10, stopPrice: 9.9, targetPrice: 11, lotSize: 10, slippageRate: 0.0005 },
     decision: 'candidate', blockers: [], warnings: [], snapshot: { tradePlan: { lots: 5, positionRub: 500, totalRiskRub: 9 } } });

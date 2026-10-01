@@ -9,6 +9,8 @@ import { parseSandboxOrderState } from './sandbox-order-state.js';
 import { SandboxExitService } from './sandbox-exit-service.js';
 import { SandboxLossGuard } from './sandbox-loss-guard.js';
 import { ExecutionService } from './execution-service.js';
+import { seedPreparedSandbox } from './sandbox-prepared.test-helper.js';
+import { sandboxEndpoint } from './sandbox-prepared-account.js';
 import { moscowLossDay } from './sandbox-loss-policy.js';
 import { buildMiniAppView } from '../web/mini-app-view.js';
 
@@ -20,8 +22,9 @@ afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); for (const dir of di
 function setup(open = true) {
   const dir = mkdtempSync(join(tmpdir(), 'trading-loss-')); dirs.push(dir);
   const path = join(dir, 'journal.sqlite'); const journal = new ScenarioJournal(path);
+  seedPreparedSandbox(journal, 'local-account');
   const config = loadConfig({ T_INVEST_TOKEN: 'local-read', T_INVEST_TRADING_TOKEN: 'local-isolated',
-    T_INVEST_EXECUTION_MODE: 'sandbox', T_INVEST_SANDBOX_ACCOUNT_ID: 'local-account',
+    T_INVEST_BASE_URL: sandboxEndpoint, T_INVEST_EXECUTION_MODE: 'sandbox', T_INVEST_SANDBOX_ACCOUNT_ID: 'local-account',
     T_INVEST_SANDBOX_PROTECTION_ENABLED: 'true', T_INVEST_SANDBOX_LOSS_GUARD_ENABLED: 'true' });
   const scenario = journal.record({ observedAt: entryAt, strategy: 'intraday', instrumentId: 'local-instrument',
     input: { side: 'long', entryPrice: 10, stopPrice: 9.9, targetPrice: 11, lotSize: 10, slippageRate: 0.0005 },

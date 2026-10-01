@@ -6,6 +6,7 @@ import {
   type ExecutionOrderRecord,
   type JournalScenarioRecord,
   ScenarioJournal,
+  SandboxPreparationChangedError,
 } from '../journal/scenario-journal.js';
 import type { TInvestClient } from '../tbank/client.js';
 import { TInvestOrderClient, TInvestOrderError } from './tinvest-order-client.js';
@@ -19,6 +20,8 @@ import type { SandboxSessionClose } from './sandbox-session-close.js';
 import { sandboxSessionEntryAllowed } from './sandbox-session-policy.js';
 import { decimalPriceNano } from './sandbox-stop-state.js';
 import { assertSandboxInstrument } from './sandbox-instrument.js';
+import { assertNoSandboxOrders, sandboxFlatCashNano } from './sandbox-flat-account.js';
+import { readPreparedSandbox, sandboxAccountKey, sandboxBootstrapKey, sandboxEndpoint } from './sandbox-prepared-account.js';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -99,7 +102,7 @@ export class ExecutionService {
     private readonly marketClient: Pick<TInvestClient, 'getOrderBook' | 'getTradingStatus'> & Partial<Pick<TInvestClient,'getInstrumentBy'>>,
     private readonly orderClient: Pick<
       TInvestOrderClient,
-      'postLimitOrder' | 'getSandboxAccounts' | 'openSandboxAccount' | 'sandboxPayIn' | 'getSandboxOrderState'
+      'postLimitOrder' | 'getSandboxAccounts' | 'getSandboxPositions' | 'getSandboxOrders' | 'getSandboxStopOrders' | 'getSandboxOrderState'
     >,
     private readonly journal: ScenarioJournal,
     private readonly protection?: Pick<SandboxProtectionService, 'protect' | 'preflightForEntry'>,
@@ -128,11 +131,35 @@ export class ExecutionService {
   }
 
   async armSandbox(): Promise<void> {
-    if (!this.isConfigured()) {
-      throw new Error('Sandbox execution requires T_INVEST_TRADING_TOKEN');
+    // Pin kill before any asynchronous read. A later safety kill must never be
+    // overwritten, even if it sets the same boolean in the same millisecond.
+    const generation = this.journal.beginSandboxArming();
+    try {
+      const start = Date.now();
+      const snapshot = this.preparedSnapshot();
+      if (this.journal.listRecoverableExecutionOrders(1).length) throw new Error('Sandbox recovery is required before arming');
+      const accounts = await this.orderClient.getSandboxAccounts();
+      if (accounts.length !== 1 || accounts[0]?.id !== snapshot.accountId
+        || (accounts[0].name !== null && accounts[0].name !== snapshot.name)) throw new Error('Sandbox account ownership is not confirmed');
+      const orders = await this.orderClient.getSandboxOrders(snapshot.accountId);
+      const stops = await this.orderClient.getSandboxStopOrders(snapshot.accountId);
+      const positions = await this.orderClient.getSandboxPositions(snapshot.accountId);
+      assertNoSandboxOrders(orders);
+      const stopOrders = asRecord(stops)?.stopOrders;
+      if (!Array.isArray(stopOrders) || stopOrders.length) throw new Error('Empty sandbox stop book is not confirmed');
+      // This is initial arming only. Never refill cash to erase previous losses.
+      if (sandboxFlatCashNano(positions, snapshot.accountId) !== BigInt(decimalPriceNano(this.config.execution.sandboxInitialBalanceRub))) {
+        throw new Error('Initial sandbox cash is not confirmed; automatic funding is disabled');
+      }
+      const elapsed = Date.now() - start;
+      if (elapsed < 0 || elapsed > 30_000) throw new Error('Sandbox arming reads are stale');
+      this.journal.finishSandboxArming(generation, snapshot);
+      this.accountId = snapshot.accountId;
+    } catch {
+      this.kill();
+      // Never forward broker payloads/account identifiers to Telegram or logs.
+      throw new Error('Sandbox arming is not confirmed; separate preparation or recovery is required and execution remains killed');
     }
-    await this.ensureSandboxAccount();
-    this.journal.setExecutionKilled(false);
   }
 
   kill(): void {
@@ -191,6 +218,10 @@ export class ExecutionService {
       return this.reconcileScenario(scenarioId, now);
     }
     if (this.isKilled()) throw new Error('Execution kill switch is active');
+    const killGeneration = this.journal.getRuntimeState('execution.kill_generation');
+    let prepared;
+    try { prepared = this.preparedSnapshot(); }
+    catch { this.kill(); throw new Error('Separately prepared sandbox account is not confirmed; no new order was sent'); }
     if (this.config.execution.sandboxSessionCloseEnabled && (!this.sessionClose || !this.config.execution.sandboxProtectionEnabled
       || !this.config.execution.sandboxLossGuardEnabled || !sandboxSessionEntryAllowed(now))) {
       throw new Error('Sandbox session entry window or closing protection is not confirmed');
@@ -248,13 +279,20 @@ export class ExecutionService {
     if (this.config.execution.sandboxSessionCloseEnabled && !sandboxSessionEntryAllowed(claimNow)) {
       throw new Error('Sandbox entry window ended during preflight');
     }
-    const claimed = this.journal.claimExecution(scenarioId, chatId, {
-      ...(lossProof ? moscowDayRange(claimNow) : day), now: claimNow.toISOString(), maxOrders: this.config.execution.maxOrdersPerDay,
-      maxRiskRub: this.config.execution.maxDailyRiskRub,
-      singlePosition: this.config.livePilot.prepare,
-      ...(lossProof ? { lossGuard: { proofId: lossProof.proofId, accountId: this.accountId!,
-        maxDailyLossRub: this.config.livePilot.maxDailyLossRub, maxTradeLossRub: this.config.livePilot.maxTradeRiskRub } } : {}),
-    });
+    let claimed: ExecutionOrderRecord;
+    try {
+      claimed = this.journal.claimExecution(scenarioId, chatId, {
+        ...(lossProof ? moscowDayRange(claimNow) : day), now: claimNow.toISOString(), maxOrders: this.config.execution.maxOrdersPerDay,
+        maxRiskRub: this.config.execution.maxDailyRiskRub,
+        singlePosition: this.config.livePilot.prepare,
+        preparedSandbox: { ...prepared, generation: killGeneration },
+        ...(lossProof ? { lossGuard: { proofId: lossProof.proofId, accountId: this.accountId!,
+          maxDailyLossRub: this.config.livePilot.maxDailyLossRub, maxTradeLossRub: this.config.livePilot.maxTradeRiskRub } } : {}),
+      });
+    } catch (error) {
+      if (error instanceof SandboxPreparationChangedError) this.kill();
+      throw error;
+    }
 
     let response;
     try {
@@ -378,22 +416,15 @@ export class ExecutionService {
     }
   }
 
-  private async ensureSandboxAccount(): Promise<void> {
-    if (!this.accountId) {
-      const accountName = 'AndStrel trading sandbox';
-      const accounts = await this.orderClient.getSandboxAccounts();
-      const existing = accounts.find((account) => account.name === accountName);
-      this.accountId = existing?.id ?? (await this.orderClient.openSandboxAccount(accountName));
-      this.journal.setRuntimeState('execution.sandbox_account_id', this.accountId);
+  private preparedSnapshot() {
+    if (!this.isConfigured() || this.config.baseUrl !== sandboxEndpoint
+      || this.config.execution.token === this.config.token || this.config.execution.token === this.config.livePilot.token) {
+      throw new Error('Separately prepared sandbox configuration is not confirmed');
     }
-
-    if (this.journal.getRuntimeState('execution.sandbox_funded_account_id') !== this.accountId) {
-      await this.orderClient.sandboxPayIn(
-        this.accountId,
-        this.config.execution.sandboxInitialBalanceRub,
-      );
-      this.journal.setRuntimeState('execution.sandbox_funded_account_id', this.accountId);
-    }
+    const raw = this.journal.getRuntimeState(sandboxBootstrapKey);
+    const prepared = readPreparedSandbox(raw, this.journal.getRuntimeState(sandboxAccountKey), this.config.execution.accountId);
+    if (this.accountId && this.accountId !== prepared.accountId) throw new Error('Separately prepared sandbox account changed');
+    return { raw: raw!, accountId: prepared.accountId, name: prepared.name };
   }
 
   private assertStrategyLimits(plan: TradePlanSnapshot): void {
