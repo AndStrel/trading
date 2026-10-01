@@ -168,7 +168,7 @@ export class ExecutionService {
 
   queueScenario(scenario: JournalScenarioRecord): ExecutionOrderRecord | null {
     if (this.config.execution.mode === 'disabled') return null;
-    if (!this.isConfigured()) throw new Error('Sandbox execution is enabled but T_INVEST_TRADING_TOKEN is missing');
+    if (!this.isConfigured()) throw new Error('Sandbox execution is enabled but its isolated credential is missing');
     if (scenario.decision !== 'candidate' || scenario.strategy !== 'intraday') {
       throw new Error('Only recorded intraday candidates can be queued');
     }

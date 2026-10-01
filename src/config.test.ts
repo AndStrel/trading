@@ -140,6 +140,95 @@ describe('loadConfig', () => {
     });
   });
 
+  it('preserves the legacy sandbox role without guessing production intent from a token name', () => {
+    const config = loadConfig({ T_INVEST_TRADING_TOKEN: 'legacy-sandbox-token' });
+    expect(config.execution.token).toBe('legacy-sandbox-token');
+    expect(config.livePilot.token).toBeUndefined();
+    expect(config.execution.mode).toBe('disabled');
+  });
+
+  it('uses an explicitly selected live trading token only for production preflight', () => {
+    const config = loadConfig({
+      T_INVEST_TOKEN: 'read-token',
+      T_INVEST_TRADING_TOKEN: 'production-token',
+      T_INVEST_TRADING_TOKEN_ROLE: 'live',
+    });
+    expect(config.token).toBe('read-token');
+    expect(config.livePilot.token).toBe('production-token');
+    expect(config.execution.token).toBeUndefined();
+    expect(config.execution.mode).toBe('disabled');
+    expect(config.execution.baseUrl).toBe('https://sandbox-invest-public-api.tbank.ru/rest');
+    expect(() => loadConfig({ T_INVEST_EXECUTION_MODE: 'live' })).toThrow();
+  });
+
+  it('resolves three isolated credential roles using the dedicated sandbox field', () => {
+    const config = loadConfig({
+      T_INVEST_TOKEN: 'read-token',
+      T_INVEST_TRADING_TOKEN: 'production-token',
+      T_INVEST_TRADING_TOKEN_ROLE: 'live',
+      T_INVEST_SANDBOX_TOKEN: 'sandbox-token',
+    });
+    expect(config.token).toBe('read-token');
+    expect(config.livePilot.token).toBe('production-token');
+    expect(config.execution.token).toBe('sandbox-token');
+  });
+
+  it('supports canonical credentials without a trading alias', () => {
+    const config = loadConfig({ T_INVEST_SANDBOX_TOKEN: 'sandbox-token', T_INVEST_LIVE_TOKEN: 'production-token' });
+    expect(config.execution.token).toBe('sandbox-token');
+    expect(config.livePilot.token).toBe('production-token');
+  });
+
+  it.each(['sandbox', 'live'] as const)('accepts identical trimmed aliases for the same %s role', role => {
+    const config = loadConfig({
+      T_INVEST_TRADING_TOKEN_ROLE: role,
+      T_INVEST_TRADING_TOKEN: ' same-role-token ',
+      [role === 'sandbox' ? 'T_INVEST_SANDBOX_TOKEN' : 'T_INVEST_LIVE_TOKEN']: 'same-role-token',
+    });
+    expect(role === 'sandbox' ? config.execution.token : config.livePilot.token).toBe('same-role-token');
+    expect(role === 'sandbox' ? config.livePilot.token : config.execution.token).toBeUndefined();
+  });
+
+  it.each(['sandbox', 'live'] as const)('rejects conflicting %s aliases without disclosing either value', role => {
+    let error: unknown;
+    try {
+      loadConfig({
+        T_INVEST_TRADING_TOKEN_ROLE: role,
+        T_INVEST_TRADING_TOKEN: 'first-private-token',
+        [role === 'sandbox' ? 'T_INVEST_SANDBOX_TOKEN' : 'T_INVEST_LIVE_TOKEN']: 'second-private-token',
+      });
+    } catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain(`Conflicting ${role} credential aliases`);
+    expect(String(error)).not.toContain('first-private-token');
+    expect(String(error)).not.toContain('second-private-token');
+  });
+
+  it.each([
+    { T_INVEST_TOKEN: 'same-token', T_INVEST_SANDBOX_TOKEN: 'same-token' },
+    { T_INVEST_TOKEN: 'same-token', T_INVEST_TRADING_TOKEN: 'same-token' },
+    { T_INVEST_TOKEN: 'same-token', T_INVEST_LIVE_TOKEN: 'same-token' },
+    { T_INVEST_TOKEN: 'same-token', T_INVEST_TRADING_TOKEN: 'same-token', T_INVEST_TRADING_TOKEN_ROLE: 'live' },
+    { T_INVEST_SANDBOX_TOKEN: 'same-token', T_INVEST_LIVE_TOKEN: 'same-token' },
+    { T_INVEST_SANDBOX_TOKEN: 'same-token', T_INVEST_TRADING_TOKEN: 'same-token', T_INVEST_TRADING_TOKEN_ROLE: 'live' },
+  ])('rejects credentials shared by resolved roles in %j', env => {
+    expect(() => loadConfig(env)).toThrow('tokens must be separate');
+  });
+
+  it('does not fall back from an absent role credential to the read-only token', () => {
+    const config = loadConfig({
+      T_INVEST_TOKEN: 'read-token', T_INVEST_TRADING_TOKEN_ROLE: 'live',
+      T_INVEST_TRADING_TOKEN: ' ', T_INVEST_SANDBOX_TOKEN: '', T_INVEST_LIVE_TOKEN: ' ',
+    });
+    expect(config.token).toBe('read-token');
+    expect(config.execution.token).toBeUndefined();
+    expect(config.livePilot.token).toBeUndefined();
+  });
+
+  it('rejects an unknown trading token role', () => {
+    expect(() => loadConfig({ T_INVEST_TRADING_TOKEN_ROLE: 'automatic' })).toThrow('T_INVEST_TRADING_TOKEN_ROLE');
+  });
+
   it('pins sandbox separately from production or overridden read-only market endpoints', () => {
     const production = loadConfig({});
     expect(production.baseUrl).toBe('https://invest-public-api.tbank.ru/rest');
@@ -155,6 +244,52 @@ describe('loadConfig', () => {
     expect(config.strategies.intraday.maxRiskRub).toBe(20);
     expect(config.strategies.intraday.maxPositionRub).toBeLessThan(1_000);
     expect(config.strategies.intraday.allowShort).toBe(false);
+  });
+
+  it('sizes a 500 RUB live pilot without changing its separately prepared sandbox baseline', () => {
+    const config = loadConfig({
+      T_INVEST_LIVE_CAPITAL_RUB: '500', T_INVEST_COMMISSION_RATE: '0.0005',
+      INTRADAY_MAX_RISK_RUB: '500', INTRADAY_MAX_POSITION_RUB: '50000', INTRADAY_ALLOW_SHORT: 'true',
+      T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB: '1000',
+    });
+    expect(config.livePilot.capitalRub).toBe(500);
+    expect(config.execution.sandboxInitialBalanceRub).toBe(1_000);
+    expect(config.commissionRate).toBe(0.003);
+    expect(config.strategies.intraday.maxPositionRub).toBe(498.25);
+    expect(config.strategies.intraday.maxRiskRub).toBe(20);
+    expect(config.execution.maxDailyRiskRub).toBe(60);
+    expect(config.strategies.intraday.allowShort).toBe(false);
+  });
+
+  it.each([
+    { raw: '300', expected: 300 },
+    { raw: '1000', expected: 1_000 },
+    { raw: '2500', expected: 1_000 },
+  ])('keeps explicit sandbox balance $raw independent of live capital during preparation', ({ raw, expected }) => {
+    expect(loadConfig({ T_INVEST_LIVE_CAPITAL_RUB: '500', T_INVEST_SANDBOX_INITIAL_BALANCE_RUB: raw })
+      .execution.sandboxInitialBalanceRub).toBe(expected);
+  });
+
+  it('preserves the raw default and explicit sandbox balances outside pilot preparation', () => {
+    expect(loadConfig({ T_INVEST_LIVE_PILOT_PREPARE: 'false', T_INVEST_LIVE_CAPITAL_RUB: '500' })
+      .execution.sandboxInitialBalanceRub).toBe(100_000);
+    expect(loadConfig({ T_INVEST_LIVE_PILOT_PREPARE: 'false', T_INVEST_LIVE_CAPITAL_RUB: '500',
+      T_INVEST_SANDBOX_INITIAL_BALANCE_RUB: '2500' }).execution.sandboxInitialBalanceRub).toBe(2_500);
+  });
+
+  it('retains tighter explicitly configured risk and position budgets', () => {
+    const config = loadConfig({
+      T_INVEST_LIVE_CAPITAL_RUB: '500', T_INVEST_LIVE_MAX_TRADE_RISK_RUB: '10',
+      T_INVEST_LIVE_MAX_DAILY_RISK_RUB: '30', T_INVEST_LIVE_MAX_DAILY_LOSS_RUB: '30',
+      INTRADAY_MAX_RISK_RUB: '5', INTRADAY_MAX_POSITION_RUB: '100',
+      T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB: '20',
+    });
+    expect(config.strategies.intraday.maxRiskRub).toBe(5);
+    expect(config.strategies.intraday.maxPositionRub).toBe(100);
+    expect(config.execution.maxDailyRiskRub).toBe(20);
+    expect(config.livePilot.maxDailyRiskRub).toBe(30);
+    expect(config.livePilot.maxDailyLossRub).toBe(30);
+    expect(config.execution.sandboxInitialBalanceRub).toBe(1_000);
   });
 
   it.each(['T_INVEST_LIVE_CAPITAL_RUB', 'T_INVEST_LIVE_MAX_TRADE_RISK_RUB', 'T_INVEST_LIVE_MAX_DAILY_RISK_RUB', 'T_INVEST_LIVE_MAX_DAILY_LOSS_RUB'])('rejects unauthorized expansion of %s', key => {
