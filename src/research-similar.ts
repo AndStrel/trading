@@ -12,8 +12,10 @@ type SimilarCliOptions = {
 const usage = `Usage:
   npm run research:similar -- --ticker SBER --at 2025-06-03T08:30:00.000Z --neighbors 20
 
-Finds past situations similar to one cataloged situation. The target timestamp is
-used as a strict temporal cutoff, so future situations cannot become neighbors.`;
+Finds past situations similar to one cataloged situation. --at identifies a candle
+open; features are available one minute later. Neighbors must precede that cutoff,
+and only neighbor outcomes completed by the cutoff are returned. The target's own
+future outcomes are not included.`;
 
 function parsePositiveInteger(raw: string, flag: string): number {
   const value = Number(raw);
@@ -50,24 +52,19 @@ export function parseResearchSimilarArgs(args: string[]): SimilarCliOptions {
   return { ticker, observedAt, neighbors, help };
 }
 
-async function main(): Promise<void> {
-  const options = parseResearchSimilarArgs(process.argv.slice(2));
-  if (options.help) {
-    console.log(usage);
-    return;
-  }
-  if (!options.ticker || !options.observedAt) throw new Error(`--ticker and --at are required.\n\n${usage}`);
-
-  const store = new MarketDataStore(loadConfig().marketDataPath);
+export function queryResearchSimilarity(
+  store: MarketDataStore,
+  options: Pick<SimilarCliOptions, 'ticker' | 'observedAt' | 'neighbors'>,
+) {
   const target = store.getResearchSituation({
     datasetVersion: RESEARCH_DATASET_VERSION,
     ticker: options.ticker,
-    observedAt: options.observedAt,
+    observedAt: new Date(options.observedAt).toISOString(),
   });
   if (!target) {
     throw new Error(
       `Research situation not found for ${options.ticker} at ${options.observedAt}. ` +
-        'Build the catalog first and use an exact catalog timestamp.',
+        `Build the ${RESEARCH_DATASET_VERSION} catalog first and use an exact candle-open timestamp.`,
     );
   }
 
@@ -78,24 +75,30 @@ async function main(): Promise<void> {
     limit: options.neighbors,
     excludeSituationId: target.situationId,
   });
-  console.log(
-    JSON.stringify(
-      {
-        status: 'complete',
-        datasetVersion: RESEARCH_DATASET_VERSION,
-        target: {
-          situationId: target.situationId,
-          ticker: target.ticker,
-          observedAt: target.observedAt,
-          features: target.features,
-          outcomes: target.outcomes,
-        },
-        neighbors: neighbors.map(({ featureVector: _featureVector, ...neighbor }) => neighbor),
-      },
-      null,
-      2,
-    ),
-  );
+  return {
+    status: 'complete',
+    datasetVersion: RESEARCH_DATASET_VERSION,
+    outcomeCutoff: target.featureAvailableAt,
+    target: {
+      situationId: target.situationId,
+      ticker: target.ticker,
+      observedAt: target.observedAt,
+      featureAvailableAt: target.featureAvailableAt,
+      features: target.features,
+    },
+    neighbors: neighbors.map(({ featureVector: _featureVector, ...neighbor }) => neighbor),
+  };
+}
+
+async function main(): Promise<void> {
+  const options = parseResearchSimilarArgs(process.argv.slice(2));
+  if (options.help) {
+    console.log(usage);
+    return;
+  }
+  if (!options.ticker || !options.observedAt) throw new Error(`--ticker and --at are required.\n\n${usage}`);
+  const store = new MarketDataStore(loadConfig().marketDataPath);
+  console.log(JSON.stringify(queryResearchSimilarity(store, options), null, 2));
 }
 
 if (process.argv[1] && import.meta.url === new URL(process.argv[1], 'file:').href) {
@@ -104,4 +107,3 @@ if (process.argv[1] && import.meta.url === new URL(process.argv[1], 'file:').hre
     process.exitCode = 1;
   });
 }
-
