@@ -18,6 +18,7 @@ describe('loadConfig', () => {
     expect(config.telegram).toEqual({ allowedChatIds: [], pollingTimeoutSeconds: 25, miniApp: { enabled: false, host: '127.0.0.1', port: 8080 } });
     expect(config.execution).toEqual({
       mode: 'disabled',
+      baseUrl: 'https://sandbox-invest-public-api.tbank.ru/rest',
       maxOrdersPerDay: 3,
       maxDailyRiskRub: 60,
       candidateMaxAgeMinutes: 10,
@@ -126,6 +127,7 @@ describe('loadConfig', () => {
     expect(config.token).toBe('read-token');
     expect(config.execution).toEqual({
       mode: 'sandbox',
+      baseUrl: 'https://sandbox-invest-public-api.tbank.ru/rest',
       token: 'trade-token',
       sandboxProtectionEnabled: false,
       sandboxLossGuardEnabled: false,
@@ -136,6 +138,15 @@ describe('loadConfig', () => {
       candidateMaxAgeMinutes: 10,
       sandboxInitialBalanceRub: 1_000,
     });
+  });
+
+  it('pins sandbox separately from production or overridden read-only market endpoints', () => {
+    const production = loadConfig({});
+    expect(production.baseUrl).toBe('https://invest-public-api.tbank.ru/rest');
+    expect(production.execution.baseUrl).toBe('https://sandbox-invest-public-api.tbank.ru/rest');
+    const custom = loadConfig({ T_INVEST_BASE_URL: 'https://market-data.example.test/rest/' });
+    expect(custom.baseUrl).toBe('https://market-data.example.test/rest');
+    expect(custom.execution.baseUrl).toBe(production.execution.baseUrl);
   });
 
   it('does not allow stale environment settings to relax the approved pilot limits', () => {

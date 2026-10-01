@@ -65,7 +65,7 @@ Executor использует заданный `T_INVEST_TRANSPORT`, в том �
 
 ```dotenv
 T_INVEST_TOKEN=токен-только-для-чтения
-T_INVEST_BASE_URL=https://sandbox-invest-public-api.tbank.ru/rest
+T_INVEST_BASE_URL=https://invest-public-api.tbank.ru/rest
 T_INVEST_EXECUTION_MODE=sandbox
 T_INVEST_TRADING_TOKEN=отдельный-токен-с-правом-торговли
 T_INVEST_SANDBOX_ACCOUNT_ID=
@@ -77,6 +77,12 @@ T_INVEST_SANDBOX_PROTECTION_ENABLED=false
 ```
 
 После deploy выполните в Telegram:
+
+`T_INVEST_BASE_URL` относится к read-only клиенту котировок и реальных данных.
+Sandbox-клиент использует отдельный фиксированный
+`https://sandbox-invest-public-api.tbank.ru/rest`; он не наследует этот env-параметр.
+Не переключайте основной адрес на песочницу и не меняйте режим исполнения ради
+создания или пополнения счёта.
 
 1. `/execution` — режим `sandbox`, токен задан, kill switch включён.
 2. После отдельной подтверждённой подготовки — `/execution_arm SANDBOX`. Команда только читает данные, ничего не создаёт и не пополняет. Kill switch выключается только после всех проверок.

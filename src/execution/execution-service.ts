@@ -417,7 +417,7 @@ export class ExecutionService {
   }
 
   private preparedSnapshot() {
-    if (!this.isConfigured() || this.config.baseUrl !== sandboxEndpoint
+    if (!this.isConfigured() || this.config.execution.baseUrl !== sandboxEndpoint
       || this.config.execution.token === this.config.token || this.config.execution.token === this.config.livePilot.token) {
       throw new Error('Separately prepared sandbox configuration is not confirmed');
     }

@@ -14,7 +14,9 @@ const directory = mkdtempSync(join(tmpdir(), 'trading-arm-smoke-'));
 try {
   const journal = new ScenarioJournal(join(directory, 'journal.sqlite'));
   const config = loadConfig({ T_INVEST_EXECUTION_MODE: 'sandbox', T_INVEST_TRADING_TOKEN: 'synthetic-smoke-token',
-    T_INVEST_BASE_URL: sandboxEndpoint, T_INVEST_SANDBOX_ACCOUNT_ID: 'synthetic-smoke-account' });
+    T_INVEST_SANDBOX_ACCOUNT_ID: 'synthetic-smoke-account' });
+  assert.equal(config.baseUrl, 'https://invest-public-api.tbank.ru/rest');
+  assert.equal(config.execution.baseUrl, sandboxEndpoint);
   const state = seedPreparedSandbox(journal, 'synthetic-smoke-account');
   const uncertain = JSON.stringify({ ...state, phase: 'open-claimed', accountId: null });
   journal.setRuntimeState(sandboxBootstrapKey, uncertain);

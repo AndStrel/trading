@@ -109,7 +109,7 @@ describe('ExecutionService', () => {
       if (condition === 'missing-token') delete config.execution.token;
       if (condition === 'same-read-token') config.token = config.execution.token!;
       if (condition === 'same-live-token') config.livePilot.token = config.execution.token!;
-      if (condition === 'wrong-endpoint') config.baseUrl = 'https://invest-public-api.tbank.ru/rest';
+      if (condition === 'wrong-endpoint') config.execution.baseUrl = 'https://invest-public-api.tbank.ru/rest';
       if (condition === 'configured-account') config.execution.accountId = 'other';
       const service = new ExecutionService(config, marketClient(), client, journal);
       await expect(service.armSandbox()).rejects.toThrow('not confirmed');
@@ -435,7 +435,7 @@ describe('ExecutionService', () => {
 
   it('only verifies a separately prepared account; never creates, adopts by name or funds while arming', async () => {
     const journal = createJournal();
-    const config = createConfig({ T_INVEST_SANDBOX_ACCOUNT_ID: undefined });
+    const config = createConfig({ T_INVEST_SANDBOX_ACCOUNT_ID: undefined, T_INVEST_BASE_URL: 'https://invest-public-api.tbank.ru/rest' });
     const client = orderClient();
     const service = new ExecutionService(config, marketClient(), client, journal);
 

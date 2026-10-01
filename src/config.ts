@@ -38,6 +38,7 @@ export type TelegramConfig = {
 
 export type ExecutionConfig = {
   mode: ExecutionMode;
+  baseUrl: string;
   token?: string;
   accountId?: string;
   maxOrdersPerDay: number;
@@ -269,6 +270,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     },
     execution: {
       mode: parsed.T_INVEST_EXECUTION_MODE,
+      // Sandbox execution must not reuse or redirect production read-only data.
+      baseUrl: 'https://sandbox-invest-public-api.tbank.ru/rest',
       ...(parsed.T_INVEST_TRADING_TOKEN ? { token: parsed.T_INVEST_TRADING_TOKEN } : {}),
       ...(parsed.T_INVEST_SANDBOX_ACCOUNT_ID
         ? { accountId: parsed.T_INVEST_SANDBOX_ACCOUNT_ID }

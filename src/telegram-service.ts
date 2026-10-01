@@ -23,7 +23,7 @@ if (!config.telegram.token) {
 
 const journal = new ScenarioJournal(config.journalPath);
 const tInvestClient = new TInvestClient(config.token, config.baseUrl, { transport: config.transport });
-const orderClient = new TInvestOrderClient(config.execution.token, config.baseUrl, undefined, { transport: config.transport });
+const orderClient = new TInvestOrderClient(config.execution.token, config.execution.baseUrl, undefined, { transport: config.transport });
 const protection = config.execution.sandboxProtectionEnabled ? new SandboxProtectionService(config, orderClient, journal) : undefined;
 const exits = config.execution.sandboxProtectionEnabled ? new SandboxExitService(config, orderClient, journal) : undefined;
 const lossGuard = config.execution.sandboxLossGuardEnabled && exits ? new SandboxLossGuard(config, orderClient, tInvestClient, exits, journal) : undefined;
