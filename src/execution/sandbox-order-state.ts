@@ -18,6 +18,7 @@ const stage = z.object({
   price: money,
   quantity: integer.pipe(z.number().positive()),
   executionTime: z.iso.datetime({ offset: true }),
+  evidenceSource: z.literal('sandbox-operation').optional(),operationId: identifier.optional(),
 });
 const state = z.object({
   orderId: identifier, orderRequestId: identifier.optional(), instrumentUid: identifier,
@@ -37,7 +38,7 @@ export type SandboxOrderSnapshot = {
   grossNano: string;
   // Missing monetary fields are not proof of zero fees.
   commissionNano: string | null;
-  stages: Array<{ tradeId: string; lots: number; priceNano: string; executedAt: string }>;
+  stages: Array<{ tradeId: string; lots: number; priceNano: string; executedAt: string; evidenceSource?:'sandbox-operation';operationId?:string }>;
 };
 
 function nano(value: z.infer<typeof money>): bigint {
@@ -95,14 +96,15 @@ function parseOrderState(payload: unknown, expected: { instrumentId: string; lot
     const stages = parsed.stages.map(item => {
       const price = nano(item.price);
       const executedAt = new Date(item.executionTime);
-      if (ids.has(item.tradeId) || price <= 0n || executedAt.getTime() > now.getTime() + 60_000
+      if ((Boolean(item.evidenceSource)!==Boolean(item.operationId)) || ids.has(item.tradeId) || price <= 0n || executedAt.getTime() > now.getTime() + 60_000
         || (expected.kind !== 'entry' && executedAt.getTime() < Date.parse(expected.notBefore))) {
         throw new Error('Invalid execution stage');
       }
       ids.add(item.tradeId);
       lots += item.quantity;
       gross += price * BigInt(item.quantity) * BigInt(expected.lotSize);
-      return { tradeId: item.tradeId, lots: item.quantity, priceNano: String(price), executedAt: executedAt.toISOString() };
+      return { tradeId: item.tradeId, lots: item.quantity, priceNano: String(price), executedAt: executedAt.toISOString(),
+        ...(item.evidenceSource&&item.operationId?{evidenceSource:item.evidenceSource,operationId:item.operationId}:{}) };
     });
     if (lots !== parsed.lotsExecuted) throw new Error('Incomplete execution stages');
     return {
@@ -130,7 +132,8 @@ export function assertSnapshotProgress(previous: SandboxOrderSnapshot, next: San
   const stages = new Map(next.stages.map(item => [item.tradeId, item]));
   for (const prior of previous.stages) {
     const current = stages.get(prior.tradeId);
-    if (!current || prior.lots !== current.lots || prior.priceNano !== current.priceNano || prior.executedAt !== current.executedAt) {
+    if (!current || prior.lots !== current.lots || prior.priceNano !== current.priceNano || prior.executedAt !== current.executedAt
+      || (prior.evidenceSource&&(prior.evidenceSource!==current.evidenceSource||prior.operationId!==current.operationId))) {
       throw new Error('Sandbox reconciliation contradicts earlier execution evidence');
     }
   }
