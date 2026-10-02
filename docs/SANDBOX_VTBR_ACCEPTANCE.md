@@ -73,3 +73,22 @@ Both follow-up fixtures preserve previous account histories; each was initialize
 The initial rejection reason remains unverified. Diagnostics retain numeric codes and tags from a fixed public vocabulary, never arbitrary response text. The technical freshness gates now explicitly reject invalid clocks and duplicate last-trade identities. Ordinary strategy stops are not changed by this local technical pricing rule.
 
 An acknowledged ACTIVE stop is reported as `native-stop-awaiting-trigger`, not success and not a failed sale. A completed-cycle result still requires the actual child fill, fees and fresh flat account. No manual SELL was used in these native-trigger cases. Local validation: **735 tests / 56 files**, build and diff check passed. All four technical positions are closed; all historical journals and cash discrepancies remain preserved.
+
+## Three-source monetary reconciliation
+
+The read-only `cash-reconcile` phase reads the actual named account opening date, the full executed operation window, refreshed fills and fresh flat cash. It requires a sealed one-unit fixture with exactly one 1000-RUB funding operation, one bound BUY, one bound SELL and two fee operations. The actual trade operation IDs establish identity despite existing timestamp snapshots being canonicalized to milliseconds. Missing, duplicate, foreign, future, unknown-type, non-RUB and contradictory signed evidence fails closed. Fee operations have no parent IDs in these observed responses: the comparison is explicitly **account-aggregate**, not invented per-trade attribution.
+
+All four cases passed structural evidence verification but failed exact monetary equality:
+
+| Case | Fill-report net RUB | Operation-ledger net RUB | Cash minus operation ledger RUB |
+| --- | ---: | ---: | ---: |
+| Canceled-stop technical close | -0.122300 | -0.122301 | +0.000002 |
+| Recovered native stop | -0.0368825 | -0.036883 | +0.000001 |
+| Follow-up recovered native stop | -0.031885 | -0.031886 | +0.000002 |
+| First-attempt last-trade guard | -0.0568975 | -0.056898 | +0.000001 |
+
+Separate broker fee operations are slightly larger than fees in order-state responses; cash differs from both sources. This disproves an assumption that summing fee operations alone exactly reconciles the residual. No general rounding rule or source authority is established. Existing fill-ledger PnL is preserved; the isolated diagnostic additionally computes a conservative net using the larger aggregate fee, without lowering reported losses, altering reservations, refilling cash or authorizing trading.
+
+Raw source snapshots, operation IDs and SHA-256-linked reconciliation proofs persist only in the private audit journal, outside Git. The CLI returns `sandbox-cash-mismatch` / exit 2 when sources differ; exit 0 requires exact equality. A valid completed technical close does not establish exact economic reconciliation. Actual calculations use integer nanorubles; no epsilon or floating-point rounding clears the mismatch.
+
+Validation: `npm run check` **762 tests / 57 files**, build passed, and read-only `cash-reconcile` reproduced all four mismatches on fresh broker responses. Real orders remain disabled; Investor-floor research costs remain unchanged.

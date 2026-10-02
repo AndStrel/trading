@@ -1,10 +1,13 @@
 import { closeSync, openSync, readFileSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { loadConfig } from './config.js';
 import { ScenarioJournal } from './journal/scenario-journal.js';
 import { TInvestClient } from './tbank/client.js';
 import { TInvestOrderClient, TInvestOrderError } from './execution/tinvest-order-client.js';
 import { assertSandboxPosition, parseSandboxStop } from './execution/sandbox-stop-state.js';
-import { assertNoSandboxOrders } from './execution/sandbox-flat-account.js';
+import { assertNoSandboxOrders, sandboxFlatCashNano } from './execution/sandbox-flat-account.js';
+import { assertNoActiveSandboxStops } from './execution/sandbox-stop-state.js';
+import { reconcileSandboxFixtureCash } from './execution/sandbox-cash-reconciliation.js';
 import { z } from 'zod/v4';
 import { ExecutionService } from './execution/execution-service.js';
 import { SandboxProtectionService } from './execution/sandbox-protection-service.js';
@@ -19,7 +22,7 @@ import { decimalPriceNano } from './execution/sandbox-stop-state.js';
 let stage='authorization',journal:ScenarioJournal|undefined;
 try {
  const [phase,approval]=process.argv.slice(2);
- if(!['run','reconcile','recover','recover-stop-key','diagnose-stop-key'].includes(phase??'')||approval!==fixtureAuthorization)throw new Error();
+ if(!['run','reconcile','recover','recover-stop-key','diagnose-stop-key','cash-reconcile'].includes(phase??'')||approval!==fixtureAuthorization)throw new Error();
  const path='/run/private/snapshot.json';
  if((statSync(path).mode&0o077)!==0||(statSync('/run/audit').mode&0o077)!==0)throw new Error();
  const snapshot=JSON.parse(readFileSync(path,'utf8')) as {env:NodeJS.ProcessEnv;state:Record<string,string>};
@@ -89,7 +92,7 @@ try {
   const brokerId=await client.postSandboxStopLimit({mode:'sandbox',accountId:intent.accountId,instrumentId:intent.instrumentId,requestId:intent.requestId,lots:intent.lots,stopNano:intent.stopNano,limitNano:intent.limitNano});
   journal.acknowledgeNativeStop(id,intent.requestId,brokerId);
  }
- if(phase!=='reconcile') {
+ if(phase!=='reconcile'&&phase!=='cash-reconcile') {
   if(phase==='recover'){stage='entry-read-only';await execution.reconcileScenario(id);}
   stage='stop';const stop=await protection.protect(prepared.accountId,id);
   console.log(JSON.stringify({stage,status:stop.status,technicalOnly:true,realOrders:false}));
@@ -101,11 +104,32 @@ try {
   assertSandboxPosition(await client.getSandboxPositions(prepared.accountId),prepared.accountId,share.uid,1n);
   journal.observeNativeStop(id,observed);journal.setExecutionKilled(true);
   console.log(JSON.stringify({result:'native-stop-awaiting-trigger',activeConfirmed:true,flatConfirmed:false,realOrders:false}));
+  if(phase==='cash-reconcile')process.exitCode=2;
  }else {
   await exits.reconcile(prepared.accountId,id);
   journal.setExecutionKilled(true);const result=journal.listSandboxResults().find(r=>r.scenarioId===id);
-  console.log(JSON.stringify({result:result?.complete?'native-stop-sale-confirmed':'native-stop-sale-unconfirmed',flatConfirmed:result?.complete??false,netPnlNano:result?.netPnlNano??null,realOrders:false}));
+  const completeLabel=observed.status==='STOP_ORDER_STATUS_EXECUTED'?'native-stop-sale-confirmed':'sandbox-round-trip-confirmed';
+  console.log(JSON.stringify({result:result?.complete?completeLabel:'sandbox-sale-unconfirmed',flatConfirmed:result?.complete??false,netPnlNano:result?.netPnlNano??null,realOrders:false}));
   if(!result?.complete)process.exitCode=1;
+  if(phase==='cash-reconcile') {
+   if(!result?.complete)throw new Error();stage='cash-read-only';
+   const openedAt=await client.getSandboxAccountOpenedAt(prepared.accountId,prepared.name);
+   const operations=await client.getSandboxOperations(prepared.accountId,openedAt,new Date().toISOString());
+   const buy=journal.getExecutionSnapshot(id),sell=journal.getSandboxExitEvidence(id)?.snapshot;
+   if(!buy?.terminal||!sell?.terminal||buy.commissionNano===null||sell.commissionNano===null
+     ||buy.stages.length!==1||sell.stages.length!==1||!buy.stages[0]?.operationId||!sell.stages[0]?.operationId)throw new Error();
+   const [positions,orders,stops]=await Promise.all([client.getSandboxPositions(prepared.accountId),client.getSandboxOrders(prepared.accountId),client.getSandboxStopOrders(prepared.accountId)]);
+   const cash=sandboxFlatCashNano(positions,prepared.accountId);assertNoSandboxOrders(orders);assertNoActiveSandboxStops(stops);
+   const proof=reconcileSandboxFixtureCash(operations,String(cash),{instrumentId:share.uid,buyGrossNano:buy.grossNano,sellGrossNano:sell.grossNano,
+    buyCommissionNano:buy.commissionNano,sellCommissionNano:sell.commissionNano,buyAt:buy.stages[0].executedAt,sellAt:sell.stages[0].executedAt,
+    buyOperationId:buy.stages[0].operationId,sellOperationId:sell.stages[0].operationId},new Date());
+   const source=JSON.stringify({operations,positions,buy,sell});
+   const sourceHash=createHash('sha256').update(source).digest('hex'),sourceKey=`technical.cash_source.${id}.${sourceHash}`;
+   if(journal.getRuntimeState(sourceKey)===null)journal.setRuntimeState(sourceKey,source);
+   journal.setRuntimeState(`technical.cash_reconciliation.${id}`,JSON.stringify({checkedAt:new Date().toISOString(),sourceHash,...proof}));
+   console.log(JSON.stringify({result:proof.exactMatched?'sandbox-cash-exact-match':'sandbox-cash-mismatch',...proof,brokerWrites:false,realOrders:false}));
+   if(!proof.exactMatched)process.exitCode=2;
+  }
  }
 }catch (error) {
  if(error instanceof TInvestOrderError)journal?.setRuntimeState('technical.last_broker_failure',JSON.stringify({stage,httpStatus:error.httpStatus??null,brokerCode:error.brokerCode??null,outcomeUncertain:error.outcomeUncertain}));

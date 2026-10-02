@@ -1,10 +1,12 @@
 import type { ExecutionMode } from '../config.js';
+import { z } from 'zod/v4';
 import { numberToQuotation } from '../domain/money.js';
 import { postWithSystemCurl, type CurlPost, type TInvestTransport } from '../tbank/client.js';
 import { nanoQuotation } from './sandbox-stop-state.js';
 import { hydrateSandboxSingleUnitOrder, sandboxOrderNeedsOperations } from './sandbox-operation-evidence.js';
 
 type FetchLike = typeof fetch;
+const timestampInput=z.iso.datetime({offset:true});
 
 export type LimitOrderInput = {
   mode: Exclude<ExecutionMode, 'disabled'>;
@@ -116,6 +118,22 @@ export class TInvestOrderClient {
       if (!id) throw new TInvestOrderError('Sandbox accounts response is incomplete', false);
       return { id, name: asString(record?.name) };
     });
+  }
+
+  async getSandboxAccountOpenedAt(accountId:string,expectedName:string):Promise<string> {
+    const payload=asRecord(await this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxAccounts',{},false));
+    const rows=payload?.accounts;if(!Array.isArray(rows))throw new TInvestOrderError('Sandbox opening ownership is not confirmed',false);
+    const ids=rows.map(r=>asString(asRecord(r)?.id)),owned=rows.filter(r=>asRecord(r)?.id===accountId);
+    const row=asRecord(owned[0]),at=asString(row?.openedDate);
+    if(ids.some(v=>v===null)||new Set(ids).size!==ids.length||owned.length!==1||row?.name!==expectedName
+      ||!at||at.length>128||!timestampInput.safeParse(at).success||!Number.isFinite(Date.parse(at))||Date.parse(at)>Date.now()+1000)throw new TInvestOrderError('Sandbox opening ownership is not confirmed',false);
+    return at;
+  }
+
+  getSandboxOperations(accountId:string,from:string,to:string):Promise<unknown> {
+    if(!accountId||accountId.length>256||/[\u0000-\u001f\u007f]/.test(accountId)||from.length>128||to.length>128
+      ||!timestampInput.safeParse(from).success||!timestampInput.safeParse(to).success||!Number.isFinite(Date.parse(from))||!Number.isFinite(Date.parse(to))||Date.parse(from)>Date.parse(to)||Date.parse(to)>Date.now()+1000)throw new TInvestOrderError('Sandbox operation interval is not confirmed',false);
+    return this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxOperations',{accountId,from,to,state:'OPERATION_STATE_EXECUTED'},false);
   }
 
   async getSandboxOrderState(accountId: string, orderRequestId: string): Promise<unknown> {
