@@ -10,6 +10,7 @@ import tempfile
 
 ROOT = Path("/opt/andstrel/trading")
 SERVICE = "telegram-service"
+STAGE = "start"
 FIXED = {
     "T_INVEST_TRADING_TOKEN_ROLE": "live",
     "T_INVEST_LIVE_CAPITAL_RUB": "500",
@@ -18,19 +19,25 @@ FIXED = {
 
 
 class Refused(Exception):
-    pass
+    def __init__(self, code="guard"):
+        self.code = code
 
 
-def require(value):
+def require(value, code="guard"):
     if not value:
-        raise Refused()
+        raise Refused(code)
 
 
 def command(args, data=None):
     result = subprocess.run(args, input=data, capture_output=True, text=True,
                             cwd=ROOT, timeout=90)
     # Never propagate stderr, Compose output, broker credentials or account IDs.
-    require(result.returncode == 0)
+    if result.returncode != 0:
+        try:
+            failure = json.loads(result.stdout).get("probeFailure")
+        except (ValueError, AttributeError):
+            failure = None
+        raise Refused("probe-" + failure if failure in {"config", "sqlite", "ack"} else "command-failed")
     return result.stdout.strip()
 
 
@@ -55,20 +62,22 @@ def validate(snapshot, migrated=False):
     env, config = snapshot["env"], snapshot["config"]
     ex, pilot = config["execution"], config["livePilot"]
     daily, weekly = config["strategies"]["intraday"], config["strategies"]["swing"]
-    require(ex["mode"] == "disabled" and pilot["prepare"])
+    require(ex["mode"] == "disabled", "execution-not-disabled")
+    require(pilot["prepare"], "preparation-not-enabled")
     require(not any(ex[k] for k in ("sandboxProtectionEnabled", "sandboxLossGuardEnabled",
-                                    "sandboxSessionCloseEnabled")))
+                                    "sandboxSessionCloseEnabled")), "monitor-enabled")
     require(config.get("token") and env.get("T_INVEST_TRADING_TOKEN", "").strip())
-    require(daily.get("accountId") and weekly.get("accountId"))
-    require(daily["accountId"] != weekly["accountId"])
-    require(pilot.get("accountId") == daily["accountId"])
+    require(daily.get("accountId") and weekly.get("accountId"), "strategy-account-missing")
+    require(daily["accountId"] != weekly["accountId"], "strategy-accounts-not-distinct")
+    require(pilot.get("accountId") == daily["accountId"], "pilot-account-not-daily")
     require(not daily["allowShort"])
     require(0 < pilot["maxTradeRiskRub"] <= 20)
     require(0 < pilot["maxDailyRiskRub"] <= 60 and 0 < pilot["maxDailyLossRub"] <= 60)
     if "state" in snapshot:
         state = snapshot["state"]
-        require(state["execution.kill_switch"] == "true")
-        require(state["execution.kill_generation"] and state["unresolved"] == 0)
+        require(state["execution.kill_switch"] == "true", "kill-not-enabled")
+        require(state["execution.kill_generation"], "kill-generation-missing")
+        require(state["unresolved"] == 0, "outstanding-order-present")
         # Full ACK schema/account binding is validated by the read-only JS probe.
         require(state["execution.sandbox_bootstrap_v1"] and state["execution.sandbox_account_id"])
     if migrated:
@@ -104,19 +113,23 @@ def atomic_replace(path, data):
 
 
 def migrate(expected_sha, apply):
+    global STAGE
+    STAGE = "source"
     require(re.fullmatch("[0-9a-f]{40}", expected_sha))
     require(ROOT.resolve() == ROOT)
-    require(command(["git", "rev-parse", "HEAD"]) == expected_sha)
-    require(not command(["git", "status", "--porcelain", "--untracked-files=no"]))
+    require(command(["git", "rev-parse", "HEAD"]) == expected_sha, "server-sha-mismatch")
+    require(not command(["git", "status", "--porcelain", "--untracked-files=no"]), "tracked-source-dirty")
     env_path = ROOT / ".env"
-    require(env_path.is_file() and not env_path.is_symlink())
-    require(env_path.stat().st_uid == os.geteuid())
-    require(env_path.stat().st_mode & 0o777 == 0o600)
+    STAGE = "env-file"
+    require(env_path.is_file() and not env_path.is_symlink(), "env-file-invalid")
+    require(env_path.stat().st_uid == os.geteuid(), "env-owner-mismatch")
+    require(env_path.stat().st_mode & 0o777 == 0o600, "env-permissions-invalid")
     before = env_path.read_bytes()
     candidate = patch_env(before)
     compose = ["docker", "compose", "--project-directory", str(ROOT),
                "--env-file", str(env_path), "-f", str(ROOT / "docker-compose.yml")]
     cid = command(compose + ["ps", "-q", SERVICE])
+    STAGE = "running-image"
     require(cid and "\n" not in cid)
     image = command(["docker", "inspect", "--format", "{{.Image}}", cid])
     require(re.fullmatch("sha256:[0-9a-f]{64}", image))
@@ -131,6 +144,7 @@ def migrate(expected_sha, apply):
         validate(result)
         return result
 
+    STAGE = "journal-and-current-config"
     initial = snapshot()
     # Private files remain outside Git; only the original env backup is durable.
     with tempfile.TemporaryDirectory(prefix="trading-profile-", dir=ROOT.parent) as tmp:
@@ -140,24 +154,29 @@ def migrate(expected_sha, apply):
         require(source.count("\n      - .env\n") == 1)
         private_file(folder / "compose.yml", source.replace(
             "\n      - .env\n", "\n      - " + str(folder / "candidate.env") + "\n").encode())
+        STAGE = "candidate-compose"
         resolved = json.loads(command(["docker", "compose", "--project-directory", str(ROOT),
             "--env-file", str(folder / "candidate.env"), "-f", str(folder / "compose.yml"),
             "config", "--format", "json"]))
         new_env = dict(initial["env"])
         new_env.update(resolved["services"][SERVICE]["environment"])
         # Same application image validates credentials/config, with no network/data/logs.
+        STAGE = "candidate-app-config"
         checked = json.loads(command(["docker", "run", "--rm", "--network", "none",
             "-i", "--log-driver", "none", "--read-only", "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges:true", "--entrypoint", "node",
             image, "--input-type=module", "-e", probe, "--", "--candidate"], json.dumps(new_env)))
+        STAGE = "candidate-safety"
         validate(checked, migrated=True)
         require(all(initial["env"].get(k) == checked["env"].get(k)
                     for k in initial["env"] if k not in FIXED))
+        STAGE = "pre-write-recheck"
         require(snapshot() == initial and env_path.read_bytes() == before)
         if not apply:
             print('{"result":"dry-run-ok","execution":"disabled","kill":true}')
             return
         # Serialize cooperative operations; re-check uncooperative changes before every write.
+        STAGE = "private-backup"
         backup_dir = Path(tempfile.mkdtemp(prefix="trading-profile-backup-", dir=ROOT.parent))
         private_file(backup_dir / "env.before", before)
         pin = folder / "image.yml"
@@ -169,7 +188,9 @@ def migrate(expected_sha, apply):
         try:
             changed = True
             atomic_replace(env_path, candidate)
+            STAGE = "restart"
             command(restart)
+            STAGE = "runtime-readback"
             current = snapshot()
             validate(current, migrated=True)
             require(current["state"] == initial["state"])
@@ -209,9 +230,11 @@ def main():
             os.chmod(lock.name, 0o600)
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             migrate(args.expected_sha, args.apply)
-    except Exception:
+    except Exception as error:
         # No raw exception, subprocess stdout/stderr or private data in GitHub.
-        print('{"result":"refused-or-failed","details":"private","ordersSubmitted":false}')
+        print(json.dumps({"result": "refused-or-failed", "stage": STAGE,
+                          "reason": error.code if isinstance(error, Refused) else "internal",
+                          "details": "private", "ordersSubmitted": False}))
         return 1
     return 0
 
