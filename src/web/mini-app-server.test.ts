@@ -11,10 +11,10 @@ const view: MiniAppView = { observedAt: now.toISOString(), scanner: { paused: fa
   execution: { mode: 'disabled', killed: true, liveSubmissionAllowed: false, actualPnlRub: null, lossMonitorReady: false },
   sandboxLossGuard: { state: 'off', checkedAt: null, closedLoss: null, estimatedOpenLoss: null, totalLoss: null },
   limits: { capitalRub: 1000, tradeRiskRub: 20, dailyRiskRub: 60, dailyLossRub: 60, positionRub: 996.51, commissionRate: 0.003, slippageRate: 0.0005 }, candidates: [], sandboxResults: [] };
-async function start() {
+async function start(selectMarketSource?: (source: 'server' | 'computer') => void) {
   const action = vi.fn();
   const server = createMiniAppServer({ token: 'test-bot-token', origin: 'https://bot.brewnote.net', allowedPrivateIds: ['42'],
-    view: () => view, action, now: () => now });
+    view: () => view, action, now: () => now, ...(selectMarketSource ? { selectMarketSource } : {}) });
   servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('Missing test address');
@@ -25,6 +25,17 @@ afterEach(async () => {
 });
 const headers = { Authorization: 'tma ' + signedData() };
 describe('Mini App HTTP boundary', () => {
+  it('keeps source selection authenticated and separate from execution controls', async () => {
+    const select = vi.fn(); const { url, action } = await start(select);
+    const request = { method: 'POST', headers: { ...headers, Origin: 'https://bot.brewnote.net', 'Content-Type': 'application/json' }, body: '{"action":"source-computer"}' };
+    expect((await fetch(url + '/api/action', { ...request, headers: { Origin: 'https://bot.brewnote.net', 'Content-Type': 'application/json' } })).status).toBe(401);
+    expect(select).not.toHaveBeenCalled();
+    expect((await fetch(url + '/api/action', request)).status).toBe(200);
+    expect(select).toHaveBeenCalledWith('computer'); expect(action).not.toHaveBeenCalled();
+    select.mockImplementationOnce(() => { throw new Error('synthetic-private-unavailable'); });
+    const refused = await fetch(url + '/api/action', request);
+    expect(refused.status).toBe(409); expect(await refused.text()).not.toContain('synthetic-private');
+  });
   it('serves only a public shell, with no private data or tokens, and denies unauthenticated API access', async () => {
     const { url, action } = await start();
     const response = await fetch(url + '/?tgWebAppStartParam=test');

@@ -2,12 +2,15 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFileSync } from 'node:fs';
 import { verifyTelegramInitData } from './telegram-auth.js';
 import type { MiniAppView } from './mini-app-view.js';
+import type { MarketSourceController, MarketSourceId } from '../tbank/market-source.js';
 
 type Dependencies = {
   token: string; origin: string; allowedPrivateIds: string[];
   view(): MiniAppView;
   action(action: 'pause' | 'resume' | 'kill'): void;
   now?: () => Date;
+  marketSources?: Pick<MarketSourceController, 'view'>;
+  selectMarketSource?: (source: MarketSourceId) => void;
 };
 
 const policies = {
@@ -28,6 +31,7 @@ async function body(request: IncomingMessage): Promise<unknown> {
 }
 
 export function createMiniAppServer(dependencies: Dependencies) {
+  const view = () => ({ ...dependencies.view(), ...(dependencies.marketSources ? { marketSources: dependencies.marketSources.view() } : {}) });
   const assets = new Map([
     ['/', { type: 'text/html; charset=utf-8', bytes: readFileSync(new URL('./public/index.html', import.meta.url)) }],
     ['/app.css', { type: 'text/css; charset=utf-8', bytes: readFileSync(new URL('./public/app.css', import.meta.url)) }],
@@ -65,7 +69,7 @@ export function createMiniAppServer(dependencies: Dependencies) {
       ? verifyTelegramInitData(auth.slice(4), dependencies.token, dependencies.allowedPrivateIds, now) : null;
     if (!id) { send(response, 401, { error: 'Open this Mini App from an authorized Telegram chat' }); return; }
     if (!allowedRate(`user:${id}`, now.getTime(), 60)) { send(response, 429, { error: 'Too many requests' }); return; }
-    if (path === '/api/view' && request.method === 'GET') { send(response, 200, dependencies.view()); return; }
+    if (path === '/api/view' && request.method === 'GET') { send(response, 200, view()); return; }
     if (path !== '/api/action' || request.method !== 'POST') { send(response, 405, { error: 'Method not allowed' }); return; }
     if (request.headers.origin !== dependencies.origin
       || !/^application\/json(?:\s*;|$)/i.test(request.headers['content-type'] ?? '')) {
@@ -75,11 +79,15 @@ export function createMiniAppServer(dependencies: Dependencies) {
       request.resume(); send(response, 413, { error: 'Request body is too large' }); return;
     }
     const value = await body(request).catch(() => null) as { action?: unknown } | null;
-    if (!value || typeof value.action !== 'string' || !['pause', 'resume', 'kill'].includes(value.action)) {
+    if (!value || typeof value.action !== 'string' || !['pause', 'resume', 'kill', 'source-server', 'source-computer'].includes(value.action)) {
       send(response, 400, { error: 'Unsupported action' }); return;
     }
-    dependencies.action(value.action as 'pause' | 'resume' | 'kill');
-    send(response, 200, dependencies.view());
+    if (value.action === 'source-server' || value.action === 'source-computer') {
+      if (!dependencies.selectMarketSource) { send(response, 409, { error: 'Source selection unavailable' }); return; }
+      try { dependencies.selectMarketSource(value.action === 'source-server' ? 'server' : 'computer'); }
+      catch { send(response, 409, { error: 'Source unavailable or scan in progress' }); return; }
+    } else dependencies.action(value.action as 'pause' | 'resume' | 'kill');
+    send(response, 200, view());
   }
   const server = createServer((request, response) => {
     void handle(request, response).catch(() => { if (!response.headersSent) send(response, 500, { error: 'Request failed' }); else response.end(); });

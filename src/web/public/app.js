@@ -8,12 +8,26 @@ let view = null;
 let busy = false;
 let access = false;
 function notice(text, error = false) { elements.notice.textContent = text; elements.notice.classList.toggle('error', error); }
-function controls() { for (const id of ['refresh', 'scanner-toggle', 'kill']) elements[id].disabled = !access || busy; }
+function controls() {
+  for (const id of ['refresh', 'scanner-toggle', 'kill']) elements[id].disabled = !access || busy;
+  for (const source of ['server', 'computer']) {
+    const status = view?.marketSources?.sources.find(item => item.id === source);
+    elements['source-' + source].disabled = !access || busy || !status?.configured || !status?.available || view?.marketSources?.busy;
+  }
+}
 function text(id, value) { elements[id].textContent = value; }
 function date(value) { return value ? new Date(value).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Moscow' }) + ' МСК' : 'Прохода ещё не было'; }
 function node(tag, content, className) { const element = document.createElement(tag); element.textContent = content; if (className) element.className = className; return element; }
 function render(data) {
   view = data;
+  const sourceState = data.marketSources;
+  for (const source of sourceState?.sources || []) {
+    const code = source.countryCode;
+    const flag = typeof code === 'string' && /^[A-Z]{2}$/.test(code) ? String.fromCodePoint(...[...code].map(c => 127397 + c.charCodeAt(0))) : '🌐';
+    text('source-' + source.id, flag + ' ' + (source.id === 'computer' ? 'Компьютер' : 'Сервер'));
+  }
+  text('source-summary', sourceState ? 'Выбран: ' + (sourceState.selected === 'computer' ? 'Компьютер' : 'Сервер') + (sourceState.busy ? ' · выполняется проход' : '') : 'Источники ещё не подключены.');
+  text('source-checks', (sourceState?.sources || []).map(item => (item.id === 'computer' ? 'Компьютер' : 'Сервер') + ': ' + (!item.configured ? 'не подключён' : item.available ? 'API доступен' : item.checkedAt ? 'доступ не подтверждён' : 'не проверен') + (item.checkedAt ? ' · ' + date(item.checkedAt) : '')).join(' / ') || 'Проверок ещё не было.');
   text('capital', money.format(data.limits.capitalRub)); text('trade-risk', money.format(data.limits.tradeRiskRub));
   text('day-risk', money.format(data.limits.dailyRiskRub)); text('position-limit', money.format(data.limits.positionRub));
   text('commission', percent.format(data.limits.commissionRate)); text('slippage', percent.format(data.limits.slippageRate));
@@ -74,6 +88,7 @@ for (const button of document.querySelectorAll('[data-tab]')) button.addEventLis
   for (const item of document.querySelectorAll('[data-tab]')) { if (item === button) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); }
 });
 elements.refresh.addEventListener('click', () => request());
+for (const source of ['server', 'computer']) elements['source-' + source].addEventListener('click', () => request('source-' + source));
 elements['scanner-toggle'].addEventListener('click', () => request(view?.scanner.paused ? 'resume' : 'pause'));
 elements.kill.addEventListener('click', () => elements['confirm-kill'].showModal());
 elements['cancel-kill'].addEventListener('click', () => elements['confirm-kill'].close());

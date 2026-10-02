@@ -12,6 +12,7 @@ services:
       T_INVEST_MARKET_DATA_PATH: /app/data/market-data.sqlite
     volumes:
       - trading-journal:/app/data
+      - ${T_INVEST_LOCAL_RELAY_DIR:-./.trading/relay}:/run/relay:ro
     ports:
       - "127.0.0.1:8088:8080"
     restart: unless-stopped
