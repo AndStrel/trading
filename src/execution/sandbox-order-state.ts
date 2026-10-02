@@ -21,7 +21,7 @@ const stage = z.object({
   evidenceSource: z.literal('sandbox-operation').optional(),operationId: identifier.optional(),
 });
 const state = z.object({
-  orderId: identifier, orderRequestId: identifier.optional(), instrumentUid: identifier,
+  orderId: identifier, orderRequestId: z.union([identifier,z.literal('')]).optional(), instrumentUid: identifier,
   direction: z.enum(['ORDER_DIRECTION_BUY', 'ORDER_DIRECTION_SELL']), orderType: z.literal('ORDER_TYPE_LIMIT'),
   executionReportStatus: statuses,
   lotsRequested: integer.pipe(z.number().positive()), lotsExecuted: integer,
@@ -72,6 +72,7 @@ function parseOrderState(payload: unknown, expected: { instrumentId: string; lot
     | { kind: 'session-exit'; requestId: string; brokerOrderId: string | null; notBefore: string }), now: Date): SandboxOrderSnapshot {
   try {
     const parsed = state.parse(payload);
+    if(expected.kind!=='exit'&&(!parsed.orderRequestId||!expected.requestId))throw new Error('Own order request identity is required');
     if ((expected.kind === 'entry' && (parsed.orderRequestId !== expected.requestId || parsed.direction !== 'ORDER_DIRECTION_BUY'))
       || (expected.kind === 'exit' && (parsed.orderId !== expected.brokerOrderId || parsed.direction !== 'ORDER_DIRECTION_SELL'
         || !Number.isFinite(Date.parse(expected.notBefore))))

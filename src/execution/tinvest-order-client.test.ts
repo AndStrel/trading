@@ -13,6 +13,45 @@ const input = {
 };
 
 describe('TInvestOrderClient', () => {
+  it('reads actual named sandbox opening and full operation interval with no writes',async()=>{
+    const at='2026-10-02T08:00:00.000001Z',requests:Array<{path:string;body:unknown}>=[];
+    const fetcher=vi.fn<typeof fetch>().mockImplementation(async(url,init)=>{
+      requests.push({path:String(url).split('/').at(-1)!,body:JSON.parse(String(init?.body))});
+      return new Response(JSON.stringify(String(url).endsWith('/GetSandboxAccounts')?{accounts:[{id:'owned',name:'fixture',openedDate:at}]}:{operations:[]}));
+    });
+    const client=new TInvestOrderClient('synthetic','https://example.test/rest',fetcher);
+    expect(await client.getSandboxAccountOpenedAt('owned','fixture')).toBe(at);
+    await client.getSandboxOperations('owned',at,'2026-10-02T08:01:00Z');
+    expect(requests).toEqual([{path:'GetSandboxAccounts',body:{}},{path:'GetSandboxOperations',body:{accountId:'owned',from:at,to:'2026-10-02T08:01:00Z',state:'OPERATION_STATE_EXECUTED'}}]);
+  });
+  it.each(['wrong-name','missing','duplicate','malformed-time','missing-time','future-time'])('refuses unconfirmed sandbox opening: %s',async kind=>{
+    const account={id:'owned',name:'fixture',openedDate:'2026-10-02T08:00:00Z'};
+    if(kind==='wrong-name')account.name='foreign';if(kind==='malformed-time')account.openedDate='0';if(kind==='missing-time')account.openedDate='';
+    if(kind==='future-time')account.openedDate='2099-01-01T00:00:00Z';
+    const accounts=kind==='missing'?[]:kind==='duplicate'?[account,account]:[account];
+    const fetcher=vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({accounts})));
+    await expect(new TInvestOrderClient('synthetic','https://example.test/rest',fetcher).getSandboxAccountOpenedAt('owned','fixture')).rejects.toThrow('not confirmed');
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it.each([['0','2026-10-02T08:00:00Z'],['2026-10-02T08:01:00Z','2026-10-02T08:00:00Z'],['2026-10-02T08:00:00Z','2099-01-01T00:00:00Z']])('rejects invalid operation interval before network',async(from,to)=>{
+    const fetcher=vi.fn<typeof fetch>(),client=new TInvestOrderClient('synthetic','https://example.test/rest',fetcher);
+    expect(()=>client.getSandboxOperations('owned',from,to)).toThrow('not confirmed');expect(fetcher).not.toHaveBeenCalled();
+  });
+  it('retains error tags only from a fixed public vocabulary, never private text',async()=>{
+    const fetcher=vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({code:3,message:'invalid stop price lower than current quote private-synthetic-account'}),{status:400}));
+    await expect(new TInvestOrderClient('synthetic-secret','https://example.test/rest',fetcher).postLimitOrder(input)).rejects.toMatchObject({brokerReasonTags:['price','stop','lower','invalid','current'],message:'T-Invest sandbox API returned HTTP 400'});
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it.each([
+    [{code:3,message:'30099: private broker details'},'30099'],
+    [{code:3,message:'secret account number 34879'},'3'],
+    [{code:'private-token',message:'private-token'},undefined],
+  ])('retains only numeric broker error diagnostics without payload or retry',async(payload,code)=>{
+    const fetcher=vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(payload),{status:400}));
+    const client=new TInvestOrderClient('synthetic-secret','https://example.test/rest',fetcher);
+    await expect(client.postLimitOrder(input)).rejects.toMatchObject({httpStatus:400,brokerCode:code,outcomeUncertain:true,message:'T-Invest sandbox API returned HTTP 400'});
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
   const exitInput={mode:'sandbox' as const,accountId:'local-account',instrumentId:'local-instrument',requestId:input.orderRequestId,lots:3,limitNano:'9900000001'};
   const exitAck=()=>({orderId:'local-sell',orderRequestId:exitInput.requestId,instrumentUid:exitInput.instrumentId,direction:'ORDER_DIRECTION_SELL',
     orderType:'ORDER_TYPE_LIMIT',executionReportStatus:'EXECUTION_REPORT_STATUS_FILL',lotsRequested:'3',lotsExecuted:'3'});

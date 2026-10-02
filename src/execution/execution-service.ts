@@ -22,6 +22,7 @@ import { decimalPriceNano } from './sandbox-stop-state.js';
 import { assertSandboxInstrument } from './sandbox-instrument.js';
 import { assertNoSandboxOrders, sandboxFlatCashNano } from './sandbox-flat-account.js';
 import { readPreparedSandbox, sandboxAccountKey, sandboxBootstrapKey, sandboxEndpoint } from './sandbox-prepared-account.js';
+import { fixtureAuthorization } from './sandbox-fixture-bootstrap.js';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -131,6 +132,18 @@ export class ExecutionService {
   }
 
   async armSandbox(): Promise<void> {
+    return this.armSandboxChecked(false);
+  }
+
+  // Only an isolated, explicitly authorized test fixture uses this entrypoint.
+  // Standard bot arming keeps its original single-account restriction.
+  async armSandboxFixture():Promise<void> {
+    if(this.journal.getRuntimeState('sandbox.fixture_authorization')!==fixtureAuthorization
+      ||this.journal.getRuntimeState('sandbox.fixture_ready')!=='true')throw new Error('Prepared sandbox test fixture is not authorized');
+    return this.armSandboxChecked(true);
+  }
+
+  private async armSandboxChecked(fixture:boolean):Promise<void> {
     // Pin kill before any asynchronous read. A later safety kill must never be
     // overwritten, even if it sets the same boolean in the same millisecond.
     const generation = this.journal.beginSandboxArming();
@@ -139,8 +152,11 @@ export class ExecutionService {
       const snapshot = this.preparedSnapshot();
       if (this.journal.listRecoverableExecutionOrders(1).length) throw new Error('Sandbox recovery is required before arming');
       const accounts = await this.orderClient.getSandboxAccounts();
-      if (accounts.length !== 1 || accounts[0]?.id !== snapshot.accountId
-        || (accounts[0].name !== null && accounts[0].name !== snapshot.name)) throw new Error('Sandbox account ownership is not confirmed');
+      const owned=accounts.filter(a=>a.id===snapshot.accountId);
+      if (owned.length!==1||new Set(accounts.map(a=>a.id)).size!==accounts.length
+        || (fixture?owned[0]?.name!==snapshot.name:(accounts.length!==1||(owned[0]?.name!==null&&owned[0]?.name!==snapshot.name)))) {
+        throw new Error('Sandbox account ownership is not confirmed');
+      }
       const orders = await this.orderClient.getSandboxOrders(snapshot.accountId);
       const stops = await this.orderClient.getSandboxStopOrders(snapshot.accountId);
       const positions = await this.orderClient.getSandboxPositions(snapshot.accountId);

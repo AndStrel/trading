@@ -39,3 +39,56 @@ This fallback is deliberately restricted to one executed unit with a real trade.
 - Normal strategy entries and scheduled closing windows remain unchanged.
 
 Validation: `npm run check` (710 tests across 55 files) and `npm run build` passed before recovery/stop/close; separate fresh broker readback confirmed final flatness. Cash reconciliation discrepancy remains an open acceptance item. This test does not demonstrate stop-trigger liquidation or production execution readiness.
+
+## Second isolated case: native stop-trigger liquidation
+
+Additional human authorization permits sandbox test fixtures and tests without repeated per-test approval. The original account, loss and journal were preserved. A **new** separately named virtual fixture was opened and funded once with 1000 RUB, outside production and outside strategy statistics. Standard bot arming still requires its original single-account ownership rule; fixture arming is a separate local-only path with exact named ownership and authorization.
+
+Observed broker evidence on 2026-10-02:
+
+- BUY: one VTBR share at 51.875 RUB, full fill; commission 0.0259375 RUB.
+- Native STOP_LIMIT trigger and child limit: 51.870 RUB.
+- Initial stop submission was unconfirmed. One exact-key recovery returned HTTP 400; an additional explicitly bounded diagnostic replay of the **same UUID and unchanged parameters** returned a matching acknowledgement. The original rejection reason remains unverified; this was not a clean first-attempt cycle.
+- Broker confirmed ACTIVE, then EXECUTED with an exchange child order ID. No competing manual SELL or stop cancellation was sent in this case.
+- Child SELL: one share at 51.890 RUB, full fill, commission 0.025945 RUB. Actual operation/trade evidence confirmed the exact exchange ID, instrument, direction, timestamp, quantity, price and payment.
+- Ledger net: **-0.0368825 RUB**, calculated in integer nanorubles. A higher sell price does not mean net profit after fees.
+- Independent fresh readback confirmed flat position, no active orders and no active stops; final virtual cash **999.963118 RUB**. Cash delta -0.036882 RUB differs from the execution ledger by **+0.0000005 RUB**. This discrepancy is retained as unresolved accounting evidence, never erased by refill.
+- Private journal result is complete and kill switch is true. This establishes native-stop execution and flatness, **not exact economic reconciliation, a profitable strategy, clean first-attempt reliability or live readiness**.
+
+The observed child order had empty `orderRequestId` and empty `stages`. An empty client ID is accepted only through the existing exact exchange-ID binding for native children; ordinary entry/session-exit matching still rejects it. Filled one-unit stages are recovered by reads of the unique real operation/trade, not fabricated from aggregate values. Regression tests cover foreign child identity and rejection of an empty ID for our own submitted orders.
+
+Local-only tools: `sandbox-fixture-prepare.js` and `sandbox-native-acceptance.js`, with a dedicated persistent private audit mount. Permanent filesystem latches guard fixture creation, funding and entry. Uncertain creation/funding are reconciled by reads and never automatically repeated. The explicitly bounded stop-key recovery paths preserve the original key and parameters and require named fixture ownership, exact position, two empty order/stop-book observations, a one-hour window and permanent per-attempt latches. They are not bot commands or scheduled retries. Real credentials are rejected.
+
+Technical stop-limit pricing may differ from its trigger only for the explicitly identified one-unit VTBR case, with valid ticks, fresh BID evidence and at most 1 RUB entry-to-limit distance. Both service and durable journal enforce that scope; ordinary stops remain unchanged. Planned risk uses the worse limit price, not just the trigger.
+
+Validation after the child evidence repair and error-diagnostic regressions: `npm run check` **732 tests / 56 files**, `npm run build`, and independent fresh broker cash/fill/flat readback passed. The two cash discrepancies and initial stop rejection remain open. Production orders remain disabled.
+
+## Follow-up first-attempt checks
+
+Both follow-up fixtures preserve previous account histories; each was initialized once with 1000 virtual RUB. These technical cases are not a strategy sample.
+
+1. Repeating the original near-entry rule again filled BUY but initially returned HTTP 400 for the stop. An explicitly bounded same-key recovery accepted the unchanged stop; it later triggered and sold fully. BUY 51.875 RUB, fee 0.0259375; SELL 51.895 RUB, fee 0.0259475; net **-0.031885 RUB**. Fresh cash 999.968116 RUB; cash-versus-ledger difference **+0.000001 RUB**, unresolved. Flatness, no active orders/stops and killed journal were independently confirmed.
+2. The amended technical rule requires one unique fresh, tick-valid actual last trade (maximum age 15 seconds), and puts the trigger one tick below the minimum of entry, executable BID and last trade. The child limit is another tick lower, still within the existing one-RUB maximum distance. It passed the first stop submission without recovery, then triggered, fully sold and independently confirmed flatness. BUY 51.900 RUB, fee 0.02595; SELL 51.895 RUB, fee 0.0259475; net **-0.0568975 RUB**. Fresh cash 999.943103 RUB; discrepancy **+0.0000005 RUB**, unresolved. This is **one observed clean first-attempt cycle**, not statistical reliability or proof of the cause of previous HTTP errors.
+
+The initial rejection reason remains unverified. Diagnostics retain numeric codes and tags from a fixed public vocabulary, never arbitrary response text. The technical freshness gates now explicitly reject invalid clocks and duplicate last-trade identities. Ordinary strategy stops are not changed by this local technical pricing rule.
+
+An acknowledged ACTIVE stop is reported as `native-stop-awaiting-trigger`, not success and not a failed sale. A completed-cycle result still requires the actual child fill, fees and fresh flat account. No manual SELL was used in these native-trigger cases. Local validation: **735 tests / 56 files**, build and diff check passed. All four technical positions are closed; all historical journals and cash discrepancies remain preserved.
+
+## Three-source monetary reconciliation
+
+The read-only `cash-reconcile` phase reads the actual named account opening date, the full executed operation window, refreshed fills and fresh flat cash. It requires a sealed one-unit fixture with exactly one 1000-RUB funding operation, one bound BUY, one bound SELL and two fee operations. The actual trade operation IDs establish identity despite existing timestamp snapshots being canonicalized to milliseconds. Missing, duplicate, foreign, future, unknown-type, non-RUB and contradictory signed evidence fails closed. Fee operations have no parent IDs in these observed responses: the comparison is explicitly **account-aggregate**, not invented per-trade attribution.
+
+All four cases passed structural evidence verification but failed exact monetary equality:
+
+| Case | Fill-report net RUB | Operation-ledger net RUB | Cash minus operation ledger RUB |
+| --- | ---: | ---: | ---: |
+| Canceled-stop technical close | -0.122300 | -0.122301 | +0.000002 |
+| Recovered native stop | -0.0368825 | -0.036883 | +0.000001 |
+| Follow-up recovered native stop | -0.031885 | -0.031886 | +0.000002 |
+| First-attempt last-trade guard | -0.0568975 | -0.056898 | +0.000001 |
+
+Separate broker fee operations are slightly larger than fees in order-state responses; cash differs from both sources. This disproves an assumption that summing fee operations alone exactly reconciles the residual. No general rounding rule or source authority is established. Existing fill-ledger PnL is preserved; the isolated diagnostic additionally computes a conservative net using the larger aggregate fee, without lowering reported losses, altering reservations, refilling cash or authorizing trading.
+
+Raw source snapshots, operation IDs and SHA-256-linked reconciliation proofs persist only in the private audit journal, outside Git. The CLI returns `sandbox-cash-mismatch` / exit 2 when sources differ; exit 0 requires exact equality. A valid completed technical close does not establish exact economic reconciliation. Actual calculations use integer nanorubles; no epsilon or floating-point rounding clears the mismatch.
+
+Validation: `npm run check` **762 tests / 57 files**, build passed, and read-only `cash-reconcile` reproduced all four mismatches on fresh broker responses. Real orders remain disabled; Investor-floor research costs remain unchanged.

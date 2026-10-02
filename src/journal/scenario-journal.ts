@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { moscowLossDay, type SandboxLossAssessment, type SandboxLossProof } from '../execution/sandbox-loss-policy.js';
 import { sandboxSessionCloseDue, type SandboxSessionExitIntent } from '../execution/sandbox-session-policy.js';
 import { nanoQuotation } from '../execution/sandbox-stop-state.js';
-import { assertTechnicalScope } from '../execution/sandbox-technical-scope.js';
+import { assertTechnicalScope, technicalStopLimit } from '../execution/sandbox-technical-scope.js';
 
 export class SandboxPreparationChangedError extends Error {
   constructor() { super('Sandbox arming or preparation changed during entry preflight'); }
@@ -976,11 +976,13 @@ export class ScenarioJournal {
         JOIN execution_orders o ON o.id = e.execution_order_id WHERE o.scenario_id = ?`).get(intent.scenarioId) as
         { snapshot_json: string | null } | undefined;
       const snapshot = evidence?.snapshot_json ? JSON.parse(evidence.snapshot_json) as SandboxOrderSnapshot : null;
+      const scenario=this.getScenario(intent.scenarioId);
+      const expectedLimit=scenario?technicalStopLimit(scenario,intent.lots,new Date(intent.createdAt)):intent.stopNano;
       if (!row || row.mode !== 'sandbox' || row.side !== 'long' || row.status !== 'accepted' || !row.approved_by_chat_id
         || !snapshot?.terminal || snapshot.lotsExecuted <= 0 || snapshot.lotsExecuted !== intent.lots
         || row.instrument_id !== intent.instrumentId || row.order_request_id !== intent.entryRequestId
         || intent.brokerStopId !== null || intent.stopNano !== decimalPriceNano(row.planned_stop)
-        || intent.limitNano !== intent.stopNano) throw new Error('Stop requires confirmed terminal fills for an approved sandbox entry');
+        || intent.limitNano !== expectedLimit) throw new Error('Stop requires confirmed terminal fills for an approved sandbox entry');
       db.prepare('INSERT INTO native_stop_intents (scenario_id, request_id, intent_json, updated_at) VALUES (?, ?, ?, ?)')
         .run(intent.scenarioId, intent.requestId, JSON.stringify(intent), intent.createdAt);
       this.appendExecutionEvent(db, Number(row.id), 'native_stop_claimed', { requestId: intent.requestId, lots: intent.lots }, intent.createdAt);

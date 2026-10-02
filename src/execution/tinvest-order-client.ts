@@ -1,10 +1,12 @@
 import type { ExecutionMode } from '../config.js';
+import { z } from 'zod/v4';
 import { numberToQuotation } from '../domain/money.js';
 import { postWithSystemCurl, type CurlPost, type TInvestTransport } from '../tbank/client.js';
 import { nanoQuotation } from './sandbox-stop-state.js';
 import { hydrateSandboxSingleUnitOrder, sandboxOrderNeedsOperations } from './sandbox-operation-evidence.js';
 
 type FetchLike = typeof fetch;
+const timestampInput=z.iso.datetime({offset:true});
 
 export type LimitOrderInput = {
   mode: Exclude<ExecutionMode, 'disabled'>;
@@ -32,6 +34,9 @@ export class TInvestOrderError extends Error {
   constructor(
     message: string,
     readonly outcomeUncertain: boolean,
+    readonly httpStatus?: number,
+    readonly brokerCode?: string,
+    readonly brokerReasonTags?: string[],
   ) {
     super(message);
     this.name = 'TInvestOrderError';
@@ -113,6 +118,22 @@ export class TInvestOrderClient {
       if (!id) throw new TInvestOrderError('Sandbox accounts response is incomplete', false);
       return { id, name: asString(record?.name) };
     });
+  }
+
+  async getSandboxAccountOpenedAt(accountId:string,expectedName:string):Promise<string> {
+    const payload=asRecord(await this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxAccounts',{},false));
+    const rows=payload?.accounts;if(!Array.isArray(rows))throw new TInvestOrderError('Sandbox opening ownership is not confirmed',false);
+    const ids=rows.map(r=>asString(asRecord(r)?.id)),owned=rows.filter(r=>asRecord(r)?.id===accountId);
+    const row=asRecord(owned[0]),at=asString(row?.openedDate);
+    if(ids.some(v=>v===null)||new Set(ids).size!==ids.length||owned.length!==1||row?.name!==expectedName
+      ||!at||at.length>128||!timestampInput.safeParse(at).success||!Number.isFinite(Date.parse(at))||Date.parse(at)>Date.now()+1000)throw new TInvestOrderError('Sandbox opening ownership is not confirmed',false);
+    return at;
+  }
+
+  getSandboxOperations(accountId:string,from:string,to:string):Promise<unknown> {
+    if(!accountId||accountId.length>256||/[\u0000-\u001f\u007f]/.test(accountId)||from.length>128||to.length>128
+      ||!timestampInput.safeParse(from).success||!timestampInput.safeParse(to).success||!Number.isFinite(Date.parse(from))||!Number.isFinite(Date.parse(to))||Date.parse(from)>Date.parse(to)||Date.parse(to)>Date.now()+1000)throw new TInvestOrderError('Sandbox operation interval is not confirmed',false);
+    return this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxOperations',{accountId,from,to,state:'OPERATION_STATE_EXECUTED'},false);
   }
 
   async getSandboxOrderState(accountId: string, orderRequestId: string): Promise<unknown> {
@@ -263,10 +284,17 @@ export class TInvestOrderClient {
     }
 
     if (status < 200 || status >= 300) {
+      const rawCode=asRecord(payload)?.code;
+      const rawMessage=asRecord(payload)?.message;
+      const brokerReasonTags=typeof rawMessage==='string'?['price','stop','quantity','margin','balance','funds','insufficient','parameter','instrument','limit','activation','greater','less','lower','higher','equal','invalid','unavailable','current','last','expire','exchange','order_id'].filter(tag=>rawMessage.toLowerCase().includes(tag)):[];
+      // Extract numeric API code only, never retain arbitrary server text,
+      // account IDs, request IDs, token echoes or personal broker payloads.
+      const detailCode=typeof rawMessage==='string'?rawMessage.match(/^\s*([348]\d{4})(?:\s|:|$)/)?.[1]:undefined;
+      const brokerCode=detailCode??((typeof rawCode==='string'||typeof rawCode==='number')&&/^\d{1,8}$/.test(String(rawCode))?String(rawCode):undefined);
       throw new TInvestOrderError(`T-Invest sandbox API returned HTTP ${status}`,
         // HTTP errors (including duplicate-key conflicts) alone do not prove
         // there is no order. Only verified broker state may release the reserve.
-        uncertainOnNetwork);
+        uncertainOnNetwork,status,brokerCode,brokerReasonTags);
     }
     return payload;
   }
