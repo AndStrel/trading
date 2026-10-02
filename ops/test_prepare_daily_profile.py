@@ -31,6 +31,48 @@ def fixture():
                       "execution.sandbox_account_id": "synthetic-sandbox", "unresolved": 0}}
 
 
+class SandboxSecretSafeguards(unittest.TestCase):
+    def setUp(self):
+        self.saved_fixed = migration.FIXED
+        self.saved_validate = migration.validate
+
+    def tearDown(self):
+        migration.FIXED = self.saved_fixed
+        migration.validate = self.saved_validate
+
+    def test_rejects_unsafe_input(self):
+        from install_sandbox_secret import configure
+        for raw in ("", "short", "x" * 4097, "x" * 30 + "\nOTHER=bad", "x" * 30 + "$HOME"):
+            with self.subTest(raw_length=len(raw)), self.assertRaises(Refused):
+                configure(raw)
+
+    def test_changes_only_sandbox_field(self):
+        from install_sandbox_secret import configure
+        token = "synthetic-sandbox-token-000"
+        configure(token)
+        original = b'T_INVEST_TOKEN=synthetic-read\nT_INVEST_TRADING_TOKEN=synthetic-live\nT_INVEST_SANDBOX_TOKEN=\n'
+        self.assertEqual(migration.patch_env(original), original.replace(
+            b'T_INVEST_SANDBOX_TOKEN=\n', ('T_INVEST_SANDBOX_TOKEN=' + token + '\n').encode()))
+
+    def test_requires_disabled_controls_and_resolved_sandbox_token(self):
+        from install_sandbox_secret import configure
+        token = "synthetic-sandbox-token-000"
+        configure(token)
+        sample = fixture()
+        sample['env']['T_INVEST_SANDBOX_TOKEN'] = token
+        sample['config']['execution']['token'] = token
+        migration.validate(sample, migrated=True)
+        for group, key, value in [('state', 'execution.kill_switch', 'false'),
+                                  ('env', 'T_INVEST_TRADING_TOKEN_ROLE', 'sandbox')]:
+            changed = copy.deepcopy(sample)
+            changed[group][key] = value
+            with self.assertRaises(Refused):
+                migration.validate(changed, migrated=True)
+        sample['config']['execution']['token'] = 'synthetic-wrong'
+        with self.assertRaises(Refused):
+            migration.validate(sample, migrated=True)
+
+
 class Safeguards(unittest.TestCase):
     def test_only_fixed_keys_change(self):
         unchanged = b'# private comments\nT_INVEST_TOKEN="synthetic read"\nOTHER=value\n'
