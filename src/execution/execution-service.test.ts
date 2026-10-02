@@ -102,6 +102,30 @@ afterEach(() => {
 });
 
 describe('ExecutionService', () => {
+  it('keeps ordinary arming restricted while allowing only an authorized named fixture', async () => {
+    const journal=createJournal(),client=orderClient();
+    client.getSandboxAccounts.mockResolvedValue([
+      {id:'original',name:'untouched'},
+      {id:'sandbox-account',name:'daily-pilot-00000000-0000-4000-8000-000000000001'},
+    ]);
+    const service=new ExecutionService(createConfig(),marketClient(),client,journal);
+    await expect(service.armSandbox()).rejects.toThrow('not confirmed');
+    await expect(service.armSandboxFixture()).rejects.toThrow('not authorized');
+    journal.setRuntimeState('sandbox.fixture_authorization','SANDBOX TEST SUITE AUTHORIZED');
+    journal.setRuntimeState('sandbox.fixture_ready','true');
+    await service.armSandboxFixture();expect(service.isKilled()).toBe(false);
+    expect(client.openSandboxAccount).not.toHaveBeenCalled();expect(client.sandboxPayIn).not.toHaveBeenCalled();
+    expect(client.postLimitOrder).not.toHaveBeenCalled();
+  });
+  it('refuses fixture arming without its exact owned name',async()=>{
+    const journal=createJournal(),client=orderClient();
+    journal.setRuntimeState('sandbox.fixture_authorization','SANDBOX TEST SUITE AUTHORIZED');
+    journal.setRuntimeState('sandbox.fixture_ready','true');
+    client.getSandboxAccounts.mockResolvedValue([{id:'sandbox-account',name:'foreign'}]);
+    const service=new ExecutionService(createConfig(),marketClient(),client,journal);
+    await expect(service.armSandboxFixture()).rejects.toThrow('not confirmed');expect(service.isKilled()).toBe(true);
+    expect(client.postLimitOrder).not.toHaveBeenCalled();
+  });
   it('arms the prepared 1000 RUB sandbox read-only when the live pilot capital is 500 RUB', async () => {
     const journal = createJournal(); const client = orderClient();
     const prepared = journal.getRuntimeState(sandboxBootstrapKey);

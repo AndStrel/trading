@@ -5,6 +5,18 @@ import { z } from 'zod/v4';
 export const technicalApproval = 'SANDBOX VTBR 1 LOT MAX 70 RUB BUY STOP CLOSE';
 export const technicalPurpose = 'sandbox-technical-acceptance-v1';
 
+export function technicalStopLimit(scenario:JournalScenarioRecord,lots:number,now:Date):string {
+  const s=scenario.snapshot as Record<string,unknown>|null;
+  const stop=decimalPriceNano(scenario.input.stopPrice);
+  if(s?.acceptanceCase!=='native-stop')return stop;
+  assertTechnicalScope(scenario,lots);
+  const data=z.object({technicalStopLimitNano:z.string().regex(/^\d{1,12}$/),technicalTickNano:z.string().regex(/^\d{1,12}$/),technicalStopQuoteAt:z.iso.datetime({offset:true})}).parse(s);
+  const limit=BigInt(data.technicalStopLimitNano),tick=BigInt(data.technicalTickNano),entry=BigInt(decimalPriceNano(scenario.input.entryPrice));
+  const age=now.getTime()-Date.parse(data.technicalStopQuoteAt);
+  if(limit<=0n||tick<=0n||limit>BigInt(stop)||limit%tick||entry-limit>1_000_000_000n||age< -1000||age>15000)throw new Error('Native technical limit is not confirmed');
+  return String(limit);
+}
+
 export function technicalEntryInput(payload:unknown,tick:bigint,slippageRate:number) {
   if(tick<=0n)throw new Error('Positive price tick required');
   const quote=z.object({units:z.string().regex(/^\d+$/).default('0'),nano:z.number().int().min(0).max(999999999).default(0)});

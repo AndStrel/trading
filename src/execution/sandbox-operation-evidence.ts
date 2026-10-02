@@ -4,7 +4,7 @@ const quantity=z.union([z.number(),z.string().regex(/^\d{1,7}$/)]).transform(Num
 const money=z.object({currency:z.literal('rub'),units:z.string().regex(/^\d{1,12}$/).default('0'),nano:z.number().int().min(0).max(999999999).default(0)});
 const signedMoney=z.object({currency:z.literal('rub'),units:z.string().regex(/^-?\d{1,12}$/).default('0'),nano:z.number().int().min(-999999999).max(999999999).default(0)});
 const timestamp=z.iso.datetime({offset:true});
-const orderSchema=z.object({orderId:id,orderRequestId:id.optional(),instrumentUid:id,orderDate:timestamp,currency:z.literal('rub'),
+const orderSchema=z.object({orderId:id,orderRequestId:z.union([id,z.literal('')]).optional(),instrumentUid:id,orderDate:timestamp,currency:z.literal('rub'),
   direction:z.enum(['ORDER_DIRECTION_BUY','ORDER_DIRECTION_SELL']),orderType:z.literal('ORDER_TYPE_LIMIT'),
   executionReportStatus:z.literal('EXECUTION_REPORT_STATUS_FILL'),lotsRequested:quantity.pipe(z.literal(1)),lotsExecuted:quantity.pipe(z.literal(1)),
   stages:z.array(z.unknown()).length(0),executedOrderPrice:money});

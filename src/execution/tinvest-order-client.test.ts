@@ -13,6 +13,16 @@ const input = {
 };
 
 describe('TInvestOrderClient', () => {
+  it.each([
+    [{code:3,message:'30099: private broker details'},'30099'],
+    [{code:3,message:'secret account number 34879'},'3'],
+    [{code:'private-token',message:'private-token'},undefined],
+  ])('retains only numeric broker error diagnostics without payload or retry',async(payload,code)=>{
+    const fetcher=vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(payload),{status:400}));
+    const client=new TInvestOrderClient('synthetic-secret','https://example.test/rest',fetcher);
+    await expect(client.postLimitOrder(input)).rejects.toMatchObject({httpStatus:400,brokerCode:code,outcomeUncertain:true,message:'T-Invest sandbox API returned HTTP 400'});
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
   const exitInput={mode:'sandbox' as const,accountId:'local-account',instrumentId:'local-instrument',requestId:input.orderRequestId,lots:3,limitNano:'9900000001'};
   const exitAck=()=>({orderId:'local-sell',orderRequestId:exitInput.requestId,instrumentUid:exitInput.instrumentId,direction:'ORDER_DIRECTION_SELL',
     orderType:'ORDER_TYPE_LIMIT',executionReportStatus:'EXECUTION_REPORT_STATUS_FILL',lotsRequested:'3',lotsExecuted:'3'});

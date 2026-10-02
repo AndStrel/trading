@@ -5,8 +5,9 @@ import { ScenarioJournal, type NativeStopRecord } from '../journal/scenario-jour
 import { assessLivePilotRisk } from './live-pilot-risk.js';
 import { parseSandboxOrderState } from './sandbox-order-state.js';
 import { assertNoActiveSandboxStops, assertSandboxPosition, decimalPriceNano, parseSandboxStop } from './sandbox-stop-state.js';
-import type { TInvestOrderClient } from './tinvest-order-client.js';
+import { TInvestOrderError, type TInvestOrderClient } from './tinvest-order-client.js';
 import { assertNoSandboxOrders, sandboxFlatCashNano } from './sandbox-flat-account.js';
+import { technicalStopLimit } from './sandbox-technical-scope.js';
 
 type Client = Pick<TInvestOrderClient, 'getSandboxOrderState' | 'getSandboxPositions' | 'getSandboxStopOrders' | 'getSandboxOrders' | 'postSandboxStopLimit'>;
 
@@ -61,8 +62,9 @@ export class SandboxProtectionService {
       assertSandboxPosition(positions, accountId, order.instrumentId, BigInt(entry.lotsExecuted) * BigInt(scenario.input.lotSize));
       assertNoActiveSandboxStops(stops); assertNoSandboxOrders(orders);
       const stopNano = decimalPriceNano(scenario.input.stopPrice);
+      const limitNano = technicalStopLimit(scenario,entry.lotsExecuted,now);
       const claim = this.journal.claimNativeStop({ scenarioId, accountId, requestId: randomUUID(), instrumentId: order.instrumentId,
-        entryRequestId: order.orderRequestId, lots: entry.lotsExecuted, stopNano, limitNano: stopNano,
+        entryRequestId: order.orderRequestId, lots: entry.lotsExecuted, stopNano, limitNano,
         createdAt: now.toISOString(), brokerStopId: null });
       if (!claim.claimed) return await this.verify(accountId, claim.record, now);
       const intent = claim.record.intent;
@@ -70,7 +72,8 @@ export class SandboxProtectionService {
         requestId: intent.requestId, lots: intent.lots, stopNano: intent.stopNano, limitNano: intent.limitNano });
       this.journal.acknowledgeNativeStop(scenarioId, intent.requestId, brokerId);
       return await this.verify(accountId, this.journal.getNativeStop(scenarioId)!, now);
-    } catch {
+    } catch (error) {
+      if(error instanceof TInvestOrderError)this.journal.setRuntimeState(`sandbox.stop_failure.${scenarioId}`,JSON.stringify({httpStatus:error.httpStatus??null,brokerCode:error.brokerCode??null,outcomeUncertain:error.outcomeUncertain}));
       this.journal.setExecutionKilled(true);
       throw new Error('Sandbox protection is not confirmed; entry risk remains reserved, new entries are killed, and no stop is retried');
     }

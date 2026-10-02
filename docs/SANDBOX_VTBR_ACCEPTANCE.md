@@ -39,3 +39,26 @@ This fallback is deliberately restricted to one executed unit with a real trade.
 - Normal strategy entries and scheduled closing windows remain unchanged.
 
 Validation: `npm run check` (710 tests across 55 files) and `npm run build` passed before recovery/stop/close; separate fresh broker readback confirmed final flatness. Cash reconciliation discrepancy remains an open acceptance item. This test does not demonstrate stop-trigger liquidation or production execution readiness.
+
+## Second isolated case: native stop-trigger liquidation
+
+Additional human authorization permits sandbox test fixtures and tests without repeated per-test approval. The original account, loss and journal were preserved. A **new** separately named virtual fixture was opened and funded once with 1000 RUB, outside production and outside strategy statistics. Standard bot arming still requires its original single-account ownership rule; fixture arming is a separate local-only path with exact named ownership and authorization.
+
+Observed broker evidence on 2026-10-02:
+
+- BUY: one VTBR share at 51.875 RUB, full fill; commission 0.0259375 RUB.
+- Native STOP_LIMIT trigger and child limit: 51.870 RUB.
+- Initial stop submission was unconfirmed. One exact-key recovery returned HTTP 400; an additional explicitly bounded diagnostic replay of the **same UUID and unchanged parameters** returned a matching acknowledgement. The original rejection reason remains unverified; this was not a clean first-attempt cycle.
+- Broker confirmed ACTIVE, then EXECUTED with an exchange child order ID. No competing manual SELL or stop cancellation was sent in this case.
+- Child SELL: one share at 51.890 RUB, full fill, commission 0.025945 RUB. Actual operation/trade evidence confirmed the exact exchange ID, instrument, direction, timestamp, quantity, price and payment.
+- Ledger net: **-0.0368825 RUB**, calculated in integer nanorubles. A higher sell price does not mean net profit after fees.
+- Independent fresh readback confirmed flat position, no active orders and no active stops; final virtual cash **999.963118 RUB**. Cash delta -0.036882 RUB differs from the execution ledger by **+0.0000005 RUB**. This discrepancy is retained as unresolved accounting evidence, never erased by refill.
+- Private journal result is complete and kill switch is true. This establishes native-stop execution and flatness, **not exact economic reconciliation, a profitable strategy, clean first-attempt reliability or live readiness**.
+
+The observed child order had empty `orderRequestId` and empty `stages`. An empty client ID is accepted only through the existing exact exchange-ID binding for native children; ordinary entry/session-exit matching still rejects it. Filled one-unit stages are recovered by reads of the unique real operation/trade, not fabricated from aggregate values. Regression tests cover foreign child identity and rejection of an empty ID for our own submitted orders.
+
+Local-only tools: `sandbox-fixture-prepare.js` and `sandbox-native-acceptance.js`, with a dedicated persistent private audit mount. Permanent filesystem latches guard fixture creation, funding and entry. Uncertain creation/funding are reconciled by reads and never automatically repeated. The explicitly bounded stop-key recovery paths preserve the original key and parameters and require named fixture ownership, exact position, two empty order/stop-book observations, a one-hour window and permanent per-attempt latches. They are not bot commands or scheduled retries. Real credentials are rejected.
+
+Technical stop-limit pricing may differ from its trigger only for the explicitly identified one-unit VTBR case, with valid ticks, fresh BID evidence and at most 1 RUB entry-to-limit distance. Both service and durable journal enforce that scope; ordinary stops remain unchanged. Planned risk uses the worse limit price, not just the trigger.
+
+Validation after the child evidence repair and error-diagnostic regressions: `npm run check` **732 tests / 56 files**, `npm run build`, and independent fresh broker cash/fill/flat readback passed. The two cash discrepancies and initial stop rejection remain open. Production orders remain disabled.
