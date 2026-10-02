@@ -194,6 +194,7 @@ export class IntradayScanner {
     private readonly log: (event: IntradayScanEvent) => void = (event) =>
       process.stdout.write(JSON.stringify(event) + '\n'),
     universe?: IntradayUniverseProvider,
+    private readonly acquireSourceLease?: () => () => void,
   ) {
     this.universe = universe ?? new TInvestIntradayUniverseProvider(config, client);
   }
@@ -218,7 +219,15 @@ export class IntradayScanner {
     return this.latestReport;
   }
 
+  invalidateSourceReport(): void { this.latestReport = null; }
+
   async scanOnce(now = new Date()): Promise<IntradayScanEvent[]> {
+    const release = this.acquireSourceLease?.();
+    try { return await this.scanWithSource(now); }
+    finally { release?.(); }
+  }
+
+  private async scanWithSource(now: Date): Promise<IntradayScanEvent[]> {
     if (this.isPaused()) {
       const event: IntradayScanEvent = {
         instrumentId: 'scanner',
@@ -234,6 +243,7 @@ export class IntradayScanner {
     try {
       snapshot = await this.universe.getSnapshot(now);
     } catch (error: unknown) {
+      this.latestReport = null;
       const event: IntradayScanEvent = {
         instrumentId: 'universe',
         observedAt: now.toISOString(),

@@ -7,7 +7,12 @@ import { ScenarioJournal } from './journal/scenario-journal.js';
 import { IntradayScanner } from './scanner/intraday-scanner.js';
 import { TelegramBotClient } from './telegram/client.js';
 import { TelegramTradingBot } from './telegram/bot.js';
-import { TInvestClient } from './tbank/client.js';
+import { TInvestClient, postWithSystemCurl } from './tbank/client.js';
+import { MarketSourceController } from './tbank/market-source.js';
+import { createMarketRelayFetch } from './tbank/market-relay-fetch.js';
+import { readEgressLocation } from './tbank/egress-location.js';
+import { readFileSync } from 'node:fs';
+import { createUnixRelayFetch } from './tbank/unix-relay-fetch.js';
 import { createMiniAppServer } from './web/mini-app-server.js';
 import { buildMiniAppView } from './web/mini-app-view.js';
 import { SandboxProtectionService } from './execution/sandbox-protection-service.js';
@@ -38,7 +43,47 @@ const execution = new ExecutionService(
   lossGuard,
   sessionClose,
 );
-const scanner = new IntradayScanner(config, tInvestClient, journal);
+const directMarketFetch: typeof fetch = config.transport === 'fetch' ? fetch : async (input, init) => {
+  if (typeof input !== 'string' || typeof init?.body !== 'string' || !config.token) throw new Error('Invalid market request');
+  const response = await postWithSystemCurl({ url: input, token: config.token, body: init.body });
+  return new Response(response.body, { status: response.status });
+};
+const localRelayUrl = process.env.T_INVEST_LOCAL_RELAY_URL;
+const relaySecretPath = process.env.T_INVEST_LOCAL_RELAY_SECRET_PATH;
+if (relaySecretPath && relaySecretPath !== '/run/relay/secret') throw new Error('Invalid relay secret path');
+const localRelaySecret = relaySecretPath ? readFileSync(relaySecretPath, 'utf8').trim() : process.env.T_INVEST_LOCAL_RELAY_SECRET;
+const relayFetch = process.env.T_INVEST_LOCAL_RELAY_SOCKET ? createUnixRelayFetch(process.env.T_INVEST_LOCAL_RELAY_SOCKET) : fetch;
+if (Boolean(localRelayUrl) !== Boolean(localRelaySecret)) throw new Error('Local relay configuration is incomplete');
+const computerFetch = localRelayUrl && localRelaySecret
+  ? createMarketRelayFetch({ url: localRelayUrl, secret: localRelaySecret, fetchImpl: relayFetch }) : undefined;
+const sources = new MarketSourceController({ server: directMarketFetch, ...(computerFetch ? { computer: computerFetch } : {}) });
+const marketClient = new TInvestClient(config.token, config.baseUrl, { transport: 'fetch', fetchImpl: sources.fetch });
+const scanner = new IntradayScanner(config, marketClient, journal, undefined, undefined, () => sources.acquireScan());
+const probeSources = async () => {
+  await Promise.all((['server', 'computer'] as const).map(async source => {
+    const transport = source === 'server' ? directMarketFetch : computerFetch;
+    if (!transport) return;
+    try {
+      const client = new TInvestClient(config.token, config.baseUrl, { transport: 'fetch', fetchImpl: transport, retryAttempts: 0, requestTimeoutMs: 15_000 });
+      const payload = await client.getShares() as { instruments?: unknown };
+      sources.recordHealth(source, Array.isArray(payload.instruments) && payload.instruments.length > 0);
+    } catch { sources.recordHealth(source, false); }
+  }));
+  setTimeout(() => { void probeSources(); }, 30_000);
+};
+void probeSources();
+const probeLocations = async () => {
+  try { sources.recordLocation('server', await readEgressLocation()); } catch {}
+  if (localRelayUrl && localRelaySecret) {
+    try {
+      const url = new URL('/egress', localRelayUrl);
+      const response = await relayFetch(url, { headers: { Authorization: 'Bearer ' + localRelaySecret }, redirect: 'error', signal: AbortSignal.timeout(10_000) });
+      if (response.ok) sources.recordLocation('computer', await response.json() as { countryCode: string; checkedAt: string });
+    } catch {}
+  }
+  setTimeout(() => { void probeLocations(); }, 3_600_000);
+};
+void probeLocations();
 const telegramClient = new TelegramBotClient(config.telegram.token);
 const telegram = new TelegramTradingBot(
   config,
@@ -77,6 +122,8 @@ if (config.telegram.miniApp.enabled) {
   const server = createMiniAppServer({
     token: config.telegram.token, origin: config.telegram.miniApp.url!, allowedPrivateIds: config.telegram.allowedChatIds,
     view: () => buildMiniAppView(config, scanner, execution, journal),
+    marketSources: sources,
+    selectMarketSource: source => { sources.select(source); scanner.invalidateSourceReport(); },
     action: action => { if (action === 'pause') scanner.pause(); else if (action === 'resume') scanner.resume(); else execution.kill(); },
   });
   await new Promise<void>((resolve, reject) => {
