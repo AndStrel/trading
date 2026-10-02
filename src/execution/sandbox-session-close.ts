@@ -9,6 +9,7 @@ import { assertNoSandboxOrders, sandboxFlatCashNano } from './sandbox-flat-accou
 import { sandboxBidValue } from './sandbox-loss-policy.js';
 import { sandboxSessionCloseDue } from './sandbox-session-policy.js';
 import { assertSandboxInstrument } from './sandbox-instrument.js';
+import { assertTechnicalScope } from './sandbox-technical-scope.js';
 
 type Client = Pick<TInvestOrderClient,'getSandboxOrderState'|'getSandboxPositions'|'getSandboxOrders'|'getSandboxStopOrders'|'cancelSandboxStop'|'postSandboxSessionExit'>;
 type CloseResult = { kind:'session'|'native'; complete:boolean } | null;
@@ -34,6 +35,20 @@ export class SandboxSessionClose {
     try { return await result; } finally { this.inFlight.delete(scenarioId); }
   }
 
+  // Not exposed by Telegram/MiniApp or the automatic strategy worker.
+  // Only the separately authorized, bounded, isolated acceptance runner uses it.
+  async closeTechnicalAcceptance(accountId:string,scenarioId:number):Promise<CloseResult> {
+    this.enabled(accountId);
+    const scenario=this.journal.getScenario(scenarioId), order=this.journal.getExecutionByScenario(scenarioId);
+    if(!scenario||!order||order.mode!=='sandbox') throw new Error('Technical sandbox scenario is absent');
+    assertTechnicalScope(scenario,order.lots);
+    const instrument=await this.market.getInstrumentBy(order.instrumentId) as {instrument?:{ticker?:string;classCode?:string}};
+    if(instrument?.instrument?.ticker!=='VTBR'||instrument.instrument.classCode!=='TQBR') throw new Error('Technical instrument is not VTBR TQBR');
+    const pending=this.inFlight.get(scenarioId); if(pending) return pending;
+    const result=this.advanceGuarded(accountId,scenarioId,undefined,true); this.inFlight.set(scenarioId,result);
+    try { return await result; } finally { this.inFlight.delete(scenarioId); }
+  }
+
   // Explicit reconciliation and startup recovery stay READ ONLY. They cannot
   // cancel a stop or claim/post the next phase of an unfinished close intent.
   async reconcile(accountId:string,scenarioId:number,fixedNow?:Date) {
@@ -42,7 +57,7 @@ export class SandboxSessionClose {
     return this.exits.reconcile(accountId,scenarioId,fixedNow);
   }
 
-  private async advanceGuarded(accountId:string,scenarioId:number,fixedNow?:Date):Promise<CloseResult> {
+  private async advanceGuarded(accountId:string,scenarioId:number,fixedNow?:Date,technical=false):Promise<CloseResult> {
     const now=()=>fixedNow??new Date();
     try {
       const order=this.journal.getExecutionByScenario(scenarioId); const scenario=this.journal.getScenario(scenarioId);
@@ -53,7 +68,8 @@ export class SandboxSessionClose {
       const persisted=this.journal.getExecutionSnapshot(scenarioId);
       if(!persisted?.terminal||!persisted.stages.length) throw new Error();
       const entryAt=new Date(Math.max(...persisted.stages.map(stage=>Date.parse(stage.executedAt)))).toISOString();
-      if(!prior&&!sandboxSessionCloseDue(entryAt,now())) return null;
+      if(technical) assertTechnicalScope(scenario,order.lots);
+      if(!prior&&!technical&&!sandboxSessionCloseDue(entryAt,now())) return null;
       this.journal.setExecutionKilled(true); // Protective exits remain permitted; never resume entries.
       const entry=parseSandboxOrderState(await this.client.getSandboxOrderState(accountId,order.orderRequestId),
         {requestId:order.orderRequestId,instrumentId:order.instrumentId,lots:order.lots,lotSize:scenario.input.lotSize},now());
@@ -66,7 +82,7 @@ export class SandboxSessionClose {
         if(stop.status!=='STOP_ORDER_STATUS_ACTIVE'||this.journal.getSandboxExitEvidence(scenarioId)) throw new Error();
         await this.preflight(accountId,order.instrumentId,entry.lotsExecuted,scenario.input.lotSize,fixedNow);
         const claim=this.journal.claimSandboxSessionExit({scenarioId,accountId,entryRequestId:order.orderRequestId,instrumentId:order.instrumentId,
-          lots:entry.lotsExecuted,stopId:native.intent.brokerStopId},now());
+          lots:entry.lotsExecuted,stopId:native.intent.brokerStopId},now(),technical ? 'technical-acceptance' : 'session');
         if(claim.claimed) await this.client.cancelSandboxStop({mode:'sandbox',accountId,stopId:claim.intent.stopId});
         // If another process claimed cancellation, we only READ its outcome.
         // An ACTIVE/missing stop after timeout is never permission to retry.

@@ -11,6 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { moscowLossDay, type SandboxLossAssessment, type SandboxLossProof } from '../execution/sandbox-loss-policy.js';
 import { sandboxSessionCloseDue, type SandboxSessionExitIntent } from '../execution/sandbox-session-policy.js';
 import { nanoQuotation } from '../execution/sandbox-stop-state.js';
+import { assertTechnicalScope } from '../execution/sandbox-technical-scope.js';
 
 export class SandboxPreparationChangedError extends Error {
   constructor() { super('Sandbox arming or preparation changed during entry preflight'); }
@@ -1047,10 +1048,15 @@ export class ScenarioJournal {
     } finally { db.close(); }
   }
 
-  claimSandboxSessionExit(input: { scenarioId: number; accountId: string; entryRequestId: string; instrumentId: string; lots: number; stopId: string }, now = new Date()) {
+  claimSandboxSessionExit(input: { scenarioId: number; accountId: string; entryRequestId: string; instrumentId: string; lots: number; stopId: string }, now = new Date(), purpose: 'session' | 'technical-acceptance' = 'session') {
     const db = this.open();
     try {
       db.exec('BEGIN IMMEDIATE');
+      if (purpose === 'technical-acceptance') {
+        const scenario = db.prepare('SELECT * FROM scenario_journal WHERE id=?').get(input.scenarioId) as JournalRow | undefined;
+        if (!scenario) throw new Error('Technical scenario is absent');
+        assertTechnicalScope(this.toRecord(scenario), input.lots);
+      }
       const prior = db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(input.scenarioId) as { intent_json: string } | undefined;
       if (prior) {
         const intent = JSON.parse(prior.intent_json) as SandboxSessionExitIntent;
@@ -1069,14 +1075,14 @@ export class ScenarioJournal {
         || native?.accountId !== input.accountId || native.brokerStopId !== input.stopId || native.lots !== input.lots
         || native.entryRequestId !== input.entryRequestId || native.instrumentId !== input.instrumentId
         || observed?.status !== 'STOP_ORDER_STATUS_ACTIVE' || observed.childOrderId !== null || !Number.isFinite(now.getTime())
-        || !sandboxSessionCloseDue(new Date(Math.max(...entry.stages.map(stage => Date.parse(stage.executedAt)))).toISOString(), now)
+        || (purpose !== 'technical-acceptance' && !sandboxSessionCloseDue(new Date(Math.max(...entry.stages.map(stage => Date.parse(stage.executedAt)))).toISOString(), now))
         || db.prepare('SELECT scenario_id FROM sandbox_exit_evidence WHERE scenario_id=?').get(input.scenarioId)
         || db.prepare("SELECT id FROM execution_orders WHERE status IN ('accepted','submitting') AND scenario_id<>? LIMIT 1").get(input.scenarioId)) throw new Error('Session close requires an exclusive approved protected position');
       const intent: SandboxSessionExitIntent = { ...input, requestId: randomUUID(), phase: 'cancel-claimed', createdAt: now.toISOString(),
         submitClaimedAt: null, limitNano: null, brokerOrderId: null };
       db.prepare('INSERT INTO sandbox_session_exit_intents (scenario_id,request_id,intent_json,updated_at) VALUES (?,?,?,?)')
         .run(input.scenarioId,intent.requestId,JSON.stringify(intent),intent.createdAt);
-      this.appendExecutionEvent(db,Number(row.id),'sandbox_session_cancel_claimed',{requestId:intent.requestId},intent.createdAt);
+      this.appendExecutionEvent(db,Number(row.id),'sandbox_session_cancel_claimed',{requestId:intent.requestId,purpose},intent.createdAt);
       this.bumpSandboxRevision(db);
       db.prepare(`INSERT INTO runtime_state (key,value,updated_at) VALUES ('execution.kill_switch','true',?)
         ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at`).run(intent.createdAt);

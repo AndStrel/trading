@@ -2,6 +2,7 @@ import type { ExecutionMode } from '../config.js';
 import { numberToQuotation } from '../domain/money.js';
 import { postWithSystemCurl, type CurlPost, type TInvestTransport } from '../tbank/client.js';
 import { nanoQuotation } from './sandbox-stop-state.js';
+import { hydrateSandboxSingleUnitOrder, sandboxOrderNeedsOperations } from './sandbox-operation-evidence.js';
 
 type FetchLike = typeof fetch;
 
@@ -115,15 +116,28 @@ export class TInvestOrderClient {
   }
 
   async getSandboxOrderState(accountId: string, orderRequestId: string): Promise<unknown> {
-    return this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxOrderState', {
+    const payload=await this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxOrderState', {
       accountId, orderId: orderRequestId, orderIdType: 'ORDER_ID_TYPE_REQUEST', priceType: 'PRICE_TYPE_CURRENCY',
     }, false);
+    return this.completeSandboxSingleUnitState(accountId,payload,{requestId:orderRequestId});
   }
 
-  getSandboxChildOrderState(accountId: string, brokerOrderId: string): Promise<unknown> {
-    return this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxOrderState', {
+  async getSandboxChildOrderState(accountId: string, brokerOrderId: string): Promise<unknown> {
+    const payload=await this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxOrderState', {
       accountId, orderId: brokerOrderId, orderIdType: 'ORDER_ID_TYPE_EXCHANGE', priceType: 'PRICE_TYPE_CURRENCY',
     }, false);
+    return this.completeSandboxSingleUnitState(accountId,payload,{brokerOrderId});
+  }
+
+  private async completeSandboxSingleUnitState(accountId:string,payload:unknown,lookup:{requestId?:string;brokerOrderId?:string}) {
+    if(!sandboxOrderNeedsOperations(payload))return payload;
+    const order=payload as {orderDate:string;orderId:string;orderRequestId?:string};
+    if((lookup.requestId&&order.orderRequestId!==lookup.requestId)||(lookup.brokerOrderId&&order.orderId!==lookup.brokerOrderId))throw new TInvestOrderError('Sandbox lookup identity is not confirmed',false);
+    const now=new Date(),at=Date.parse(order.orderDate);
+    if(at>now.getTime()+1000)throw new TInvestOrderError('Sandbox order timestamp is not confirmed',false);
+    const operations=await this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxOperations',{
+      accountId,from:new Date(at-1000).toISOString(),to:new Date(Math.max(at,Math.min(now.getTime(),at+1000))).toISOString(),state:'OPERATION_STATE_EXECUTED'},false);
+    return hydrateSandboxSingleUnitOrder(payload,operations,lookup,now);
   }
 
   getSandboxPositions(accountId: string): Promise<unknown> {
