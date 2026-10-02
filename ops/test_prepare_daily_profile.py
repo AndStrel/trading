@@ -242,7 +242,10 @@ class RealProbe(unittest.TestCase):
 
     def test_real_config_conflicting_alias_refused(self):
         self.env["T_INVEST_LIVE_TOKEN"] = "synthetic-other"
-        self.assertNotEqual(self.invoke().returncode, 0)
+        result = self.invoke()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout), {"probeFailure": "config"})
+        self.assertNotIn("synthetic", result.stdout + result.stderr)
 
     def test_real_journal_read_only_and_ack_binding(self):
         with tempfile.TemporaryDirectory(prefix="profile-probe-") as folder:
@@ -269,7 +272,10 @@ class RealProbe(unittest.TestCase):
             with sqlite3.connect(path) as db:
                 db.execute("UPDATE runtime_state SET value='synthetic-other' "
                            "WHERE key='execution.sandbox_account_id'")
-            self.assertNotEqual(self.invoke(False).returncode, 0)
+            failed = self.invoke(False)
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(json.loads(failed.stdout), {"probeFailure": "ack"})
+            self.assertNotIn("synthetic", failed.stdout + failed.stderr)
 
 
 if __name__ == "__main__":
