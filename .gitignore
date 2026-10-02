@@ -5,3 +5,4 @@ coverage/
 .env.*
 !.env.example
 .trading/
+__pycache__/
