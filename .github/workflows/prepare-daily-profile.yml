@@ -1,0 +1,65 @@
+name: Prepare daily read-only profile
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Apply fixed role=live, daily capital=500, sandbox balance=1000; order execution remains disabled'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Serialize against the EXISTING deploy workflow, including image rebuilds.
+concurrency:
+  group: trading-telegram-production
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      DEPLOY_HOST: ${{ vars.TRADING_DEPLOY_HOST }}
+      DEPLOY_USER: ${{ vars.TRADING_DEPLOY_USER }}
+      DEPLOY_PATH: ${{ vars.TRADING_DEPLOY_PATH }}
+      DEPLOY_SSH_KEY: ${{ secrets.TRADING_DEPLOY_SSH_KEY }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.TRADING_DEPLOY_KNOWN_HOSTS }}
+      EXPECTED_SHA: ${{ github.sha }}
+      APPLY_PROFILE: ${{ inputs.apply && 'true' || 'false' }}
+    steps:
+      - name: Validate fixed maintenance target
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "$DEPLOY_SSH_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          test "$DEPLOY_PATH" = "/opt/andstrel/trading"
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$APPLY_PROFILE" = "true" || "$APPLY_PROFILE" = "false" ]]
+
+      - name: Configure verified existing SSH access
+        run: |
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Validate or apply the fixed non-trading profile
+        run: |
+          apply_argument=""
+          if [ "$APPLY_PROFILE" = "true" ]; then
+            apply_argument=" --apply"
+          fi
+          ssh -i "$HOME/.ssh/id_ed25519" \
+            -o BatchMode=yes \
+            -o ConnectTimeout=15 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "python3 /opt/andstrel/trading/ops/prepare_daily_profile.py --expected-sha $EXPECTED_SHA$apply_argument"
