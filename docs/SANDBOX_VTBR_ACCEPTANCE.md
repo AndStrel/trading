@@ -62,3 +62,14 @@ Local-only tools: `sandbox-fixture-prepare.js` and `sandbox-native-acceptance.js
 Technical stop-limit pricing may differ from its trigger only for the explicitly identified one-unit VTBR case, with valid ticks, fresh BID evidence and at most 1 RUB entry-to-limit distance. Both service and durable journal enforce that scope; ordinary stops remain unchanged. Planned risk uses the worse limit price, not just the trigger.
 
 Validation after the child evidence repair and error-diagnostic regressions: `npm run check` **732 tests / 56 files**, `npm run build`, and independent fresh broker cash/fill/flat readback passed. The two cash discrepancies and initial stop rejection remain open. Production orders remain disabled.
+
+## Follow-up first-attempt checks
+
+Both follow-up fixtures preserve previous account histories; each was initialized once with 1000 virtual RUB. These technical cases are not a strategy sample.
+
+1. Repeating the original near-entry rule again filled BUY but initially returned HTTP 400 for the stop. An explicitly bounded same-key recovery accepted the unchanged stop; it later triggered and sold fully. BUY 51.875 RUB, fee 0.0259375; SELL 51.895 RUB, fee 0.0259475; net **-0.031885 RUB**. Fresh cash 999.968116 RUB; cash-versus-ledger difference **+0.000001 RUB**, unresolved. Flatness, no active orders/stops and killed journal were independently confirmed.
+2. The amended technical rule requires one unique fresh, tick-valid actual last trade (maximum age 15 seconds), and puts the trigger one tick below the minimum of entry, executable BID and last trade. The child limit is another tick lower, still within the existing one-RUB maximum distance. It passed the first stop submission without recovery, then triggered, fully sold and independently confirmed flatness. BUY 51.900 RUB, fee 0.02595; SELL 51.895 RUB, fee 0.0259475; net **-0.0568975 RUB**. Fresh cash 999.943103 RUB; discrepancy **+0.0000005 RUB**, unresolved. This is **one observed clean first-attempt cycle**, not statistical reliability or proof of the cause of previous HTTP errors.
+
+The initial rejection reason remains unverified. Diagnostics retain numeric codes and tags from a fixed public vocabulary, never arbitrary response text. The technical freshness gates now explicitly reject invalid clocks and duplicate last-trade identities. Ordinary strategy stops are not changed by this local technical pricing rule.
+
+An acknowledged ACTIVE stop is reported as `native-stop-awaiting-trigger`, not success and not a failed sale. A completed-cycle result still requires the actual child fill, fees and fresh flat account. No manual SELL was used in these native-trigger cases. Local validation: **735 tests / 56 files**, build and diff check passed. All four technical positions are closed; all historical journals and cash discrepancies remain preserved.

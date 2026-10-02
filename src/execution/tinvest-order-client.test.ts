@@ -13,6 +13,11 @@ const input = {
 };
 
 describe('TInvestOrderClient', () => {
+  it('retains error tags only from a fixed public vocabulary, never private text',async()=>{
+    const fetcher=vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({code:3,message:'invalid stop price lower than current quote private-synthetic-account'}),{status:400}));
+    await expect(new TInvestOrderClient('synthetic-secret','https://example.test/rest',fetcher).postLimitOrder(input)).rejects.toMatchObject({brokerReasonTags:['price','stop','lower','invalid','current'],message:'T-Invest sandbox API returned HTTP 400'});
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
   it.each([
     [{code:3,message:'30099: private broker details'},'30099'],
     [{code:3,message:'secret account number 34879'},'3'],

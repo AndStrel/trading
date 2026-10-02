@@ -3,7 +3,7 @@ import { loadConfig } from './config.js';
 import { ScenarioJournal } from './journal/scenario-journal.js';
 import { TInvestClient } from './tbank/client.js';
 import { TInvestOrderClient, TInvestOrderError } from './execution/tinvest-order-client.js';
-import { assertSandboxPosition } from './execution/sandbox-stop-state.js';
+import { assertSandboxPosition, parseSandboxStop } from './execution/sandbox-stop-state.js';
 import { assertNoSandboxOrders } from './execution/sandbox-flat-account.js';
 import { z } from 'zod/v4';
 import { ExecutionService } from './execution/execution-service.js';
@@ -12,7 +12,7 @@ import { SandboxExitService } from './execution/sandbox-exit-service.js';
 import { SandboxLossGuard } from './execution/sandbox-loss-guard.js';
 import { fixtureAuthorization } from './execution/sandbox-fixture-bootstrap.js';
 import { readPreparedSandbox, sandboxEndpoint } from './execution/sandbox-prepared-account.js';
-import { technicalApproval, technicalPurpose, technicalEntryInput, selectTechnicalShare, assertTechnicalScope } from './execution/sandbox-technical-scope.js';
+import { technicalApproval, technicalPurpose, technicalEntryInput, selectTechnicalShare, assertTechnicalScope, nativeTechnicalStopPrices } from './execution/sandbox-technical-scope.js';
 import { sandboxBidValue } from './execution/sandbox-loss-policy.js';
 import { assessLivePilotRisk } from './execution/live-pilot-risk.js';
 import { decimalPriceNano } from './execution/sandbox-stop-state.js';
@@ -43,15 +43,16 @@ try {
   if(journal.getRuntimeState('technical.scenario_id'))throw new Error();
   closeSync(openSync('/run/audit/native-entry.once','wx',0o600));
   stage='arm-read-only';await execution.armSandboxFixture();
-  stage='quote';const [book,status]=await Promise.all([market.getOrderBook(share.uid,20),market.getTradingStatus(share.uid)]);
+  stage='quote';const [book,status,lastPrices]=await Promise.all([market.getOrderBook(share.uid,20),market.getTradingStatus(share.uid),market.getLastPrices([share.uid])]);
   const bid=sandboxBidValue(book,status,share.uid,1,1,new Date());
   const input=technicalEntryInput(book,tick,config.scanner.slippageRate);
-  const entry=BigInt(decimalPriceNano(input.entryPrice)),trigger=entry-tick,limit=BigInt(bid.worstBidNano)<trigger?BigInt(bid.worstBidNano):trigger;
+  const entry=BigInt(decimalPriceNano(input.entryPrice));
+  const {trigger,limit,lastTradeAt,lastTradeNano}=nativeTechnicalStopPrices(entry,BigInt(bid.worstBidNano),tick,lastPrices,share.uid,new Date());
   if(trigger<=0n||limit<=0n||entry-limit>1_000_000_000n||limit%tick)throw new Error();
   input.stopPrice=Number(trigger)/1e9;
   const risk=assessLivePilotRisk(config.livePilot,{...input,stopPrice:Number(limit)/1e9,lots:1,commissionRate:config.commissionRate,availableCashRub:config.livePilot.capitalRub,reservedDailyRiskRub:0,realizedDailyLossRub:0,markedOpenLossRub:0});
   if(!risk.allowed)throw new Error();
-  const scenario=journal.record({observedAt:new Date().toISOString(),strategy:'intraday',instrumentId:share.uid,input,decision:'candidate',blockers:[],warnings:['Technical native-stop test only, not a strategy signal'],snapshot:{purpose:technicalPurpose,authorization:technicalApproval,ticker:'VTBR',acceptanceCase:'native-stop',technicalStopLimitNano:String(limit),technicalTickNano:String(tick),technicalStopQuoteAt:bid.quoteAt,tradePlan:{lots:1,positionRub:risk.positionRub,totalRiskRub:risk.totalRiskRub}}});
+  const scenario=journal.record({observedAt:new Date().toISOString(),strategy:'intraday',instrumentId:share.uid,input,decision:'candidate',blockers:[],warnings:['Technical native-stop test only, not a strategy signal'],snapshot:{purpose:technicalPurpose,authorization:technicalApproval,ticker:'VTBR',acceptanceCase:'native-stop',technicalStopLimitNano:String(limit),technicalTickNano:String(tick),technicalStopQuoteAt:bid.quoteAt,technicalLastTradeAt:lastTradeAt,technicalLastTradeNano:lastTradeNano,tradePlan:{lots:1,positionRub:risk.positionRub,totalRiskRub:risk.totalRiskRub}}});
   assertTechnicalScope(scenario,1);journal.setRuntimeState('technical.scenario_id',String(scenario.id));
   stage='buy';const result=await execution.submitScenario(scenario.id,'local-human-sandbox-authorization');
   if(result.lotsExecuted!==1||result.executionStatus!=='EXECUTION_REPORT_STATUS_FILL')throw new Error();
@@ -93,12 +94,21 @@ try {
   stage='stop';const stop=await protection.protect(prepared.accountId,id);
   console.log(JSON.stringify({stage,status:stop.status,technicalOnly:true,realOrders:false}));
  }
- stage='native-sale-read-only';await exits.reconcile(prepared.accountId,id);
- journal.setExecutionKilled(true);const result=journal.listSandboxResults().find(r=>r.scenarioId===id);
- console.log(JSON.stringify({result:result?.complete?'native-stop-sale-confirmed':'native-stop-sale-unconfirmed',flatConfirmed:result?.complete??false,netPnlNano:result?.netPnlNano??null,realOrders:false}));
- if(!result?.complete)process.exitCode=1;
+ stage='native-sale-read-only';
+ const native=journal.getNativeStop(id);if(!native)throw new Error();
+ const observed=parseSandboxStop(await client.getSandboxStopOrders(prepared.accountId),native.intent,new Date());
+ if(observed.status==='STOP_ORDER_STATUS_ACTIVE') {
+  assertSandboxPosition(await client.getSandboxPositions(prepared.accountId),prepared.accountId,share.uid,1n);
+  journal.observeNativeStop(id,observed);journal.setExecutionKilled(true);
+  console.log(JSON.stringify({result:'native-stop-awaiting-trigger',activeConfirmed:true,flatConfirmed:false,realOrders:false}));
+ }else {
+  await exits.reconcile(prepared.accountId,id);
+  journal.setExecutionKilled(true);const result=journal.listSandboxResults().find(r=>r.scenarioId===id);
+  console.log(JSON.stringify({result:result?.complete?'native-stop-sale-confirmed':'native-stop-sale-unconfirmed',flatConfirmed:result?.complete??false,netPnlNano:result?.netPnlNano??null,realOrders:false}));
+  if(!result?.complete)process.exitCode=1;
+ }
 }catch (error) {
  if(error instanceof TInvestOrderError)journal?.setRuntimeState('technical.last_broker_failure',JSON.stringify({stage,httpStatus:error.httpStatus??null,brokerCode:error.brokerCode??null,outcomeUncertain:error.outcomeUncertain}));
- const brokerFailure=error instanceof TInvestOrderError?{httpStatus:error.httpStatus??null,brokerCode:error.brokerCode??null}:{};
+ const brokerFailure=error instanceof TInvestOrderError?{httpStatus:error.httpStatus??null,brokerCode:error.brokerCode??null,brokerReasonTags:error.brokerReasonTags??[]}:{};
  journal?.setExecutionKilled(true);console.log(JSON.stringify({result:'native-stop-test-unconfirmed',stage,retryEntry:false,realOrders:false,...brokerFailure}));process.exitCode=1;
 }

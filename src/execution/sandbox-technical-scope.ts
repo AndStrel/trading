@@ -5,6 +5,19 @@ import { z } from 'zod/v4';
 export const technicalApproval = 'SANDBOX VTBR 1 LOT MAX 70 RUB BUY STOP CLOSE';
 export const technicalPurpose = 'sandbox-technical-acceptance-v1';
 
+export function nativeTechnicalStopPrices(entry:bigint,bid:bigint,tick:bigint,lastPayload:unknown,instrumentId:string,now:Date) {
+  const rows=z.object({lastPrices:z.array(z.unknown()).max(1000)}).parse(lastPayload).lastPrices;
+  const identity=z.object({instrumentUid:z.string()});
+  const matches=rows.filter(row=>{const p=identity.safeParse(row);return p.success&&p.data.instrumentUid===instrumentId;});
+  if(matches.length!==1)throw new Error('Unique last trade is required');
+  const last=z.object({time:z.iso.datetime({offset:true}),price:z.object({units:z.string().regex(/^\d{1,12}$/).default('0'),nano:z.number().int().min(0).max(999999999).default(0)})}).parse(matches[0]);
+  const age=now.getTime()-Date.parse(last.time),price=BigInt(last.price.units)*1_000_000_000n+BigInt(last.price.nano);
+  if(!Number.isFinite(age)||age< -1000||age>15000||price<=0n||tick<=0n||price%tick||entry%tick||bid%tick)throw new Error('Fresh tick-valid last trade is required');
+  const reference=[entry,bid,price].reduce((a,b)=>a<b?a:b),trigger=reference-tick,limit=trigger-tick;
+  if(limit<=0n||entry-limit>1_000_000_000n||entry>70_000_000_000n)throw new Error('Bounded native technical stop prices required');
+  return {trigger,limit,lastTradeAt:last.time,lastTradeNano:String(price)};
+}
+
 export function technicalStopLimit(scenario:JournalScenarioRecord,lots:number,now:Date):string {
   const s=scenario.snapshot as Record<string,unknown>|null;
   const stop=decimalPriceNano(scenario.input.stopPrice);
@@ -13,7 +26,7 @@ export function technicalStopLimit(scenario:JournalScenarioRecord,lots:number,no
   const data=z.object({technicalStopLimitNano:z.string().regex(/^\d{1,12}$/),technicalTickNano:z.string().regex(/^\d{1,12}$/),technicalStopQuoteAt:z.iso.datetime({offset:true})}).parse(s);
   const limit=BigInt(data.technicalStopLimitNano),tick=BigInt(data.technicalTickNano),entry=BigInt(decimalPriceNano(scenario.input.entryPrice));
   const age=now.getTime()-Date.parse(data.technicalStopQuoteAt);
-  if(limit<=0n||tick<=0n||limit>BigInt(stop)||limit%tick||entry-limit>1_000_000_000n||age< -1000||age>15000)throw new Error('Native technical limit is not confirmed');
+  if(!Number.isFinite(age)||limit<=0n||tick<=0n||limit>BigInt(stop)||limit%tick||entry-limit>1_000_000_000n||age< -1000||age>15000)throw new Error('Native technical limit is not confirmed');
   return String(limit);
 }
 

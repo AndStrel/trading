@@ -73,7 +73,7 @@ export class SandboxProtectionService {
       this.journal.acknowledgeNativeStop(scenarioId, intent.requestId, brokerId);
       return await this.verify(accountId, this.journal.getNativeStop(scenarioId)!, now);
     } catch (error) {
-      if(error instanceof TInvestOrderError)this.journal.setRuntimeState(`sandbox.stop_failure.${scenarioId}`,JSON.stringify({httpStatus:error.httpStatus??null,brokerCode:error.brokerCode??null,outcomeUncertain:error.outcomeUncertain}));
+      if(error instanceof TInvestOrderError)this.journal.setRuntimeState(`sandbox.stop_failure.${scenarioId}`,JSON.stringify({httpStatus:error.httpStatus??null,brokerCode:error.brokerCode??null,brokerReasonTags:error.brokerReasonTags??[],outcomeUncertain:error.outcomeUncertain}));
       this.journal.setExecutionKilled(true);
       throw new Error('Sandbox protection is not confirmed; entry risk remains reserved, new entries are killed, and no stop is retried');
     }

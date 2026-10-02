@@ -34,6 +34,7 @@ export class TInvestOrderError extends Error {
     readonly outcomeUncertain: boolean,
     readonly httpStatus?: number,
     readonly brokerCode?: string,
+    readonly brokerReasonTags?: string[],
   ) {
     super(message);
     this.name = 'TInvestOrderError';
@@ -267,6 +268,7 @@ export class TInvestOrderClient {
     if (status < 200 || status >= 300) {
       const rawCode=asRecord(payload)?.code;
       const rawMessage=asRecord(payload)?.message;
+      const brokerReasonTags=typeof rawMessage==='string'?['price','stop','quantity','margin','balance','funds','insufficient','parameter','instrument','limit','activation','greater','less','lower','higher','equal','invalid','unavailable','current','last','expire','exchange','order_id'].filter(tag=>rawMessage.toLowerCase().includes(tag)):[];
       // Extract numeric API code only, never retain arbitrary server text,
       // account IDs, request IDs, token echoes or personal broker payloads.
       const detailCode=typeof rawMessage==='string'?rawMessage.match(/^\s*([348]\d{4})(?:\s|:|$)/)?.[1]:undefined;
@@ -274,7 +276,7 @@ export class TInvestOrderClient {
       throw new TInvestOrderError(`T-Invest sandbox API returned HTTP ${status}`,
         // HTTP errors (including duplicate-key conflicts) alone do not prove
         // there is no order. Only verified broker state may release the reserve.
-        uncertainOnNetwork,status,brokerCode);
+        uncertainOnNetwork,status,brokerCode,brokerReasonTags);
     }
     return payload;
   }
