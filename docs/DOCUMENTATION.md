@@ -11,6 +11,7 @@
 | [TELEGRAM_SERVICE](TELEGRAM_SERVICE.md) | Команды и работа Telegram-сервиса; подробности sandbox |
 | [TELEGRAM_MINI_APP](TELEGRAM_MINI_APP.md) | Панель, авторизация, HTTPS, nginx и откат |
 | [DEPLOY_TELEGRAM_SERVICE](DEPLOY_TELEGRAM_SERVICE.md) | Автоматизация production deploy и сохранность конфигурации |
+| [LIVE_PILOT_READBACK](LIVE_PILOT_READBACK.md) | Проверка существующего боевого дневного счёта только чтением, без включения real-исполнения |
 | [MARKET_SOURCE_SWITCH](MARKET_SOURCE_SWITCH.md) | Доступность и переключение источника рыночных данных |
 | [INTRADAY_SCANNER](INTRADAY_SCANNER.md) | Сканер, источники свечей и системный сервис |
 | [SANDBOX_EXECUTION](SANDBOX_EXECUTION.md) | Состояния заявок, подготовка счёта и защитные ограничения |
@@ -29,6 +30,7 @@
 | [RESEARCH_DATASET](RESEARCH_DATASET.md) | Полнота и область исследовательских наборов |
 | [BACKTEST](BACKTEST.md) | Исторический replay, затраты, development/validation/OOS |
 | [CATALOG_PARITY_REPLAY_V1](CATALOG_PARITY_REPLAY_V1.md) | Заранее фиксируем воспроизведение нового каталога; read-only источник, лотность и расходы |
+| [CATALOG_ALL_STRATEGIES_SCREEN_V1](CATALOG_ALL_STRATEGIES_SCREEN_V1.md) | Все три текущие стратегии: 18 независимых заранее объявленных сценариев, без перенастройки и live-допуска |
 | [FROZEN_MOEX_MINUTE_CAPTURE](FROZEN_MOEX_MINUTE_CAPTURE.md) | Отдельная bounded минутная выгрузка публичного MOEX без изменения старой базы |
 | [RESEARCH_ORB_RVOL_V1](RESEARCH_ORB_RVOL_V1.md) | Зафиксированная историческая гипотеза и ворота допуска |
 | [ROADMAP](ROADMAP.md) | Историческая последовательность развития; актуальный план — BOT_REFRESH_PLAN |
