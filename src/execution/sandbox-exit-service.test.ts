@@ -6,7 +6,10 @@ import { loadConfig } from '../config.js';
 import { ScenarioJournal } from '../journal/scenario-journal.js';
 import { ExecutionService } from './execution-service.js';
 import { SandboxExitService } from './sandbox-exit-service.js';
-import { parseSandboxOrderState } from './sandbox-order-state.js';
+import { parseSandboxOrderState, type SandboxOrderSnapshot } from './sandbox-order-state.js';
+import { nativeStopKey } from './sandbox-stop-state.js';
+import { sandboxCloseKey } from './sandbox-session-policy.js';
+import { sandboxTargetEconomics } from './sandbox-target-policy.js';
 import { buildMiniAppView } from '../web/mini-app-view.js';
 
 const now = new Date('2026-10-01T08:00:00.000Z');
@@ -14,14 +17,17 @@ const entryAt = '2026-10-01T07:55:00.000Z'; const stopAt = '2026-10-01T07:58:00.
 const directories: string[] = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
 
-function setup(entryLots = 5) {
+function setup(entryLots = 5, stopExecuted = true, targetMetadata = false) {
   const directory = mkdtempSync(join(tmpdir(), 'trading-sandbox-exit-')); directories.push(directory);
   const path = join(directory, 'journal.sqlite'); const journal = new ScenarioJournal(path);
   const config = loadConfig({ T_INVEST_TOKEN: 'readonly-local', T_INVEST_TRADING_TOKEN: 'isolated-local',
     T_INVEST_EXECUTION_MODE: 'sandbox', T_INVEST_SANDBOX_ACCOUNT_ID: 'local-account', T_INVEST_SANDBOX_PROTECTION_ENABLED: 'true' });
   const scenario = journal.record({ observedAt: entryAt, strategy: 'intraday', instrumentId: 'local-instrument',
     input: { side: 'long', entryPrice: 10, stopPrice: 9.9, targetPrice: 11, lotSize: 10, slippageRate: 0.0005 },
-    decision: 'candidate', blockers: [], warnings: [], snapshot: { tradePlan: { lots: 5, positionRub: 500, totalRiskRub: 9 } } });
+    decision: 'candidate', blockers: [], warnings: [], snapshot: { tradePlan: { lots: 5, positionRub: 500, totalRiskRub: 9 },
+      ...(targetMetadata ? { source: 'intraday-scanner', tradingStrategy: { id: 'trend-momentum-v1', version: '1' },
+        instrument: { instrumentId: 'local-instrument', lotSize: 10, priceStep: 0.01 },
+        sandboxTargetExitPolicy: { version: '1', enabled: true, commissionRateNano: '3000000', slippageRateNano: '500000' } } : {}) } });
   const order = journal.queueExecution({ scenarioId: scenario.id, mode: 'sandbox', instrumentId: scenario.instrumentId, side: 'long',
     lots: 5, limitPrice: 10, estimatedRiskRub: 9, orderRequestId: 'd7f1b49b-b59e-4816-9f6a-222526ce3bae' });
   const entryPayload = () => ({ orderId: 'local-entry', orderRequestId: order.orderRequestId, instrumentUid: scenario.instrumentId,
@@ -43,8 +49,9 @@ function setup(entryLots = 5) {
     instrumentId: scenario.instrumentId, entryRequestId: order.orderRequestId, lots: entryLots, stopNano: '9900000000', limitNano: '9900000000',
     createdAt: stopAt, brokerStopId: null });
   journal.acknowledgeNativeStop(scenario.id, 'ed9e9b29-7867-4f5f-84bd-6ce7318a775a', 'local-stop');
-  journal.observeNativeStop(scenario.id, { status: 'STOP_ORDER_STATUS_EXECUTED', childOrderId: 'local-child' });
-  const stopPayload = () => ({ stopOrders: [{ stopOrderId: 'local-stop', status: 'STOP_ORDER_STATUS_EXECUTED', exchangeOrderId: 'local-child',
+  journal.observeNativeStop(scenario.id, { status: stopExecuted ? 'STOP_ORDER_STATUS_EXECUTED' : 'STOP_ORDER_STATUS_ACTIVE', childOrderId: stopExecuted ? 'local-child' : null });
+  const stopPayload = () => ({ stopOrders: [{ stopOrderId: 'local-stop', status: stopExecuted ? 'STOP_ORDER_STATUS_EXECUTED' : 'STOP_ORDER_STATUS_ACTIVE',
+    ...(stopExecuted ? { exchangeOrderId: 'local-child' } : {}),
     instrumentUid: scenario.instrumentId, currency: 'rub', direction: 'STOP_ORDER_DIRECTION_SELL', orderType: 'STOP_ORDER_TYPE_STOP_LIMIT',
     lotsRequested: String(entryLots), stopPrice: { currency: 'rub', units: '9', nano: 900000000 },
     price: { currency: 'rub', units: '9', nano: 900000000 }, createDate: stopAt }] });
@@ -63,6 +70,44 @@ function setup(entryLots = 5) {
   return { path, journal, config, scenario, order, client, exits, execution, noWrites, entryPayload, childPayload, flat, stopPayload };
 }
 
+function submittedTarget(f: ReturnType<typeof setup>, status: 'EXECUTION_REPORT_STATUS_CANCELLED' | 'EXECUTION_REPORT_STATUS_NEW' = 'EXECUTION_REPORT_STATUS_CANCELLED') {
+  const entry = f.journal.getExecutionSnapshot(f.scenario.id)!; const original = f.journal.getNativeStop(f.scenario.id)!.intent;
+  const proof = sandboxTargetEconomics(entry, { lotSize: 10, targetNano: '11000000000', stopNano: '9900000000', tickNano: '10000000',
+    commissionRateNano: '3000000', slippageRateNano: '500000' })!;
+  const close = f.journal.claimSandboxSessionExit({ scenarioId: f.scenario.id, accountId: 'local-account', entryRequestId: f.order.orderRequestId,
+    instrumentId: f.scenario.instrumentId, lots: 5, stopId: 'local-stop', generation: 0 }, now, 'target', proof).intent;
+  const closeKey = sandboxCloseKey(close);
+  f.journal.observeNativeStop(f.scenario.id, { status: 'STOP_ORDER_STATUS_CANCELED', childOrderId: null }, nativeStopKey(original));
+  f.journal.claimSandboxSessionSubmission(f.scenario.id, f.journal.getSandboxLossLedger().revision, proof.targetNano, now, closeKey, proof);
+  const zero: SandboxOrderSnapshot = { brokerOrderId: 'synthetic-zero-target', executionStatus: status,
+    terminal: status !== 'EXECUTION_REPORT_STATUS_NEW', lotsExecuted: 0, grossNano: '0', commissionNano: '1000000000', stages: [] };
+  f.journal.recordCloseSellObservation(closeKey, zero, now);
+  const zeroPayload = (feeUnits = '1') => ({ ...f.childPayload(0, status), orderId: zero.brokerOrderId, orderRequestId: close.requestId,
+    executedCommission: { currency: 'rub', units: feeUnits, nano: 0 }, serviceCommission: { currency: 'rub', units: '0', nano: 0 } });
+  return { close, closeKey, zero, zeroPayload };
+}
+function restoredTarget(f: ReturnType<typeof setup>, markRestored = true) {
+  const { close, closeKey, zero, zeroPayload } = submittedTarget(f);
+  const claim = f.journal.claimProtectionRestore(closeKey, f.journal.getSandboxLossLedger().revision, { accountId: 'local-account',
+    instrumentId: f.scenario.instrumentId, lots: 5, lotSize: 10, positionUnits: '50', checkedAt: now.toISOString(), noActiveOrders: true,
+    noOtherActiveStops: true, stop: { status: 'STOP_ORDER_STATUS_CANCELED', childOrderId: null } }, now);
+  const key = nativeStopKey(claim.record.intent);
+  f.journal.acknowledgeNativeStop(f.scenario.id, key.requestId, 'synthetic-restored-stop', key);
+  const current = nativeStopKey(f.journal.getNativeStop(f.scenario.id)!.intent);
+  f.journal.observeNativeStop(f.scenario.id, { status: 'STOP_ORDER_STATUS_ACTIVE', childOrderId: null }, current);
+  if (markRestored) f.journal.markProtectionRestored(closeKey, current, now);
+  f.client.getSandboxOrderState.mockImplementation(async (_account: string, request: string) => {
+    if (request === f.order.orderRequestId) return f.entryPayload();
+    if (request === close.requestId) return zeroPayload('2');
+    throw new Error('Synthetic unknown request');
+  });
+  f.client.getSandboxStopOrders.mockResolvedValue({ stopOrders: [{ ...f.stopPayload().stopOrders[0], stopOrderId: current.brokerStopId!,
+    status: 'STOP_ORDER_STATUS_EXECUTED', exchangeOrderId: 'local-child', createDate: now.toISOString() }] });
+  f.client.getSandboxChildOrderState.mockResolvedValue({ ...f.childPayload(),
+    stages: f.childPayload().stages.map(stage => ({ ...stage, executionTime: now.toISOString() })) });
+  return { close, closeKey, current, zero, zeroPayload };
+}
+
 describe('Read-only sandbox sale evidence and durable accounting', () => {
   it('confirms known child, full sale, fees and empty account without any broker writes or reserve release', async () => {
     const f = setup(); f.journal.setExecutionKilled(true);
@@ -79,6 +124,71 @@ describe('Read-only sandbox sale evidence and durable accounting', () => {
     const f = setup(2);
     expect(await f.exits.reconcile('local-account', f.scenario.id, now)).toMatchObject({ soldLots: 2, remainingLots: 0, complete: true });
     f.noWrites();
+  });
+  it.each(['EXECUTION_REPORT_STATUS_NEW', 'EXECUTION_REPORT_STATUS_CANCELLED'] as const)
+    ('keeps target zero SELL %s out of the final exit row and binds its close key', async status => {
+    const f = setup(5, false, true); const target = submittedTarget(f, status);
+    const observe = vi.spyOn(f.journal, 'recordCloseSellObservation'); const ack = vi.spyOn(f.journal, 'acknowledgeSandboxSessionExit');
+    f.client.getSandboxStopOrders.mockResolvedValue({ stopOrders: [{ ...f.stopPayload().stopOrders[0], status: 'STOP_ORDER_STATUS_CANCELED' }] });
+    f.client.getSandboxOrderState.mockImplementation(async (_account: string, request: string) => request === f.order.orderRequestId
+      ? f.entryPayload() : target.zeroPayload());
+    expect(await f.exits.reconcile('local-account', f.scenario.id, now)).toMatchObject({ soldLots: 0, complete: false, netPnlNano: null });
+    expect(observe).toHaveBeenCalledWith(target.closeKey, target.zero, now);
+    expect(ack).toHaveBeenCalledWith(f.scenario.id, target.close.requestId, target.zero.brokerOrderId, target.closeKey);
+    expect(f.journal.getSandboxExitEvidence(f.scenario.id)).toBeNull(); expect(f.journal.listSandboxResults()).toEqual([]);
+    expect(f.client.getSandboxPositions).not.toHaveBeenCalled(); f.noWrites();
+  });
+  it('preserves zero NEW→terminal evidence without blocking later protection restoration', async () => {
+    const f = setup(5, false, true); const target = submittedTarget(f, 'EXECUTION_REPORT_STATUS_NEW');
+    f.client.getSandboxStopOrders.mockResolvedValue({ stopOrders: [{ ...f.stopPayload().stopOrders[0], status: 'STOP_ORDER_STATUS_CANCELED' }] });
+    f.client.getSandboxOrderState.mockImplementation(async (_account: string, request: string) => request === f.order.orderRequestId
+      ? f.entryPayload() : target.zeroPayload());
+    await f.exits.reconcile('local-account', f.scenario.id, now);
+    f.client.getSandboxOrderState.mockImplementation(async (_account: string, request: string) => request === f.order.orderRequestId
+      ? f.entryPayload() : { ...target.zeroPayload(), executionReportStatus: 'EXECUTION_REPORT_STATUS_CANCELLED' });
+    expect(await f.exits.reconcile('local-account', f.scenario.id, now)).toMatchObject({ complete: false });
+    expect(f.journal.getSandboxSessionExit(f.scenario.id)?.sellSnapshot?.terminal).toBe(true);
+    expect(f.journal.getSandboxExitEvidence(f.scenario.id)).toBeNull(); f.noWrites();
+  });
+  it('binds the target close key even when the native stop wins during cancellation', async () => {
+    const f = setup(5, false, true); const entry = f.journal.getExecutionSnapshot(f.scenario.id)!;
+    const proof = sandboxTargetEconomics(entry, { lotSize: 10, targetNano: '11000000000', stopNano: '9900000000', tickNano: '10000000',
+      commissionRateNano: '3000000', slippageRateNano: '500000' })!;
+    const close = f.journal.claimSandboxSessionExit({ scenarioId: f.scenario.id, accountId: 'local-account', entryRequestId: f.order.orderRequestId,
+      instrumentId: f.scenario.instrumentId, lots: 5, stopId: 'local-stop', generation: 0 }, now, 'target', proof).intent;
+    const record = vi.spyOn(f.journal, 'recordSandboxExitEvidence');
+    f.client.getSandboxStopOrders.mockResolvedValue({ stopOrders: [{ ...f.stopPayload().stopOrders[0], status: 'STOP_ORDER_STATUS_EXECUTED', exchangeOrderId: 'local-child' }] });
+    expect(await f.exits.reconcile('local-account', f.scenario.id, now)).toMatchObject({ complete: true, netPnlNano: '-9000000000' });
+    expect(record.mock.calls.every(call => JSON.stringify(call[5]) === JSON.stringify(sandboxCloseKey(close)))).toBe(true); f.noWrites();
+  });
+  it.each([true, false])('reads a generation-1 child during restored/restore-claimed phase (%s) and deducts late archive fees once', async markRestored => {
+    const f = setup(5, false, true); const restored = restoredTarget(f, markRestored);
+    const record = vi.spyOn(f.journal, 'recordSandboxExitEvidence');
+    expect(await f.exits.reconcile('local-account', f.scenario.id, now)).toMatchObject({ complete: true, netPnlNano: '-11000000000' });
+    expect(f.client.getSandboxOrderState).toHaveBeenCalledWith('local-account', restored.close.requestId);
+    expect(f.journal.getSandboxFailedCloseCosts(f.scenario.id)).toEqual({ commissionNano: '2000000000', attempts: 1 });
+    expect(record.mock.calls.every(call => JSON.stringify(call[4]) === JSON.stringify(restored.current))).toBe(true);
+    expect(f.journal.listSandboxResults()[0]?.netPnlNano).toBe('-11000000000');
+    expect(await f.exits.reconcile('local-account', f.scenario.id, now)).toMatchObject({ netPnlNano: '-11000000000' }); f.noWrites();
+  });
+  it('does not let a captured old generation record an exit for restored protection', async () => {
+    const f = setup(5, false, true); const old = f.journal.getNativeStop(f.scenario.id)!; restoredTarget(f);
+    const read = vi.spyOn(f.journal, 'getNativeStop').mockReturnValue(old);
+    f.client.getSandboxStopOrders.mockResolvedValue({ stopOrders: [{ ...f.stopPayload().stopOrders[0], status: 'STOP_ORDER_STATUS_EXECUTED', exchangeOrderId: 'local-child' }] });
+    await expect(f.exits.reconcile('local-account', f.scenario.id, now)).rejects.toThrow('not confirmed');
+    read.mockRestore(); expect(f.journal.getSandboxExitEvidence(f.scenario.id)).toBeNull(); f.noWrites();
+  });
+  it.each(['wrong-request', 'unknown-fees', 'nonzero-fill'])('rejects refreshed archived %s without a new broker write', async condition => {
+    const f = setup(5, false, true); const restored = restoredTarget(f);
+    f.client.getSandboxOrderState.mockImplementation(async (_account: string, request: string) => {
+      if (request === f.order.orderRequestId) return f.entryPayload();
+      const payload = restored.zeroPayload('2');
+      if (condition === 'wrong-request') return { ...payload, orderRequestId: 'synthetic-foreign' };
+      if (condition === 'unknown-fees') return { ...payload, serviceCommission: undefined };
+      return { ...f.childPayload(), orderId: restored.zero.brokerOrderId, orderRequestId: restored.close.requestId };
+    });
+    await expect(f.exits.reconcile('local-account', f.scenario.id, now)).rejects.toThrow('not confirmed');
+    expect(f.journal.getSandboxExitEvidence(f.scenario.id)).toBeNull(); f.noWrites();
   });
   it.each([['EXECUTION_REPORT_STATUS_CANCELLED', 2], ['EXECUTION_REPORT_STATUS_PARTIALLYFILL', 2], ['EXECUTION_REPORT_STATUS_NEW', 0]])
     ('keeps incomplete child %s/%s without inventing profit or empty holdings', async (status, sold) => {

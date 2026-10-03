@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../config.js';
 import { ScenarioJournal } from '../journal/scenario-journal.js';
 import { SandboxProtectionService } from './sandbox-protection-service.js';
-import { nanoQuotation } from './sandbox-stop-state.js';
+import { nanoQuotation, nativeStopKey } from './sandbox-stop-state.js';
 import { ExecutionService } from './execution-service.js';
 import { seedPreparedSandbox } from './sandbox-prepared.test-helper.js';
 import { sandboxEndpoint } from './sandbox-prepared-account.js';
@@ -132,6 +132,22 @@ describe('Isolated sandbox native protection', () => {
     await Promise.allSettled([f.protection.protect('local-account', f.scenario.id, now),
       new SandboxProtectionService(f.config, f.client, f.journal).protect('local-account', f.scenario.id, now)]);
     expect(f.client.postSandboxStopLimit).toHaveBeenCalledOnce(); expect(f.journal.getNativeStop(f.scenario.id)?.intent.brokerStopId).toBe('local-stop');
+  });
+  it('passes captured generation identity to both POST acknowledgement and later observations', async () => {
+    const f = setup(); const ack = vi.spyOn(f.journal, 'acknowledgeNativeStop'); const observe = vi.spyOn(f.journal, 'observeNativeStop');
+    await f.protection.protect('local-account', f.scenario.id, now);
+    const current = f.journal.getNativeStop(f.scenario.id)!.intent;
+    expect(ack).toHaveBeenCalledWith(f.scenario.id, current.requestId, 'local-stop', { ...nativeStopKey(current), brokerStopId: null });
+    expect(observe).toHaveBeenCalledWith(f.scenario.id, { status: 'STOP_ORDER_STATUS_ACTIVE', childOrderId: null }, nativeStopKey(current));
+  });
+  it('rejects a stale captured generation instead of attaching its observation to current protection', async () => {
+    const f = setup(); await f.protection.protect('local-account', f.scenario.id, now);
+    const current = f.journal.getNativeStop(f.scenario.id)!;
+    const read = vi.spyOn(f.journal, 'getNativeStop').mockReturnValue({ ...current, intent: { ...current.intent, generation: 1 } });
+    await expect(f.protection.protect('local-account', f.scenario.id, now)).rejects.toThrow('not confirmed');
+    read.mockRestore();
+    expect(f.journal.getNativeStop(f.scenario.id)).toEqual(current);
+    expect(f.client.postSandboxStopLimit).toHaveBeenCalledOnce(); expect(f.journal.isExecutionKilled()).toBe(true);
   });
   it('submission and worker sharing one service await the same protection without a spurious kill', async () => {
     const f = setup(); f.journal.setExecutionKilled(false);

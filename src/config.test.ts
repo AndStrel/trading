@@ -3,6 +3,16 @@ import { describe, expect, it } from 'vitest';
 import { loadConfig } from './config.js';
 
 describe('loadConfig', () => {
+  it('keeps target exit opt-in and refuses a target protocol without every sandbox guard',()=>{
+    const enabled={T_INVEST_SANDBOX_TARGET_EXIT_ENABLED:'true',T_INVEST_SANDBOX_PROTECTION_ENABLED:'true',
+      T_INVEST_SANDBOX_LOSS_GUARD_ENABLED:'true',T_INVEST_SANDBOX_SESSION_CLOSE_ENABLED:'true'};
+    expect(loadConfig(enabled).execution).toMatchObject({mode:'disabled',sandboxTargetExitEnabled:true});
+    for(const key of ['T_INVEST_SANDBOX_PROTECTION_ENABLED','T_INVEST_SANDBOX_LOSS_GUARD_ENABLED','T_INVEST_SANDBOX_SESSION_CLOSE_ENABLED','T_INVEST_LIVE_PILOT_PREPARE']) {
+      expect(()=>loadConfig({...enabled,[key]:'false'})).toThrow('requires');
+    }
+    expect(()=>loadConfig({T_INVEST_SANDBOX_TARGET_EXIT_ENABLED:'1'})).toThrow();
+    expect(()=>loadConfig({...enabled,T_INVEST_EXECUTION_MODE:'live'})).toThrow();
+  });
   it('selects a versioned algorithm and a five-minute MSK reference separately from account horizons',()=>{
     const config=loadConfig({T_INVEST_TRADING_STRATEGY_ID:'vwap-reclaim-v1',T_INVEST_STRATEGY_SESSION_START:'10:00'});
     expect(config.scanner.tradingStrategyId).toBe('vwap-reclaim-v1');expect(config.scanner.sessionStartMinutes).toBe(600);
@@ -38,6 +48,7 @@ describe('loadConfig', () => {
       sandboxProtectionEnabled: false,
       sandboxLossGuardEnabled: false,
       sandboxSessionCloseEnabled: false,
+      sandboxTargetExitEnabled: false,
     });
     expect(config.backtest).toEqual({ startingCapitalRub: 100_000, maxConcurrentPositions: 2 });
     expect(config.strategies.intraday.maxSpreadPct).toBe(0.3);
@@ -144,6 +155,7 @@ describe('loadConfig', () => {
       sandboxProtectionEnabled: false,
       sandboxLossGuardEnabled: false,
       sandboxSessionCloseEnabled: false,
+      sandboxTargetExitEnabled: false,
       accountId: 'sandbox-account',
       maxOrdersPerDay: 2,
       maxDailyRiskRub: 60,

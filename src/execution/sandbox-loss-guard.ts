@@ -3,10 +3,10 @@ import type { AppConfig } from '../config.js';
 import { ScenarioJournal } from '../journal/scenario-journal.js';
 import type { TInvestClient } from '../tbank/client.js';
 import type { TInvestOrderClient } from './tinvest-order-client.js';
-import type { SandboxExitService } from './sandbox-exit-service.js';
+import { refreshArchivedSandboxCloseEvidence, type SandboxExitService } from './sandbox-exit-service.js';
 import { parseSandboxOrderState } from './sandbox-order-state.js';
 import { analyzeSandboxRoundTrip } from './sandbox-round-trip.js';
-import { assertNoActiveSandboxStops, decimalPriceNano, parseSandboxStop } from './sandbox-stop-state.js';
+import { assertNoActiveSandboxStops, decimalPriceNano, nativeStopKey, parseSandboxStop } from './sandbox-stop-state.js';
 import { assertNoSandboxOrders, sandboxFlatCashNano } from './sandbox-flat-account.js';
 import { moscowLossDay, sandboxBidValue, sandboxClosedDayLoss, sandboxMarkedTradeLoss, type SandboxLossAssessment } from './sandbox-loss-policy.js';
 
@@ -39,23 +39,28 @@ export class SandboxLossGuard {
     const started = performance.now();
     try {
       const initial = this.journal.getSandboxLossLedger(); if (initial.morePending) throw new Error();
+      const nativeKeys = new Map(initial.orders.filter(order => order.native)
+        .map(order => [order.scenarioId, nativeStopKey(order.native!.intent)]));
       const rawStops = stopBook.parse(await this.client.getSandboxStopOrders(accountId));
       const known = new Set(initial.orders.map(order => order.native?.intent.brokerStopId).filter((id): id is string => Boolean(id)));
       if (known.size !== initial.orders.length || rawStops.stopOrders.some(stop => stop.status === 'STOP_ORDER_STATUS_ACTIVE' && !known.has(stop.stopOrderId))) throw new Error();
       for (const order of initial.orders) {
         if (order.status !== 'accepted' || order.side !== 'long' || !order.approved || !order.native
           || order.native.intent.accountId !== accountId || !order.native.intent.brokerStopId) throw new Error();
+        const expectedNative = nativeKeys.get(order.scenarioId)!;
         const entry = parseSandboxOrderState(await this.client.getSandboxOrderState(accountId, order.requestId), {
           requestId: order.requestId, instrumentId: order.instrumentId, lots: order.lots, lotSize: order.lotSize,
         }, now());
         if (!entry.terminal || entry.lotsExecuted <= 0 || entry.lotsExecuted !== order.native.intent.lots || entry.commissionNano === null) throw new Error();
         this.journal.recordExecutionReconciliation(order.scenarioId, entry);
+        await refreshArchivedSandboxCloseEvidence(this.client, this.journal, { accountId, scenarioId: order.scenarioId,
+          entryRequestId: order.requestId, instrumentId: order.instrumentId, lotSize: order.lotSize }, entry, now());
         // Other acknowledged ACTIVE stops may belong to another covered row;
         // each is checked in its own iteration. Unknown active stops never pass.
         const scoped = { stopOrders: rawStops.stopOrders.filter(stop => stop.status !== 'STOP_ORDER_STATUS_ACTIVE'
           || stop.stopOrderId === order.native!.intent.brokerStopId) };
         const stop = parseSandboxStop(scoped, order.native.intent, now());
-        this.journal.observeNativeStop(order.scenarioId, stop);
+        this.journal.observeNativeStop(order.scenarioId, stop, expectedNative);
         if (stop.status === 'STOP_ORDER_STATUS_EXECUTED' || (stop.status === 'STOP_ORDER_STATUS_CANCELED' && order.session?.phase === 'submitted'
           && order.session.accountId === accountId && order.session.stopId === order.native.intent.brokerStopId)) await this.exits.reconcile(accountId, order.scenarioId, now());
         else if (stop.status !== 'STOP_ORDER_STATUS_ACTIVE' || order.exit) throw new Error();
@@ -65,12 +70,17 @@ export class SandboxLossGuard {
       const closed: Array<{ complete: boolean; closedAt: string | null; netPnlNano: string | null }> = [];
       const open: typeof ledger.orders = []; let maxTradeLoss = 0n;
       for (const order of ledger.orders) {
-        if (!order.entry || order.entry.commissionNano === null) throw new Error();
+        if (!order.entry || order.entry.commissionNano === null || order.failedCloseFeesNano === null) throw new Error();
+        if (order.session?.phase === 'submitted' && (order.session.purpose === 'target' || order.session.targetConsumed === true)
+          && order.session.sellSnapshot?.lotsExecuted === 0) throw new Error();
         if (order.exit) {
           const result = analyzeSandboxRoundTrip(order.entry, order.exit.snapshot, order.lotSize);
           if (result.fullySold) {
             const complete = Boolean(order.exit.flatConfirmedAt && result.netPnlNano !== null);
-            closed.push({ ...result, complete });
+            // Raw round-trip prices/fees exclude archived zero-fill attempts.
+            // Deduct those once here; journal display independently does the same.
+            closed.push({ ...result, netPnlNano: result.netPnlNano === null ? null
+              : String(BigInt(result.netPnlNano) - BigInt(order.failedCloseFeesNano)), complete });
           } else {
             if (order.exit.snapshot.terminal || order.exit.snapshot.commissionNano === null) throw new Error();
             open.push(order);
@@ -99,8 +109,10 @@ export class SandboxLossGuard {
         if (stop.status !== order.native!.observation?.status || stop.childOrderId !== order.native!.observation?.childOrderId) throw new Error();
         const [bid, status] = await Promise.all([this.market.getOrderBook(order.instrumentId, 20), this.market.getTradingStatus(order.instrumentId)]);
         const mark = sandboxBidValue(bid, status, order.instrumentId, remaining, order.lotSize, now());
-        openLoss = BigInt(sandboxMarkedTradeLoss(entry, exit, mark.grossNano, order.lotSize, this.config.commissionRate,
-          Math.max(this.config.scanner.slippageRate, order.slippageRate)).lossNano);
+        const marked = sandboxMarkedTradeLoss(entry, exit, mark.grossNano, order.lotSize, this.config.commissionRate,
+          Math.max(this.config.scanner.slippageRate, order.slippageRate));
+        const net = BigInt(marked.netIfLiquidatedNano) - BigInt(order.failedCloseFeesNano!);
+        openLoss = net < 0n ? -net : 0n;
         if (openLoss > maxTradeLoss) maxTradeLoss = openLoss;
       }
       if (performance.now() - started > 30_000) throw new Error();

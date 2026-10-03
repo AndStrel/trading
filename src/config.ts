@@ -51,6 +51,8 @@ export type ExecutionConfig = {
   sandboxProtectionEnabled: boolean;
   sandboxLossGuardEnabled: boolean;
   sandboxSessionCloseEnabled: boolean;
+  // Opt-in for NEW versioned candidates only; never retrofits an old position.
+  sandboxTargetExitEnabled?: boolean;
 };
 
 export type BacktestConfig = {
@@ -201,6 +203,7 @@ const envSchema = z.object({
   T_INVEST_SANDBOX_PROTECTION_ENABLED: z.enum(['true', 'false']).default('false'),
   T_INVEST_SANDBOX_LOSS_GUARD_ENABLED: z.enum(['true', 'false']).default('false'),
   T_INVEST_SANDBOX_SESSION_CLOSE_ENABLED: z.enum(['true', 'false']).default('false'),
+  T_INVEST_SANDBOX_TARGET_EXIT_ENABLED: z.enum(['true', 'false']).default('false'),
   T_INVEST_EXECUTION_MAX_ORDERS_PER_DAY: z.coerce.number().int().min(1).max(20).default(3),
   T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB: z.coerce.number().positive().max(10_000).default(1_000),
   T_INVEST_EXECUTION_CANDIDATE_MAX_AGE_MINUTES: z.coerce.number().int().min(1).max(60).default(10),
@@ -231,6 +234,12 @@ const envSchema = z.object({
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = envSchema.parse(env);
   const prepare = parsed.T_INVEST_LIVE_PILOT_PREPARE === 'true';
+  if (parsed.T_INVEST_SANDBOX_TARGET_EXIT_ENABLED === 'true' && (!prepare
+    || parsed.T_INVEST_SANDBOX_SESSION_CLOSE_ENABLED !== 'true'
+    || parsed.T_INVEST_SANDBOX_PROTECTION_ENABLED !== 'true'
+    || parsed.T_INVEST_SANDBOX_LOSS_GUARD_ENABLED !== 'true')) {
+    throw new Error('Sandbox target exit requires preparation, protection, session close and loss guard');
+  }
   let miniAppUrl: string | undefined;
   if (parsed.TELEGRAM_MINI_APP_URL) {
     try {
@@ -315,6 +324,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       sandboxProtectionEnabled: parsed.T_INVEST_SANDBOX_PROTECTION_ENABLED === 'true',
       sandboxLossGuardEnabled: parsed.T_INVEST_SANDBOX_LOSS_GUARD_ENABLED === 'true',
       sandboxSessionCloseEnabled: parsed.T_INVEST_SANDBOX_SESSION_CLOSE_ENABLED === 'true',
+      sandboxTargetExitEnabled: parsed.T_INVEST_SANDBOX_TARGET_EXIT_ENABLED === 'true',
     },
     livePilot: {
       prepare,

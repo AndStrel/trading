@@ -1,4 +1,7 @@
 import { moscowLossDay } from './sandbox-loss-policy.js';
+import type { SandboxOrderSnapshot } from './sandbox-order-state.js';
+import type { SandboxStopObservation } from './sandbox-stop-state.js';
+import type { SandboxTargetProof } from './sandbox-target-policy.js';
 
 // Conservative pilot window, NOT an exchange calendar. Real trading status
 // and fresh depth are still mandatory; holidays/auctions never become tradeable
@@ -18,6 +21,19 @@ export function sandboxSessionCloseDue(entryAt: string, now: Date) {
 }
 export type SandboxSessionExitIntent = {
   scenarioId: number; accountId: string; entryRequestId: string; instrumentId: string; lots: number;
-  stopId: string; requestId: string; phase: 'cancel-claimed' | 'submitted'; createdAt: string;
+  stopId: string; requestId: string; phase: 'cancel-claimed' | 'submitted' | 'restore-claimed' | 'restored'; createdAt: string;
   submitClaimedAt: string | null; limitNano: string | null; brokerOrderId: string | null;
+  generation?: number; purpose?: 'session' | 'technical-acceptance' | 'target';
+  targetProof?: SandboxTargetProof; targetConsumed?: boolean; restoreGeneration?: number;
+  sellSnapshot?: SandboxOrderSnapshot; sellObservedAt?: string;
+};
+export type SandboxCloseKey = { scenarioId: number; requestId: string; generation: number };
+export function sandboxCloseKey(intent: SandboxSessionExitIntent): SandboxCloseKey {
+  const generation = intent.generation ?? 0;
+  if (!Number.isSafeInteger(generation) || generation < 0 || generation > 1_000_000) throw new Error('Invalid close generation');
+  return { scenarioId: intent.scenarioId, requestId: intent.requestId, generation };
+}
+export type SandboxProtectionRestoreProof = {
+  accountId: string; instrumentId: string; lots: number; lotSize: number; positionUnits: string; checkedAt: string;
+  noActiveOrders: true; noOtherActiveStops: true; stop: SandboxStopObservation;
 };
