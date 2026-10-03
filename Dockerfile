@@ -38,5 +38,7 @@ RUN mkdir -p /app/data && chown -R node:node /app
 
 ENV NODE_ENV=production
 ENV NODE_OPTIONS=--use-system-ca
+ARG APP_REVISION=unversioned
+LABEL org.opencontainers.image.revision=$APP_REVISION
 USER node
 CMD ["node", "dist/telegram-service.js"]

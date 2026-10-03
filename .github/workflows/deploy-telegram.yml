@@ -24,6 +24,7 @@ jobs:
       DEPLOY_PATH: ${{ vars.TRADING_DEPLOY_PATH }}
       DEPLOY_SSH_KEY: ${{ secrets.TRADING_DEPLOY_SSH_KEY }}
       DEPLOY_KNOWN_HOSTS: ${{ secrets.TRADING_DEPLOY_KNOWN_HOSTS }}
+      EXPECTED_SHA: ${{ github.sha }}
     steps:
       - name: Validate deployment configuration
         run: |
@@ -32,6 +33,7 @@ jobs:
           test -n "$DEPLOY_SSH_KEY"
           test -n "$DEPLOY_KNOWN_HOSTS"
           test "$DEPLOY_PATH" = "/opt/andstrel/trading"
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
 
       - name: Configure verified SSH access
         run: |
@@ -47,8 +49,10 @@ jobs:
             -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
             -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE'
+            "$DEPLOY_USER@$DEPLOY_HOST" "bash -s -- '$EXPECTED_SHA'" <<'REMOTE'
               set -Eeuo pipefail
+              deployment_expected_sha="$1"
+              [[ "$deployment_expected_sha" =~ ^[0-9a-f]{40}$ ]]
 
               deployment_path="/opt/andstrel/trading"
               parent_path="/opt/andstrel"
@@ -63,8 +67,8 @@ jobs:
               fi
 
               cd "$deployment_path"
-              git fetch --depth=1 origin main
-              git checkout --detach origin/main
+              git fetch --depth=1 origin "$deployment_expected_sha"
+              git checkout --detach "$deployment_expected_sha"
 
               if [ ! -f .env ]; then
                 echo "Server .env is missing at $deployment_path/.env; deployment intentionally stopped."
@@ -74,9 +78,10 @@ jobs:
               chmod 600 .env
               # Validate the new image against the existing private environment
               # before replacing the still-running service. Never print .env.
-              docker compose build telegram-service
+              docker compose build --build-arg APP_REVISION="$deployment_expected_sha" telegram-service
               docker compose run --rm --no-deps --entrypoint node telegram-service dist/strategy-config-preflight.js
               docker compose up -d --no-build --remove-orphans
               docker compose ps
               docker compose logs --tail=40 telegram-service
+              python3 ops/verify_strategy_service.py --expected-sha "$deployment_expected_sha" --public-url https://bot.brewnote.net/
           REMOTE
