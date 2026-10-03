@@ -12,17 +12,21 @@ import { assertTechnicalScope, selectTechnicalShare, technicalEntryInput, techni
 import { readPreparedSandbox, sandboxEndpoint } from './execution/sandbox-prepared-account.js';
 import { assessLivePilotRisk } from './execution/live-pilot-risk.js';
 import { sandboxBidValue } from './execution/sandbox-loss-policy.js';
-import { formatNanoRub } from './execution/sandbox-round-trip.js';
+import { decimalPriceNano } from './execution/sandbox-stop-state.js';
+import { checkTechnicalSandboxPreflight, claimTechnicalSandboxAttempt } from './execution/sandbox-technical-preflight.js';
+import { technicalAcceptanceFailure, technicalCashAcceptanceReport } from './execution/sandbox-technical-result.js';
+import { technicalCashAcceptanceVersion } from './execution/sandbox-technical-cash-policy.js';
 
 // Intentionally not a bot command, not a scheduled service and not live-capable.
 // Use a dedicated persistent PRIVATE audit mount. Re-running cannot BUY again.
 let stage='authorization';
 let activeJournal:ScenarioJournal|undefined;
+async function main() {
 try {
   const [phase,approval]=process.argv.slice(2);
-  if(!['run','reconcile','recover','close'].includes(phase??'')||approval!==technicalApproval) throw new Error();
+  if(process.argv.slice(2).length!==2||!['preflight','run','reconcile','recover','close'].includes(phase??'')||approval!==technicalApproval) throw new Error();
   const snapshotPath='/run/private/snapshot.json', journalPath='/run/audit/journal.sqlite';
-  if((statSync(snapshotPath).mode&0o077)!==0||(statSync('/run/audit').mode&0o077)!==0)throw new Error();
+  if((statSync(snapshotPath).mode&0o077)!==0||(phase!=='preflight'&&(statSync('/run/audit').mode&0o077)!==0))throw new Error();
   const snapshot=JSON.parse(readFileSync(snapshotPath,'utf8')) as {env:NodeJS.ProcessEnv;state:Record<string,string>};
   if(snapshot.env.T_INVEST_TRADING_TOKEN||snapshot.env.T_INVEST_LIVE_TOKEN||!snapshot.env.T_INVEST_SANDBOX_TOKEN
     || snapshot.env.TELEGRAM_BOT_TOKEN||snapshot.env.T_INVEST_EXECUTION_MODE!=='disabled'||snapshot.state['execution.kill_switch']!=='true')throw new Error();
@@ -30,6 +34,15 @@ try {
   const c=loadConfig({...snapshot.env,T_INVEST_EXECUTION_MODE:'sandbox',T_INVEST_LIVE_PILOT_PREPARE:'true',
     T_INVEST_SANDBOX_PROTECTION_ENABLED:'true',T_INVEST_SANDBOX_LOSS_GUARD_ENABLED:'true',T_INVEST_SANDBOX_SESSION_CLOSE_ENABLED:'true'});
   if(c.execution.baseUrl!==sandboxEndpoint||c.execution.token===c.token||c.livePilot.token)throw new Error();
+  const client=new TInvestOrderClient(c.execution.token,c.execution.baseUrl,undefined,{transport:c.transport});
+  const preflight={client,prepared,expectedInitialCashNano:decimalPriceNano(c.execution.sandboxInitialBalanceRub)};
+  if(phase==='preflight'||phase==='run') {
+    stage='preflight-read-only';
+    const report=await checkTechnicalSandboxPreflight(preflight);
+    console.log(JSON.stringify(report));
+    if(phase==='preflight') { if(!report.ready)process.exitCode=1; return; }
+    if(!report.ready)throw new Error();
+  }
   const market=new TInvestClient(c.token,c.baseUrl,{transport:c.transport,retryAttempts:0,requestTimeoutMs:10000});
   stage='instrument';
   const share=selectTechnicalShare(await market.getShares());
@@ -45,10 +58,9 @@ try {
   // Permanent single-attempt latch: two containers/processes cannot both BUY.
   // No broker writes or mutable journal exist before this exclusive claim.
   // It is never removed automatically, including on timeout or crash.
-  if(phase==='run')closeSync(openSync('/run/audit/entry-authorized.once','wx',0o600));
+  if(phase==='run')await claimTechnicalSandboxAttempt(preflight,()=>closeSync(openSync('/run/audit/entry-authorized.once','wx',0o600)));
   const journal=new ScenarioJournal(journalPath);
   activeJournal=journal;
-  const client=new TInvestOrderClient(c.execution.token,c.execution.baseUrl,undefined,{transport:c.transport});
   const exits=new SandboxExitService(c,client,journal), protection=new SandboxProtectionService(c,client,journal);
   const loss=new SandboxLossGuard(c,client,market,exits,journal), closer=new SandboxSessionClose(c,client,market,exits,journal);
   const execution=new ExecutionService(c,market,client,journal,protection,exits,loss,closer);
@@ -63,7 +75,8 @@ try {
       reservedDailyRiskRub:0,realizedDailyLossRub:0,markedOpenLossRub:0});if(!risk.allowed)throw new Error();
     const scenario=journal.record({observedAt:new Date().toISOString(),strategy:'intraday',instrumentId:share.uid,input,decision:'candidate',blockers:[],
       warnings:['Technical acceptance only: no strategy signal or profit claim'],note:technicalPurpose,
-      snapshot:{purpose:technicalPurpose,authorization:technicalApproval,ticker:'VTBR',tradePlan:{lots:1,positionRub:risk.positionRub,totalRiskRub:risk.totalRiskRub}}});
+      snapshot:{purpose:technicalPurpose,authorization:technicalApproval,ticker:'VTBR',technicalCashAcceptance:{version:technicalCashAcceptanceVersion},
+        tradePlan:{lots:1,positionRub:risk.positionRub,totalRiskRub:risk.totalRiskRub}}});
     assertTechnicalScope(scenario,1);journal.setRuntimeState('technical.scenario_id',String(scenario.id));
     stage='entry';console.log(JSON.stringify({stage,ticker:'VTBR',lots:1,limitRub:input.entryPrice,stopRub:input.stopPrice,technicalOnly:true}));
     const result=await execution.submitScenario(scenario.id,'local-human-sandbox-authorization');
@@ -86,11 +99,15 @@ try {
   else await closer.closeTechnicalAcceptance(prepared.accountId,id);
   journal.setExecutionKilled(true);
   const result=journal.listSandboxResults().find(r=>r.scenarioId===id);
-  console.log(JSON.stringify({result:result?.complete?'sandbox-round-trip-confirmed':'sandbox-incomplete',stage,flatConfirmed:result?.complete??false,
-    netRub:result?.netPnlNano?formatNanoRub(result.netPnlNano):null,realOrders:false}));
-  if(!result?.complete)process.exitCode=1;
+  const report=technicalCashAcceptanceReport(result);
+  console.log(JSON.stringify({...report,stage}));
+  if(!report.cashProven)process.exitCode=1;
 }catch {
-  activeJournal?.setExecutionKilled(true);
   // No raw broker payload, token, account ID or private positions in output.
-  console.log(JSON.stringify({result:'sandbox-test-unconfirmed',stage,retryEntry:false,realOrders:false}));process.exitCode=1;
+  const report=technicalAcceptanceFailure(stage,activeJournal?()=>{
+    activeJournal!.setExecutionKilled(true); return activeJournal!.isExecutionKilled();
+  }:undefined);
+  console.log(JSON.stringify(report));process.exitCode=1;
 }
+}
+await main();

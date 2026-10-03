@@ -22,6 +22,13 @@
   credentials не заменяет этот шаг. Локальные metadata reads не являются этим допуском.
 - [ ] Новый forward/OOS, executable evidence, выбранный strategy sandbox-cycle,
   immutable cash baseline/точная post-flat сверка и отдельный real executor.
+  - [x] Проверить из локального контейнера actual empty-window sandbox cursor
+    read без funding/заявок. Это не nonempty ownership/fee или cash-cycle proof.
+  - [x] Найти и программно закрыть технические readiness пробелы: read-only
+    preflight до latch, отдельный cash-success gate и opt-in восстановление
+    STOP после доказанного нулевого technical SELL. Legacy/uncertain не усыновляются.
+  - [ ] Проверить новый technical contract фактическим брокерским циклом в
+    разрешённом окне; cash proof и guard restoration не заменяются unit tests.
 
 ## Этапы и критерии приёмки
 
@@ -304,7 +311,7 @@ secret/env/server process не менялись. Server-to-local 401/400/`Shares
 
 ### Интегрированный денежный контракт sandbox
 
-Локальная ветка `codex/local-broker-readiness-2026-10-03` добавляет baseline
+Объединённый [PR #85](https://github.com/AndStrel/trading/pull/85) добавляет baseline
 атомарно с выигравшим BUY claim, immutable identity и append-only post-flat
 observations с current epoch/ledger/native/close CAS. Перед POST заново проверяется
 полная стоимость входа с прежним Investor floor; gross-only наличных недостаточно.
@@ -333,7 +340,37 @@ typecheck/build — PASS, **52 Python regressions** — PASS. Compiled Node24 sm
 deployed image. Отдельный настоящий curl в таком контейнере отказал без сети,
 вернул только fixed error и очистил свои private temp artifacts.
 
-Новых broker order/funding calls нет. Actual cursor API compatibility, владение
+Новых broker order/funding calls нет. Actual non-empty cursor API compatibility, владение
 ненулевой комиссией архивного zero-fill SELL, выбранный strategy round trip и
 экономические R10 gates остаются непроверенными; unknown остаётся incomplete.
-CI/deploy нового head будут записаны только после их фактического завершения.
+### Принятый денежный контракт и следующий локальный safety slice
+
+PR #85 объединён после exact-head CI `37132689459` и Code Review без findings.
+Security Review завершён на предыдущем head; единственный последующий diff —
+платформенно независимая negative fixture для прав приватного каталога, а не
+изменение production кода. Этот diff проверен отдельно. Main
+`e5da8af6f8923c8e8053e509eb9edfbe19de7eaa` прошёл
+[CI 37133367596](https://github.com/AndStrel/trading/actions/runs/37133367596)
+и [deploy 37133367465](https://github.com/AndStrel/trading/actions/runs/37133367465).
+Независимый runtime readback: exact revision, running/restartCount=0,
+disabled/kill=true/unresolvedCount=0/ordersSubmitted=false; Mini App HTML/JS,
+401 guards, candidate config и HTTPS готовы. После deploy повторно проверена
+доступность локального relay и через защищённый operator API выбран «Компьютер»;
+старый scanner report сброшен. Реальное Telegram-устройство не проверено.
+Локальный постоянный relay по-прежнему использует проверенный образ `f1d56be`,
+а не новую серверную revision; он не исполняет заявки.
+
+Следующий локальный draft — [technical cash acceptance](SANDBOX_VTBR_ACCEPTANCE.md):
+read-only preflight до latch/journal, cash-only success и bounded восстановление
+защиты после proven zero-fill SELL для новых opted-in baseline-сценариев.
+Полный локальный check: **1 656 TS tests / 82 files + 23 ops tests**, typecheck,
+build и **52 Python regressions** — PASS. Независимые root/restore reviews
+не нашли открытых P1/P2. Собранный CLI проверен в Node 24.21.0 контейнере с
+network none/read-only root и только синтетическими inputs: реальные Saturday
+`preflight` и `run` отказались без broker requests, audit files и entry claim.
+Первый smoke assertion исправлен под фактическое фиксированное имя результата;
+production код этим не менялся. Это draft dist overlay, не новый deployed image.
+
+Нового broker BUY/STOP/SELL/cash cycle нет. Старое nano-расхождение не принято
+и не стерто. Cash-cycle acceptance, свежий штатный scanner pass, независимый
+forward evidence, R9b и R10 остаются открытыми; прибыль и real GO не заявлены.

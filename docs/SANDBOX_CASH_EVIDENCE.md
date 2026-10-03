@@ -93,3 +93,17 @@ legacy отсутствие baseline, точный плюс/минус, late fee
 цикл выбранной версии с baseline до первой BUY, свежий cash/operations proof,
 forward/OOS/executable-price экономика и отдельный real executor. Известное
 старое nano-расхождение не считается устранённым этим новым контрактом.
+
+## Фактический read contract 3 октября
+
+Из отдельного локального контейнера с read-only rootfs выполнены только
+`GetSandboxAccounts` и bounded `GetSandboxOperationsByCursor` заранее
+подготовленного sandbox account. Identity совпала; полное окно последних
+24 часов вернуло одну страницу без items. Raw payload, account identity и
+credentials не публиковались; заявок/пополнений/изменений счёта не было.
+
+Это подтверждает только endpoint/transport и empty-window pagination contract.
+Не проверены nonempty trade/fee schema, ownership, baseline и точная денежная
+сверка после новой сделки. `cashProven:false`; пустое окно не является
+успешным торговым циклом. Новые технические ворота описаны в
+[VTBR acceptance](SANDBOX_VTBR_ACCEPTANCE.md).
