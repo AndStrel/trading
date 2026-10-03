@@ -1,51 +1,93 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-theme="dark">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="color-scheme" content="dark light"><title>Trading · Дневной пилот</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>Trading · Личный ассистент</title>
   <link rel="stylesheet" href="/app.css">
   <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
-  <main>
-    <header><div><p class="eyebrow">TRADING / ЛИЧНЫЙ ПИЛОТ</p><h1>Держим риск<br>под контролем.</h1></div><button id="refresh" class="icon-button" aria-label="Обновить данные" disabled>↻</button></header>
-    <div class="status-line"><span class="dot"></span><span id="mode">Проверяем доступ</span><span class="badge">LIVE OFF</span></div>
-    <p id="notice" class="notice" role="status" aria-live="polite">Подключение к Telegram…</p>
-    <section id="overview" class="panel" aria-labelledby="overview-title">
-      <div class="section-head"><h2 id="overview-title">Обзор</h2><span id="updated">—</span></div>
-      <article class="capital-card"><span class="label">Лимит капитала</span><div class="capital" id="capital">—</div><p>Это установленный лимит, не баланс брокерского счёта.</p></article>
-      <article class="scanner-card"><h3>Источник рыночных данных</h3><p id="source-summary">Нет подтверждённых данных.</p><p class="muted">Переключаются котировки и анализ, не исполнитель заявок. Флаг — геолокация внешнего IP по country.is, не доступность брокера. 🌐 означает, что страна не подтверждена.</p><div class="dialog-actions"><button id="source-server" class="button" disabled>🌐 Сервер</button><button id="source-computer" class="button" disabled>🌐 Компьютер</button></div><p id="source-checks" class="muted">Проверок ещё не было.</p></article>
-      <div class="metrics"><article><span class="label">Риск / сделка</span><strong id="trade-risk">—</strong></article><article><span class="label">Риск / день</span><strong id="day-risk">—</strong></article></div>
-      <article class="scanner-card"><div class="section-head"><h3>Сканер рынка</h3><span id="scanner-state" class="tag">Нет данных</span></div><p id="scanner-summary">Данные появятся после авторизации.</p><p id="scanner-date" class="muted">—</p><button id="scanner-toggle" class="button" disabled>Управление сканером</button></article>
-      <article class="info-card"><h3>Реальное исполнение закрыто</h3><p>Карточка кандидата — не команда купить. Прибыльная стратегия ещё не подтверждена. Фактический PnL и защитное сопровождение не подключены.</p></article>
-      <article class="risk-card"><div class="section-head"><h3>Контроль убытка · sandbox</h3><span id="sandbox-loss-state" class="tag">Нет данных</span></div><dl><div><dt>Убытки закрытых пар за день</dt><dd id="sandbox-closed-loss">Не подтверждены</dd></div><div><dt>Оценка открытого убытка</dt><dd id="sandbox-open-loss">Не подтверждена</dd></div><div><dt>Сумма для дневного порога</dt><dd id="sandbox-total-loss">Не подтверждена</dd></div></dl><p id="sandbox-loss-date" class="muted">Проверок ещё не было.</p><p class="muted">Виртуальный счёт, не live. Открытый убыток оценён по всему остатку в BID с расходами. Прибыль не компенсирует убытки других сделок. Устаревшие или неполные данные блокируют новые входы при включённой защите; автоматического закрытия этот контроль не выполняет.</p></article>
-      <div class="section-head"><h2>Результаты песочницы</h2><span class="tag">Не live</span></div><p class="muted">По фактическим виртуальным исполнениям и известным комиссиям, до налогов и иных расходов счёта. Не оценка реальной доходности.</p><div id="sandbox-results" class="candidate-list"><article class="empty">Нет подтверждённых данных.</article></div>
-    </section>
-    <section id="trading" class="panel" hidden aria-labelledby="trading-title">
-      <div class="section-head"><h2 id="trading-title">Стратегия и активы</h2><span id="selection-revision">—</span></div>
-      <article class="strategy-card">
-        <label for="strategy-select">Правила входа</label>
-        <select id="strategy-select" disabled><option>Ждём подключения</option></select>
-        <p id="strategy-description" class="muted">Выберите стратегию, чтобы увидеть её правила.</p>
-        <ul id="strategy-rules" class="strategy-rules"></ul>
-        <p class="muted">Результаты этих правил ещё проверяются. Доходность и 51% успешных сделок не подтверждены.</p>
-        <button id="save-strategy" class="button" disabled>Применить стратегию</button>
-      </article>
-      <article class="asset-card">
-        <fieldset><legend>Активы для сканирования</legend><div id="asset-options" class="asset-options"></div></fieldset>
-        <p id="selected-assets" class="muted">Настройки ещё не подключены.</p>
-        <button id="save-assets" class="button" disabled>Применить активы</button>
-      </article>
-      <div class="section-head"><h2>Рекомендации</h2><span id="recommendation-count">—</span></div>
-      <p class="muted">Пригодность к выбранным правилам и ограничениям. Баллы не являются вероятностью прибыли. Все суммы ниже — расчёт плана, не заработанные деньги.</p>
-      <div id="recommendation-list" class="candidate-list"><article class="empty">Ждём первый анализ выбранных активов.</article></div>
-    </section>
-    <section id="candidates" class="panel" hidden aria-labelledby="candidates-title"><div class="section-head"><h2 id="candidates-title">Кандидаты</h2><span id="candidate-count">—</span></div><p class="muted">Свежие ситуации выбранной стратегии и активов. Ручная проверка обязательна.</p><div id="candidate-list" class="candidate-list"><article class="empty">Нет подтверждённых данных.</article></div></section>
-    <section id="risk" class="panel" hidden aria-labelledby="risk-title"><div class="section-head"><h2 id="risk-title">Ограничения</h2><span class="tag">Без плеча</span></div><article class="risk-card"><dl><div><dt>Максимум позиции</dt><dd id="position-limit">—</dd></div><div><dt>Комиссия на сторону</dt><dd id="commission">—</dd></div><div><dt>Проскальзывание в модели</dt><dd id="slippage">—</dd></div><div><dt>Порог дневного убытка</dt><dd id="loss-limit">—</dd></div><div><dt>Контроль фактического убытка</dt><dd>Не подключён</dd></div><div><dt>Реальные заявки</dt><dd>Заблокированы</dd></div></dl></article><p class="notice">Расчётный риск не гарантирует размер фактического убытка при резком движении рынка. Недельный счёт не используется.</p><button id="kill" class="button danger" disabled>Запретить новые входы</button><p class="muted">Запрет сохраняется после перезапуска. Эта кнопка не закрывает позиции и не отменяет уже принятые заявки.</p></section>
-    <footer>Наблюдение ≠ доказанная прибыльность</footer>
-  </main>
-  <nav aria-label="Разделы"><button data-tab="overview" aria-current="page">◉ <span>Обзор</span></button><button data-tab="trading">⚙ <span>Стратегия</span></button><button data-tab="candidates">⌁ <span>Кандидаты</span></button><button data-tab="risk">◇ <span>Риски</span></button></nav>
-  <dialog id="confirm-kill"><h2>Запретить новые входы?</h2><p>Новые заявки будут заблокированы. Уже открытые позиции эта кнопка не закрывает.</p><div class="dialog-actions"><button id="cancel-kill" class="button">Отмена</button><button id="confirm-kill-button" class="button danger">Запретить входы</button></div></dialog>
+  <div class="app">
+    <header class="masthead" data-od-id="app-header">
+      <div class="wordmark">Trading <span>Личный ассистент</span></div>
+      <div class="header-actions">
+        <button id="theme" type="button" data-od-id="theme-toggle" aria-describedby="theme-current">Светлая тема</button><span id="theme-current" class="sr-only">Текущая тема: тёмная.</span>
+        <button id="refresh" type="button" class="icon-button" aria-label="Обновить данные" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 7v5h-5M4 17v-5h5M19 12a7 7 0 0 0-12-5L4 10m1 2a7 7 0 0 0 12 5l3-3"/></svg>
+        </button>
+      </div>
+    </header>
+    <main id="app-content" aria-busy="false">
+      <p id="notice" class="notice" role="status" aria-live="polite" data-od-id="action-feedback">Подключение к Telegram…</p>
+      <section id="overview" class="panel" aria-labelledby="overview-title" data-od-id="overview">
+        <div class="headline"><p class="kicker">Контроль системы</p><h1 id="overview-title" tabindex="-1" data-od-id="overview-title">Обзор</h1><p class="muted">Состояние анализа и границы риска.</p></div>
+        <div class="stack">
+          <article class="card" data-od-id="system-status">
+            <div class="section-head"><h2 id="mode">Проверяем доступ</h2><span class="badge">Реальные заявки закрыты</span></div>
+            <p class="muted">Последнее обновление: <span id="updated">Нет данных</span></p>
+            <dl><div><dt>Исполнитель заявок</dt><dd id="executor-state">Нет данных</dd></div></dl>
+          </article>
+          <article class="capital-card card" data-od-id="balance-card"><span class="label">Лимит капитала</span><div class="capital numeric" id="capital">Нет данных</div><p class="muted">Установленный лимит, не баланс брокерского счёта.</p></article>
+          <div class="metrics"><article class="card"><span class="label">Риск / сделка</span><strong class="numeric" id="trade-risk">Нет данных</strong></article><article class="card"><span class="label">Риск / день</span><strong class="numeric" id="day-risk">Нет данных</strong></article></div>
+          <article class="scanner-card card" data-od-id="scanner-card">
+            <div class="section-head"><h2>Сканер рынка</h2><span id="scanner-state" class="tag">Нет данных</span></div>
+            <p id="scanner-summary">Данные появятся после авторизации.</p><p id="scanner-date" class="muted">Прохода ещё не было.</p>
+            <button id="scanner-toggle" type="button" class="button" data-od-id="scanner-pause" disabled>Управление сканером</button>
+          </article>
+          <article class="scanner-card card" data-od-id="source-summary">
+            <h2>Источник рыночных данных</h2><p id="source-summary">Нет подтверждённых данных.</p><p id="source-checks" class="muted">Проверок ещё не было.</p>
+            <p class="muted">Выбор источника меняет котировки и анализ, не исполнитель заявок.</p>
+            <button id="source-open" type="button" class="button primary" data-od-id="source-open" aria-haspopup="dialog" aria-controls="source-dialog" disabled>Выбрать источник данных</button>
+          </article>
+          <article class="info-card card"><h2>Реальное исполнение закрыто</h2><p class="muted">Кандидат — не команда купить. Прибыльная стратегия ещё не подтверждена. Фактический результат и защитное сопровождение реального счёта не подключены.</p></article>
+          <article class="risk-card card"><div class="section-head"><h2>Контроль убытка · песочница</h2><span id="sandbox-loss-state" class="tag">Нет данных</span></div><dl><div><dt>Убытки закрытых пар за день</dt><dd id="sandbox-closed-loss">Не подтверждены</dd></div><div><dt>Оценка открытого убытка</dt><dd id="sandbox-open-loss">Не подтверждена</dd></div><div><dt>Сумма для дневного порога</dt><dd id="sandbox-total-loss">Не подтверждена</dd></div></dl><p id="sandbox-loss-date" class="muted">Проверок ещё не было.</p><p class="muted">Виртуальный счёт, не реальный. Открытый убыток оценён по всему остатку в BID с расходами. Прибыль не компенсирует убытки других сделок. При включённой защите устаревшие или неполные данные блокируют новые входы. Этот контроль не закрывает позиции.</p></article>
+        </div>
+        <div class="section-head section-label"><h2>Результаты песочницы</h2><span class="tag">Не реальные сделки</span></div><p class="muted">По виртуальным исполнениям и известным комиссиям, до налогов и иных расходов счёта. Не оценка реальной доходности.</p><div id="sandbox-results" class="candidate-list"><article class="empty card">Нет подтверждённых данных.</article></div>
+      </section>
+      <section id="trading" class="panel" hidden aria-labelledby="trading-title" data-od-id="strategy">
+        <div class="headline"><p class="kicker">Логика анализа</p><h1 id="trading-title" tabindex="-1" data-od-id="strategy-title">Стратегия</h1><p class="muted">Правила входа и активы для сканирования. <span id="selection-revision">Не подключено</span></p></div>
+        <div class="stack">
+          <article class="strategy-card card">
+            <label for="strategy-select">Торговый алгоритм</label><select id="strategy-select" data-od-id="algorithm-select" aria-describedby="strategy-description strategy-validation" disabled><option>Ждём подключения</option></select>
+            <p id="strategy-description" class="muted">Выберите стратегию, чтобы увидеть её правила.</p><ul id="strategy-rules" class="strategy-rules"></ul>
+            <p id="strategy-validation" class="muted">Алгоритмы исследуются. Доходность и 51% успешных сделок не подтверждены.</p>
+            <button id="save-strategy" type="button" class="button primary" data-od-id="strategy-save" disabled>Применить стратегию</button>
+          </article>
+          <article class="asset-card card"><fieldset><legend>Активы для анализа</legend><div id="asset-options" class="asset-options" data-od-id="asset-options"></div></fieldset><p id="selected-assets" class="muted">Настройки ещё не подключены.</p><button id="save-assets" type="button" class="button" disabled>Применить активы</button></article>
+        </div>
+        <div class="section-head section-label"><h2>Рекомендации</h2><span id="recommendation-count">Нет данных</span></div><p class="muted">Соответствие правилам и ограничениям. Баллы — не вероятность прибыли. Суммы ниже — расчёт плана, не заработанные деньги.</p><div id="recommendation-list" class="candidate-list"><article class="empty card">Ждём первый анализ выбранных активов.</article></div>
+      </section>
+      <section id="candidates" class="panel" hidden aria-labelledby="candidates-title" data-od-id="candidates">
+        <div class="headline"><p class="kicker">Объяснимые сценарии</p><h1 id="candidates-title" tabindex="-1" data-od-id="candidates-title">Кандидаты</h1><p class="muted">Свежие ситуации выбранной стратегии. Ручная проверка обязательна.</p></div>
+        <div class="section-head"><label for="candidate-search">Поиск по тикеру</label><span id="candidate-count">Нет данных</span></div><input id="candidate-search" type="search" data-od-id="candidate-search" placeholder="Например, SBER" autocomplete="off" aria-describedby="candidate-search-help"><p id="candidate-search-help" class="muted">Поиск применяется к текущему списку, не запускает новый анализ.</p>
+        <div id="candidate-list" class="candidate-list"><article class="empty card" data-od-id="candidate-empty">Нет подтверждённых данных.</article></div>
+      </section>
+      <section id="risk" class="panel" hidden aria-labelledby="risk-title" data-od-id="risks">
+        <div class="headline"><p class="kicker">Границы допустимого</p><h1 id="risk-title" tabindex="-1" data-od-id="risks-title">Риски</h1><p class="muted">Без плеча. Недельный счёт не используется.</p></div>
+        <div class="stack">
+          <article class="risk-card card" data-od-id="risk-summary"><h2>Лимиты и расходы</h2><dl><div><dt>Максимум позиции</dt><dd id="position-limit">Нет данных</dd></div><div><dt>Комиссия на сторону</dt><dd id="commission">Нет данных</dd></div><div><dt>Проскальзывание в модели</dt><dd id="slippage">Нет данных</dd></div><div><dt>Порог дневного убытка</dt><dd id="loss-limit">Нет данных</dd></div><div><dt>Контроль фактического убытка</dt><dd>Не подключён</dd></div><div><dt>Реальные заявки</dt><dd>Заблокированы</dd></div></dl></article>
+          <article class="card" data-od-id="entry-control"><h2>Новые входы</h2><p class="muted">Запрет сохраняется после перезапуска. Не закрывает позиции и не отменяет уже принятые заявки.</p><button id="kill" type="button" class="button primary danger" data-od-id="block-open" aria-haspopup="dialog" aria-controls="confirm-kill" disabled>Запретить новые входы</button></article>
+          <article class="notice" data-od-id="risk-explanation"><h2>Расчёт не равен результату</h2><p>Расчётный риск не гарантирует размер фактического убытка при резком движении рынка. Установленный лимит, потенциальная прибыль и результат исполнения — разные значения.</p></article>
+        </div>
+      </section>
+    </main>
+    <footer><p>Trading · Чернила и медь</p><p>Наблюдение ≠ доказанная прибыльность</p></footer>
+  </div>
+  <nav class="navigation" aria-label="Основные разделы" data-od-id="bottom-navigation"><div class="navigation-inner">
+    <button type="button" data-tab="overview" data-od-id="nav-overview" aria-current="page"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg><span>Обзор</span></button>
+    <button type="button" data-tab="trading" data-od-id="nav-strategy"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 4v16h16M7 15l4-5 4 3 5-8"/></svg><span>Стратегия</span></button>
+    <button type="button" data-tab="candidates" data-od-id="nav-candidates"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10" cy="10" r="6"/><path d="m15 15 6 6"/></svg><span>Кандидаты</span></button>
+    <button type="button" data-tab="risk" data-od-id="nav-risks"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m12 3 8 3v6c0 4-4 7-8 9-4-2-8-5-8-9V6zM9 12l2 2 4-4"/></svg><span>Риски</span></button>
+  </div></nav>
+  <dialog id="source-dialog" aria-labelledby="source-title" aria-describedby="source-explanation" aria-busy="false" data-od-id="source-dialog">
+    <h2 id="source-title">Источник данных</h2><p id="source-explanation">Переключаются котировки и анализ, не исполнитель заявок. Флаг — страна внешнего IP по country.is, не доступность брокера. 🌐 означает, что страна не подтверждена.</p><p id="source-dialog-summary">Нет подтверждённых данных.</p><p id="source-dialog-checks" class="muted">Проверок ещё не было.</p><p class="muted">Недоступный источник нельзя выбрать. Изменение применяется только после ответа сервера.</p>
+    <p id="source-feedback" role="status" aria-live="polite" class="notice"></p><div class="dialog-actions"><button id="source-server" type="button" class="button" aria-describedby="source-dialog-checks" disabled>🌐 Сервер</button><button id="source-computer" type="button" class="button" aria-describedby="source-dialog-checks" disabled>🌐 Компьютер</button></div><button id="source-close" type="button" class="button" data-od-id="source-cancel">Отмена</button>
+  </dialog>
+  <dialog id="confirm-kill" aria-labelledby="confirm-kill-title" aria-describedby="confirm-kill-explanation" data-od-id="block-dialog">
+    <h2 id="confirm-kill-title">Запретить новые входы?</h2><p id="confirm-kill-mode">Режим: наблюдение. Реальные заявки закрыты.</p><p id="confirm-kill-explanation">Новые входы будут запрещены. Уже открытые позиции эта кнопка не закрывает и принятые заявки не отменяет.</p><div class="dialog-actions"><button id="cancel-kill" type="button" class="button" data-od-id="block-cancel">Отмена</button><button id="confirm-kill-button" type="button" class="button primary" data-od-id="block-confirm">Подтвердить запрет</button></div>
+  </dialog>
 </body>
 </html>
