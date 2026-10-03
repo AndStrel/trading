@@ -93,7 +93,7 @@ describe('strategy configuration deployment preflight', () => {
   it('runs preflight after build and before replacing the existing service', () => {
     const workflow = readFileSync(join(root, '.github', 'workflows', 'deploy-telegram.yml'), 'utf8');
     const build = workflow.indexOf('docker compose build --build-arg APP_REVISION="$deployment_expected_sha" telegram-service');
-    const preflight = workflow.indexOf('docker compose run --rm --no-deps --entrypoint node telegram-service dist/strategy-config-preflight.js');
+    const preflight = workflow.indexOf('docker compose run --rm --no-deps -T --interactive=false </dev/null --entrypoint node telegram-service dist/strategy-config-preflight.js');
     const up = workflow.indexOf('docker compose up -d --no-build --remove-orphans');
     expect(build).toBeGreaterThan(-1);
     expect(preflight).toBeGreaterThan(build);
