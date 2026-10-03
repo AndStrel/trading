@@ -74,7 +74,7 @@ export function proposeIntradayLong(input: {
       'Five-minute trend is up',
       'Relative volume is at least 1.0',
       'Stop uses the larger of 1.5 ATR and 0.1% of entry',
-      'Target preserves net reward-to-risk of at least 2.0 after modelled costs',
+      'Target is a model estimate; whole-lot sizing and exact rounded-expense checks are required',
     ],
   };
 }
