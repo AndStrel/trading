@@ -23,7 +23,7 @@ jobs:
       - run: npm run build
       - name: Verify non-trading profile maintenance safeguards
         run: python3 -m unittest discover -s ops -p 'test_*.py'
-      - run: docker build --build-arg INSTALL_TINVEST_CA=false --tag andstrel/trading:ci .
+      - run: docker build --build-arg INSTALL_TINVEST_CA=false --build-arg APP_REVISION=${{ github.sha }} --tag andstrel/trading:ci .
       - name: Verify PNG rendering in the hardened runtime
         run: |
           docker run --rm --network none --read-only \
