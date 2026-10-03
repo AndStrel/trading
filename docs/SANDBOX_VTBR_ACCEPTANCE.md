@@ -26,6 +26,13 @@ This fallback is deliberately restricted to one executed unit with a real trade.
 
 ## Runner / audit / recovery
 
+Historical implementation note (3 October 2026): the runner below belongs to
+unmerged [PR #74](https://github.com/AndStrel/trading/pull/74). Its commands are
+NOT an installed/run-ready operator path in accepted main. Only the required
+native-child evidence parser was separately carried into main; bootstrap and
+the technical runner were not. Preserve this section as the historical protocol,
+not instructions to launch a missing executable.
+
 `dist/sandbox-technical-acceptance.js` is a separate local operator entrypoint, NOT a bot command, public API, background worker or live executor. It is not wired into Telegram/MiniApp.
 
 - Fixed credential snapshot mount `/run/private/snapshot.json`, read-only, private permissions; production/Telegram credentials are rejected.
