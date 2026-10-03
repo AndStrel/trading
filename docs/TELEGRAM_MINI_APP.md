@@ -9,6 +9,21 @@ the new trading controls; **Активы** offers an inline launch of the panel.
 See [QUICKSTART](QUICKSTART.md) for initial setup and [STRATEGIES](STRATEGIES.md)
 for strategy rules.
 
+## Design system
+
+The four existing sections use the authored **«Чернила и медь»** design system:
+dark ink/copper by default, a full light theme, Georgia display headings and a
+system fallback for Inter. The theme button works without authentication and
+persists only the non-sensitive `trading-kit:theme` choice. No fonts are fetched.
+Navigation starts each selected section at the top without smooth scrolling.
+The source dialog shows API availability separately from IP country; pending
+requests cannot be cancelled merely by closing the dialog. Errors and unknown
+outcomes are visible inside the modal, with explicit recovery instructions.
+No new broker actions or permissions are added.
+
+Plan, source mapping, browser acceptance and reproduction:
+[MINI_APP_DESIGN_INTEGRATION](MINI_APP_DESIGN_INTEGRATION.md).
+
 ## Access and limitations
 
 - Public HTML contains no account data. API requires Telegram HMAC initData,
