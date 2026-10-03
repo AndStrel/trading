@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { CandleAnalysis } from './candle-analysis.js';
 import { proposeIntradayLong } from './intraday-proposal.js';
+import { decimalPriceNano } from '../execution/sandbox-stop-state.js';
 
 const upwardAnalysis: CandleAnalysis = {
   status: 'ok',
@@ -58,6 +59,41 @@ describe('proposeIntradayLong', () => {
         slippageRate: 0.0005,
       }),
     ).toBeNull();
+  });
+
+  it('keeps all legacy trend prices executable for realistic asks and unchanged net-risk geometry', () => {
+    for (let ticks = 10051; ticks <= 10149; ticks++) {
+      const ask = ticks / 100;
+      const proposal = proposeIntradayLong({
+        candleAnalysis: upwardAnalysis,
+        orderBookPayload: { asks: [{ price: { units: String(Math.floor(ticks / 100)), nano: ticks % 100 * 10_000_000 } }] },
+        priceStep: 0.01, commissionRate: 0.0005, slippageRate: 0.0005,
+      });
+      expect(proposal).not.toBeNull();
+      expect(proposal!.entryPrice).toBe(ask);
+      for (const price of [proposal!.entryPrice, proposal!.stopPrice, proposal!.targetPrice]) {
+        expect(BigInt(decimalPriceNano(price)) % 10_000_000n).toBe(0n);
+      }
+      const cost = proposal!.entryPrice * 2 * (0.0005 + 0.0005);
+      expect((proposal!.targetPrice - proposal!.entryPrice - cost)
+        / (proposal!.entryPrice - proposal!.stopPrice + cost)).toBeGreaterThanOrEqual(2);
+      expect(proposal!.entryPrice - proposal!.stopPrice).toBeGreaterThanOrEqual(1.5 * upwardAnalysis.averageTrueRange14!);
+      expect(proposal!.targetPrice - proposal!.entryPrice).toBeLessThanOrEqual(5 * upwardAnalysis.averageTrueRange14!);
+    }
+  });
+
+  it('accepts one-nanoruble ticks and rejects smaller or inexact steps', () => {
+    const parameters = { candleAnalysis: upwardAnalysis,
+      orderBookPayload: { asks: [{ price: { units: '101', nano: 1 } }] },
+      commissionRate: 0.0005, slippageRate: 0.0005 };
+    const proposal = proposeIntradayLong({ ...parameters, priceStep: 0.000000001 });
+    expect(decimalPriceNano(proposal!.entryPrice)).toBe('101000000001');
+    for (const price of [proposal!.entryPrice, proposal!.stopPrice, proposal!.targetPrice]) {
+      expect(decimalPriceNano(price)).toMatch(/^\d+$/);
+    }
+    for (const priceStep of [0.0000000001, 0.010000000000000002]) {
+      expect(() => proposeIntradayLong({ ...parameters, priceStep })).toThrow();
+    }
   });
 });
 

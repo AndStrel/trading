@@ -3,6 +3,18 @@ import { describe, expect, it } from 'vitest';
 import { loadConfig } from './config.js';
 
 describe('loadConfig', () => {
+  it('selects a versioned algorithm and a five-minute MSK reference separately from account horizons',()=>{
+    const config=loadConfig({T_INVEST_TRADING_STRATEGY_ID:'vwap-reclaim-v1',T_INVEST_STRATEGY_SESSION_START:'10:00'});
+    expect(config.scanner.tradingStrategyId).toBe('vwap-reclaim-v1');expect(config.scanner.sessionStartMinutes).toBe(600);
+    expect(config.strategies.intraday).toBeDefined();expect(config.strategies.swing).toBeDefined();
+    expect(()=>loadConfig({T_INVEST_TRADING_STRATEGY_ID:'profit-guaranteed'})).toThrow();
+    expect(()=>loadConfig({T_INVEST_STRATEGY_SESSION_START:'09:11'})).toThrow();
+  });
+  it('requires private UID watchlists to carry an exchange ticker label for strategy selection',()=>{
+    expect(()=>loadConfig({T_INVEST_INTRADAY_UNIVERSE:'watchlist',T_INVEST_INTRADAY_WATCHLIST:'[{"instrumentId":"private-uid","lotSize":1,"priceStep":0.01}]'})).toThrow('ticker label');
+    // Existing manual execution metadata outside watchlist scanning remains compatible.
+    expect(loadConfig({T_INVEST_INTRADAY_WATCHLIST:'[{"instrumentId":"private-uid","lotSize":1,"priceStep":0.01}]'}).scanner.intradayWatchlist).toHaveLength(1);
+  });
   it('uses conservative scenario guardrails by default', () => {
     const config = loadConfig({});
 

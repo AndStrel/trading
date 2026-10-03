@@ -59,6 +59,10 @@ const computerFetch = localRelayUrl && localRelaySecret
 const sources = new MarketSourceController({ server: directMarketFetch, ...(computerFetch ? { computer: computerFetch } : {}) });
 const marketClient = new TInvestClient(config.token, config.baseUrl, { transport: 'fetch', fetchImpl: sources.fetch });
 const scanner = new IntradayScanner(config, marketClient, journal, undefined, undefined, () => sources.acquireScan());
+const tradingSelection = scanner.getTradingSelection();
+process.stdout.write(JSON.stringify({event:'trading-selection-loaded',strategyId:tradingSelection.strategyId,
+  selectionRevision:tradingSelection.revision,tickers:tradingSelection.tickers,
+  executionMode:config.execution.mode,liveSubmissionAllowed:false})+'\n');
 const probeSources = async () => {
   await Promise.all((['server', 'computer'] as const).map(async source => {
     const transport = source === 'server' ? directMarketFetch : computerFetch;
@@ -124,6 +128,8 @@ if (config.telegram.miniApp.enabled) {
     view: () => buildMiniAppView(config, scanner, execution, journal),
     marketSources: sources,
     selectMarketSource: source => { sources.select(source); scanner.invalidateSourceReport(); },
+    selectTradingStrategy: (id,revision) => scanner.selectTradingStrategy(id,revision),
+    selectTradingAssets: (tickers,revision) => scanner.selectTradingAssets(tickers,revision),
     action: action => { if (action === 'pause') scanner.pause(); else if (action === 'resume') scanner.resume(); else execution.kill(); },
   });
   await new Promise<void>((resolve, reject) => {

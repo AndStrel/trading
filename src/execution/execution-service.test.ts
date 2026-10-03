@@ -34,7 +34,7 @@ function createConfig(overrides: NodeJS.ProcessEnv = {}) {
   });
 }
 
-function recordCandidate(journal: ScenarioJournal, observedAt: string, lots = 5) {
+function recordCandidate(journal: ScenarioJournal, observedAt: string, lots = 5, snapshotExtras: Record<string, unknown> = {}) {
   return journal.record({
     observedAt,
     strategy: 'intraday',
@@ -52,6 +52,7 @@ function recordCandidate(journal: ScenarioJournal, observedAt: string, lots = 5)
     warnings: [],
     snapshot: {
       tradePlan: { lots, positionRub: lots * 100, totalRiskRub: 7 },
+      ...snapshotExtras,
     },
   });
 }
@@ -102,6 +103,93 @@ afterEach(() => {
 });
 
 describe('ExecutionService', () => {
+  function scannerSnapshot(id = 'trend-momentum-v1', referenceStartMinutes = 550) {
+    return { source: 'intraday-scanner', tradingStrategy: { id, version: '1', referenceStartMinutes },
+      instrument: { instrumentId: 'sber', ticker: 'SBER', lotSize: 1, priceStep: 0.01 } };
+  }
+
+  function freshScannerMarket() {
+    const client = marketClient();
+    client.getOrderBook.mockResolvedValue({ instrumentUid: 'sber', orderbookTs: new Date().toISOString(),
+      bids: [{ price: { units: '99', nano: 990000000 }, quantity: '100' }],
+      asks: [{ price: { units: '100', nano: 0 }, quantity: '100' }] });
+    client.getTradingStatus.mockResolvedValue({ instrumentUid: 'sber', tradingStatus: 'SECURITY_TRADING_STATUS_NORMAL_TRADING',
+      apiTradeAvailableFlag: true, limitOrderAvailableFlag: true });
+    return { ...client, getInstrumentBy: vi.fn().mockResolvedValue({ instrument: { uid: 'sber', instrumentType: 'share', currency: 'rub',
+      lot: 1, apiTradeAvailableFlag: true, buyAvailableFlag: true, sellAvailableFlag: true, minPriceIncrement: { units: '0', nano: 10000000 } } }) };
+  }
+
+  it.each(['2026-10-03T13:40:00Z', '2026-10-03T13:41:00Z'])('rejects confirmation at %s of a 16:39 Moscow versioned signal before market reads', async at => {
+    const journal = createJournal(), market = marketClient(), client = orderClient();
+    const scenario = recordCandidate(journal, '2026-10-03T13:39:00Z', 5, scannerSnapshot());
+    const service = new ExecutionService(createConfig(), market, client, journal);
+    service.queueScenario(scenario); await service.armSandbox();
+    await expect(service.submitScenario(scenario.id, '42', new Date(at))).rejects.toThrow('entry window');
+    expect(market.getOrderBook).not.toHaveBeenCalled();
+    expect(client.postLimitOrder).not.toHaveBeenCalled();
+    expect(journal.getExecutionByScenario(scenario.id)!.status).toBe('pending');
+  });
+
+  it('does not extend the original ORB deadline when the reference configuration is moved later', async () => {
+    const journal = createJournal(), market = marketClient(), client = orderClient();
+    const scenario = recordCandidate(journal, '2026-10-03T08:39:00Z', 5, scannerSnapshot('opening-range-breakout-v1'));
+    const config = createConfig({ T_INVEST_STRATEGY_SESSION_START: '09:30' });
+    const service = new ExecutionService(config, market, client, journal);
+    service.queueScenario(scenario); await service.armSandbox();
+    await expect(service.submitScenario(scenario.id, '42', new Date('2026-10-03T08:40:00Z'))).rejects.toThrow('entry window');
+    expect(market.getOrderBook).not.toHaveBeenCalled();
+    expect(client.postLimitOrder).not.toHaveBeenCalled();
+    expect(journal.getExecutionByScenario(scenario.id)!.status).toBe('pending');
+  });
+
+  it.each(['missing-reference', 'invalid-reference', 'unknown-strategy', 'unknown-version', 'mismatched-selection'])('fails closed for %s versioned scanner metadata', async condition => {
+    const journal = createJournal(), market = marketClient(), client = orderClient();
+    const snapshot: ReturnType<typeof scannerSnapshot> & Record<string, unknown> = scannerSnapshot();
+    if (condition === 'missing-reference') delete (snapshot.tradingStrategy as Partial<typeof snapshot.tradingStrategy>).referenceStartMinutes;
+    if (condition === 'invalid-reference') snapshot.tradingStrategy.referenceStartMinutes = 551;
+    if (condition === 'unknown-strategy') snapshot.tradingStrategy.id = 'unknown';
+    if (condition === 'unknown-version') snapshot.tradingStrategy.version = '2';
+    if (condition === 'mismatched-selection') snapshot.tradingSelection = { strategyId: 'opening-range-breakout-v1', revision: 1, tickers: ['SBER'] };
+    const scenario = recordCandidate(journal, '2026-10-03T07:00:00Z', 5, snapshot);
+    const service = new ExecutionService(createConfig(), market, client, journal);
+    service.queueScenario(scenario); await service.armSandbox();
+    await expect(service.submitScenario(scenario.id, '42', new Date(scenario.observedAt))).rejects.toThrow('entry window');
+    expect(market.getOrderBook).not.toHaveBeenCalled();
+    expect(client.postLimitOrder).not.toHaveBeenCalled();
+  });
+
+  it.each(['common-cutoff', 'orb-cutoff'])('rechecks %s after asynchronous protection preflight using monotonic elapsed time', async boundary => {
+    const initial = boundary === 'common-cutoff' ? '2026-10-03T13:39:59Z' : '2026-10-03T08:39:59Z';
+    const id = boundary === 'common-cutoff' ? 'trend-momentum-v1' : 'opening-range-breakout-v1';
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(initial));
+    let elapsed = 0; vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    const journal = createJournal(), market = freshScannerMarket(), client = orderClient();
+    const scenario = recordCandidate(journal, initial, 5, scannerSnapshot(id));
+    const protection = { preflightForEntry: vi.fn(async () => { elapsed = 2000; }), protect: vi.fn() };
+    const service = new ExecutionService(createConfig({ T_INVEST_SANDBOX_PROTECTION_ENABLED: 'true' }), market, client, journal, protection);
+    service.queueScenario(scenario); await service.armSandbox();
+    const claim = vi.spyOn(journal, 'claimExecution');
+    await expect(service.submitScenario(scenario.id, '42', new Date(initial))).rejects.toThrow('entry window');
+    expect(protection.preflightForEntry).toHaveBeenCalledOnce();
+    expect(market.getInstrumentBy).toHaveBeenCalledOnce();
+    expect(client.postLimitOrder).not.toHaveBeenCalled();
+    expect(claim).not.toHaveBeenCalled();
+    expect(journal.getExecutionByScenario(scenario.id)!.status).toBe('pending');
+  });
+
+  it('still accepts a fresh versioned confirmation before its cutoff', async () => {
+    const at = '2026-10-03T13:39:00Z';
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(at));
+    vi.spyOn(performance, 'now').mockReturnValue(0);
+    const journal = createJournal(), client = orderClient(vi.fn().mockResolvedValue({ brokerOrderId: 'confirmed-before-cutoff',
+      executionStatus: 'EXECUTION_REPORT_STATUS_FILL', lotsRequested: 5, lotsExecuted: 5 }));
+    const scenario = recordCandidate(journal, at, 5, scannerSnapshot());
+    const service = new ExecutionService(createConfig(), freshScannerMarket(), client, journal);
+    service.queueScenario(scenario); await service.armSandbox();
+    await expect(service.submitScenario(scenario.id, '42', new Date(at))).resolves.toMatchObject({ order: { status: 'accepted' } });
+    expect(client.postLimitOrder).toHaveBeenCalledOnce();
+  });
+
   it('arms the prepared 1000 RUB sandbox read-only when the live pilot capital is 500 RUB', async () => {
     const journal = createJournal(); const client = orderClient();
     const prepared = journal.getRuntimeState(sandboxBootstrapKey);

@@ -10,6 +10,7 @@ import { sandboxBidValue } from './sandbox-loss-policy.js';
 import { sandboxSessionCloseDue } from './sandbox-session-policy.js';
 import { assertSandboxInstrument } from './sandbox-instrument.js';
 import { assertTechnicalScope } from './sandbox-technical-scope.js';
+import { scenarioInstrument } from './scenario-instrument.js';
 
 type Client = Pick<TInvestOrderClient,'getSandboxOrderState'|'getSandboxPositions'|'getSandboxOrders'|'getSandboxStopOrders'|'cancelSandboxStop'|'postSandboxSessionExit'>;
 type CloseResult = { kind:'session'|'native'; complete:boolean } | null;
@@ -80,7 +81,7 @@ export class SandboxSessionClose {
       if(stop.status==='STOP_ORDER_STATUS_EXECUTED') return {kind:'native',complete:(await this.exits.reconcile(accountId,scenarioId,now())).complete};
       if(!prior) {
         if(stop.status!=='STOP_ORDER_STATUS_ACTIVE'||this.journal.getSandboxExitEvidence(scenarioId)) throw new Error();
-        await this.preflight(accountId,order.instrumentId,entry.lotsExecuted,scenario.input.lotSize,fixedNow);
+        await this.preflight(accountId,scenarioId,order.instrumentId,entry.lotsExecuted,scenario.input.lotSize,fixedNow);
         const claim=this.journal.claimSandboxSessionExit({scenarioId,accountId,entryRequestId:order.orderRequestId,instrumentId:order.instrumentId,
           lots:entry.lotsExecuted,stopId:native.intent.brokerStopId},now(),technical ? 'technical-acceptance' : 'session');
         if(claim.claimed) await this.client.cancelSandboxStop({mode:'sandbox',accountId,stopId:claim.intent.stopId});
@@ -92,7 +93,7 @@ export class SandboxSessionClose {
       }
       if(stop.status!=='STOP_ORDER_STATUS_CANCELED'||stop.childOrderId!==null) throw new Error();
       const revision=this.journal.getSandboxLossLedger().revision;
-      const price=await this.preflight(accountId,order.instrumentId,entry.lotsExecuted,scenario.input.lotSize,fixedNow);
+      const price=await this.preflight(accountId,scenarioId,order.instrumentId,entry.lotsExecuted,scenario.input.lotSize,fixedNow);
       // Read the stop again after position/quote reads: a HTTP cancel ACK alone
       // does not grant ownership of the position to our separate SELL.
       const confirmed=parseSandboxStop(await this.client.getSandboxStopOrders(accountId),native.intent,now());
@@ -113,9 +114,9 @@ export class SandboxSessionClose {
     }
   }
 
-  private async preflight(accountId:string,instrumentId:string,lots:number,lotSize:number,fixedNow?:Date) {
-    const items=this.config.scanner.intradayWatchlist.filter(item=>item.instrumentId===instrumentId);const item=items[0];
-    if(items.length!==1||!item||item.lotSize!==lotSize) throw new Error();
+  private async preflight(accountId:string,scenarioId:number,instrumentId:string,lots:number,lotSize:number,fixedNow?:Date) {
+    const scenario = this.journal.getScenario(scenarioId); if (!scenario || scenario.instrumentId!==instrumentId || scenario.input.lotSize!==lotSize) throw new Error();
+    const item=scenarioInstrument(this.config,scenario);
     const started=performance.now();
     const [positions,orders,book,status,instrument]=await Promise.all([this.client.getSandboxPositions(accountId),this.client.getSandboxOrders(accountId),
       this.market.getOrderBook(instrumentId,20),this.market.getTradingStatus(instrumentId),this.market.getInstrumentBy(instrumentId)]);

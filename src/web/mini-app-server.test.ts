@@ -11,10 +11,13 @@ const view: MiniAppView = { observedAt: now.toISOString(), scanner: { paused: fa
   execution: { mode: 'disabled', killed: true, liveSubmissionAllowed: false, actualPnlRub: null, lossMonitorReady: false },
   sandboxLossGuard: { state: 'off', checkedAt: null, closedLoss: null, estimatedOpenLoss: null, totalLoss: null },
   limits: { capitalRub: 1000, tradeRiskRub: 20, dailyRiskRub: 60, dailyLossRub: 60, positionRub: 996.51, commissionRate: 0.003, slippageRate: 0.0005 }, candidates: [], sandboxResults: [] };
-async function start(selectMarketSource?: (source: 'server' | 'computer') => void) {
+async function start(selectMarketSource?: (source: 'server' | 'computer') => void,
+  trading?: Pick<Parameters<typeof createMiniAppServer>[0], 'selectTradingStrategy' | 'selectTradingAssets'> & { view?: () => MiniAppView }) {
   const action = vi.fn();
   const server = createMiniAppServer({ token: 'test-bot-token', origin: 'https://bot.brewnote.net', allowedPrivateIds: ['42'],
-    view: () => view, action, now: () => now, ...(selectMarketSource ? { selectMarketSource } : {}) });
+    view: trading?.view ?? (() => view), action, now: () => now, ...(selectMarketSource ? { selectMarketSource } : {}),
+    ...(trading?.selectTradingStrategy ? { selectTradingStrategy: trading.selectTradingStrategy } : {}),
+    ...(trading?.selectTradingAssets ? { selectTradingAssets: trading.selectTradingAssets } : {}) });
   servers.push(server); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('Missing test address');
@@ -25,6 +28,43 @@ afterEach(async () => {
 });
 const headers = { Authorization: 'tma ' + signedData() };
 describe('Mini App HTTP boundary', () => {
+  it('requires authentication, exact payloads and a current revision for strategy and asset changes', async () => {
+    const selection = { strategyId: 'trend-momentum-v1' as const, revision: 5, tickers: ['VTBR'] };
+    let current: MiniAppView = { ...view, tradingSelection: selection, availableTickers: ['VTBR', 'SBER'] };
+    const strategy = vi.fn((strategyId: string, revision: number) => {
+      current = { ...current, tradingSelection: { strategyId: strategyId as 'vwap-reclaim-v1', revision: revision + 1, tickers: ['VTBR'] } };
+    });
+    const assets = vi.fn();
+    const { url, action } = await start(undefined, { view: () => current, selectTradingStrategy: strategy, selectTradingAssets: assets });
+    const post = (value: unknown, authorized = true) => fetch(url + '/api/action', { method: 'POST',
+      headers: { ...(authorized ? headers : {}), Origin: 'https://bot.brewnote.net', 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
+    const valid = { action: 'strategy-select', strategyId: 'vwap-reclaim-v1', expectedRevision: 5 };
+    expect((await post(valid, false)).status).toBe(401); expect(strategy).not.toHaveBeenCalled();
+    for (const invalid of [{ ...valid, expectedRevision: '5' }, { ...valid, expectedRevision: -1 },
+      { ...valid, expectedRevision: 5.5 }, { ...valid, strategyId: 'buy' }, { ...valid, accountId: 'private' },
+      { action: 'assets-select', tickers: [], expectedRevision: 5 },
+      { action: 'assets-select', tickers: ['VTBR', 'VTBR'], expectedRevision: 5 },
+      { action: 'assets-select', tickers: ['unknown-token'], expectedRevision: 5 }]) {
+      expect((await post(invalid)).status).toBe(400);
+    }
+    expect(strategy).not.toHaveBeenCalled(); expect(assets).not.toHaveBeenCalled();
+    expect((await post(valid)).status).toBe(200); expect(strategy).toHaveBeenCalledExactlyOnceWith('vwap-reclaim-v1', 5);
+    expect((await post(valid)).status).toBe(409); expect(strategy).toHaveBeenCalledTimes(1);
+    expect((await post({ action: 'assets-select', tickers: ['GAZP'], expectedRevision: 6 })).status).toBe(400);
+    const selected = await post({ action: 'assets-select', tickers: ['VTBR', 'SBER'], expectedRevision: 6 });
+    expect(selected.status).toBe(200); expect(assets).toHaveBeenCalledExactlyOnceWith(['VTBR', 'SBER'], 6);
+    assets.mockImplementationOnce(() => { throw new Error('private-lock-detail'); });
+    const rejected = await post({ action: 'assets-select', tickers: ['VTBR'], expectedRevision: 6 });
+    expect(rejected.status).toBe(409); expect(await rejected.text()).not.toContain('private-lock-detail');
+    expect(action).not.toHaveBeenCalled();
+  });
+  it('refuses selection changes when the integration has no selection controller', async () => {
+    const { url, action } = await start();
+    const response = await fetch(url + '/api/action', { method: 'POST', headers: { ...headers,
+      Origin: 'https://bot.brewnote.net', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'strategy-select', strategyId: 'vwap-reclaim-v1', expectedRevision: 1 }) });
+    expect(response.status).toBe(409); expect(action).not.toHaveBeenCalled();
+  });
   it('keeps source selection authenticated and separate from execution controls', async () => {
     const select = vi.fn(); const { url, action } = await start(select);
     const request = { method: 'POST', headers: { ...headers, Origin: 'https://bot.brewnote.net', 'Content-Type': 'application/json' }, body: '{"action":"source-computer"}' };

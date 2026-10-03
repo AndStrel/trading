@@ -22,6 +22,8 @@ export type TradeScenarioInput = {
   lastPricesPayload: unknown;
   orderBookPayload: unknown;
   tradingStatusPayload: unknown;
+  // Only the shared deterministic engine may supply signal confirmation.
+  signalConfirmed?: boolean;
 };
 
 export type TradeScenarioAssessment = {
@@ -178,17 +180,17 @@ export function assessTradeScenario(input: TradeScenarioInput): TradeScenarioAss
       `Planned entry differs from the latest price by ${roundPercent(entryDeviationPct)}%, above the ${input.maxEntryDeviationPct}% review threshold`,
     );
   }
-  if (input.candleAnalysis.status !== 'ok') {
+  if (input.candleAnalysis.status !== 'ok' && !input.signalConfirmed) {
     warnings.push('Candle history is insufficient for a complete trend assessment');
-  } else if (
+  } else if (!input.signalConfirmed && (
     (input.side === 'long' && input.candleAnalysis.trend === 'down') ||
     (input.side === 'short' && input.candleAnalysis.trend === 'up')
-  ) {
+  )) {
     warnings.push('Candle trend opposes the planned trade direction');
-  } else if (
+  } else if (!input.signalConfirmed && (
     input.candleAnalysis.trend === 'flat' ||
     input.candleAnalysis.trend === 'insufficient_data'
-  ) {
+  )) {
     warnings.push('Candle trend does not confirm the planned trade direction');
   }
   if (
