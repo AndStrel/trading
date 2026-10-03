@@ -28,6 +28,7 @@
 | [HISTORICAL_DATA](HISTORICAL_DATA.md) | Импорт и provenance минутных архивов |
 | [RESEARCH_DATASET](RESEARCH_DATASET.md) | Полнота и область исследовательских наборов |
 | [BACKTEST](BACKTEST.md) | Исторический replay, затраты, development/validation/OOS |
+| [CATALOG_PARITY_REPLAY_V1](CATALOG_PARITY_REPLAY_V1.md) | Заранее фиксируем воспроизведение нового каталога; read-only источник, лотность и расходы |
 | [RESEARCH_ORB_RVOL_V1](RESEARCH_ORB_RVOL_V1.md) | Зафиксированная историческая гипотеза и ворота допуска |
 | [ROADMAP](ROADMAP.md) | Историческая последовательность развития; актуальный план — BOT_REFRESH_PLAN |
 
