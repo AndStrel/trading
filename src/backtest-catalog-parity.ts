@@ -1,6 +1,7 @@
 import { isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { catalogAccountTotals } from './backtest/catalog-account-totals.js';
+import { validateCatalogCohortViability } from './backtest/catalog-cohort-viability.js';
 import {
   DEFAULT_CATALOG_REPLAY_POLICY, replayCatalogStrategy, repriceCatalogTrades,
   type CatalogParityReplayResult,
@@ -96,14 +97,23 @@ export function runCatalogReplayCli(options: CatalogReplayCliOptions) {
       policy: { ...DEFAULT_CATALOG_REPLAY_POLICY, capitalRub, commissionRate: costs.commissionRate, slippageRate: 0.0005 },
     });
     const account = catalogAccountTotals(result.modeledTrades, costs.monthlyFeeRub);
+    const cashAndRiskPath = validateCatalogCohortViability({ originalTrades: result.modeledTrades,
+      repricedTrades: result.modeledTrades, policy: { ...result.policy, monthlyFeeRub: costs.monthlyFeeRub } });
     const stress = repriceCatalogTrades(result.modeledTrades, { commissionRate: costs.commissionRate, slippageRate: 0.001 });
     const stressAccount = catalogAccountTotals(stress.modeledTrades, costs.monthlyFeeRub);
+    const stressCashAndRiskPath = validateCatalogCohortViability({ originalTrades: result.modeledTrades,
+      repricedTrades: stress.modeledTrades,
+      policy: { ...result.policy, slippageRate: 0.001, monthlyFeeRub: costs.monthlyFeeRub } });
     const frozenInvestorCostSensitivities = costScenario === 'investor'
       ? (['public-trader', 'conditional-003'] as const).map(name => {
         const sensitivity = repriceCatalogTrades(result.modeledTrades,
           { commissionRate: costScenarios[name].commissionRate, slippageRate: 0.0005 });
+        const sensitivityPath = validateCatalogCohortViability({ originalTrades: result.modeledTrades,
+          repricedTrades: sensitivity.modeledTrades, policy: { ...result.policy,
+            commissionRate: costScenarios[name].commissionRate, monthlyFeeRub: costScenarios[name].monthlyFeeRub } });
         return { costScenario: name, cohort: sensitivity.cohort, productionCompatible: false,
-          cashFeasibilityProven: sensitivity.cashFeasibilityProven, riskLimitsProven: sensitivity.riskLimitsProven,
+          cashFeasibilityProven: sensitivityPath.cashFeasibilityProven, riskLimitsProven: sensitivityPath.riskLimitsProven,
+          cashAndRiskPath: sensitivityPath,
           account: catalogAccountTotals(sensitivity.modeledTrades, costScenarios[name].monthlyFeeRub),
           admission: sensitivity.admission };
       }) : [];
@@ -114,23 +124,23 @@ export function runCatalogReplayCli(options: CatalogReplayCliOptions) {
       positiveMeanAndAccountNet: BigInt(account.tradeNetNano) > 0n && BigInt(account.accountNetNano) > 0n,
       eachPredeclaredPeriodPositive: account.periods.every(period => BigInt(period.accountNetNano) > 0n),
       sameCohortStressPositive: BigInt(stressAccount.accountNetNano) > 0n,
-      // Repricing alone does not replay the higher-cost cash/risk reservation path.
-      stressCashAndRiskPathProven: false,
+      baseCashAndRiskPathProven: cashAndRiskPath.pathProven,
+      stressCashAndRiskPathProven: stressCashAndRiskPath.pathProven,
       positiveAfterRemovingFiveBest: BigInt(account.withoutFiveBestAccountNetNano) > 0n,
       zeroUnresolved: account.unresolvedTrades === 0,
-      // Post-hoc fee subtraction is not proof that entry cash was available after billing.
-      accountCashPathIncludesServiceFees: costs.monthlyFeeRub === 0,
+      accountCashPathIncludesServiceFees: cashAndRiskPath.pathProven,
     };
     return { costScenario, capitalRub, policy: result.policy, productionCompatible: result.productionCompatible,
       coverage: result.coverage, decisions: decisionSummary(result), modeledTrades: result.modeledTrades,
-      metrics: result.metrics, account,
+      metrics: result.metrics, account, cashAndRiskPath,
       knownUnresolvedEntryCostsNano: result.modeledTrades.filter(trade => trade.status === 'unresolved')
         .reduce((sum, trade) => sum + BigInt(trade.entryCommissionNano) + BigInt(trade.entrySlippageNano), 0n).toString(),
       stress: { cohort: stress.cohort, account: stressAccount, metrics: stress.metrics,
-        cashAndRiskPathProven: false, interpretation: 'cost-only sensitivity, not executable stress viability' },
+        cashAndRiskPathProven: stressCashAndRiskPath.pathProven, cashAndRiskPath: stressCashAndRiskPath,
+        interpretation: 'same-cohort modeled cash/risk path; never executable market evidence' },
       frozenInvestorCostSensitivities,
       modelScreen: { checks, passes: Object.values(checks).every(Boolean),
-        warning: 'Candle model only. Service billing cash path and executable market evidence are not proven.' },
+        warning: 'Candle model only. Failed cash/risk paths invalidate modeled feasibility; actual billing and executable market evidence remain unproven.' },
       admission: { allowed: false as const, executableEvidence: false as const } };
   }));
   return { protocol: 'catalog-parity-replay-v1', hypothesis: 'SBER/trend-momentum-v1', researchStatus: 'development-only',
