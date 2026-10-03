@@ -172,9 +172,36 @@ readonly mount существующего контейнера. Публичны
 scanner report сброшен. Счета/лимиты/исполнитель, `.env` и серверный процесс
 не менялись. Свежий scan ждёт штатного торгового окна; расписание не обходится.
 Серверный account-preflight остаётся независимым и не проходит автоматически
-благодаря этому каналу или metadata probe. После рестарта source снова «Сервер».
+благодаря этому каналу или metadata probe. В этой принятой версии выбор ещё
+хранился только в памяти: после рестарта source снова становился «Сервер».
 
 Новые helpers проверены 23 offline-тестами. Общий `check` на локальной ветке
 до интеграции нового cash-flow slice: 1 326 тестов приложения плюс 23 helper-теста,
 typecheck и build — PASS. Это локальная валидация; не CI/review нового head и не
 доказательство торговли или прибыли.
+
+## Сохранение выбранного источника — следующий safety slice
+
+Новая локальная версия сохраняет только одну из канонических записей
+`{"version":1,"selected":"server"}` или `{"version":1,"selected":"computer"}`
+в отдельном runtime-state key `market.source.selection.v1`.
+Ни credentials, ни account identity, ни health/location/lease не сохраняются.
+При рестарте предпочтение «Компьютер» сохраняется, даже если transport сейчас
+не настроен/не работает. Неявного переключения на «Сервер» нет; отсутствие
+настройки отказано, настроенный offline transport только пытается выбранный
+канал и безопасно завершает read ошибкой. Health после рестарта неизвестен
+и проверяется заново; выбор через панель по-прежнему требует свежего успешного
+probe и отсутствия активного scan lease.
+
+Запись сохраняется до изменения in-memory selection и сброса scanner report.
+Ошибка сохранения оставляет прежний выбор/report; ошибка чтения или невалидные
+persisted bytes дают фиксированную redacted startup error. Существующий fetch
+контракт не получил нового глобального freshness gate. Missing preference
+сохраняет прежний default «Сервер» до явного выбора оператора.
+
+Локальная проверка: 1 684 TS tests / 82 files, 23 ops-local tests, typecheck/build
+PASS; независимый review трёх файлов без P1/P2. Compiled Node24 container smoke
+с network none/read-only root/синтетическим SQLite подтвердил restart,
+health-not-restored, save failure и отсутствие fallback; реальных broker
+reads/orders и production volumes в этом smoke нет. Это draft overlay,
+не фактическое доказательство production restart этой версии.

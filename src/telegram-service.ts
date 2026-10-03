@@ -56,7 +56,11 @@ const relayFetch = process.env.T_INVEST_LOCAL_RELAY_SOCKET ? createUnixRelayFetc
 if (Boolean(localRelayUrl) !== Boolean(localRelaySecret)) throw new Error('Local relay configuration is incomplete');
 const computerFetch = localRelayUrl && localRelaySecret
   ? createMarketRelayFetch({ url: localRelayUrl, secret: localRelaySecret, fetchImpl: relayFetch }) : undefined;
-const sources = new MarketSourceController({ server: directMarketFetch, ...(computerFetch ? { computer: computerFetch } : {}) });
+const sources = new MarketSourceController(
+  { server: directMarketFetch, ...(computerFetch ? { computer: computerFetch } : {}) },
+  Date.now,
+  journal,
+);
 const marketClient = new TInvestClient(config.token, config.baseUrl, { transport: 'fetch', fetchImpl: sources.fetch });
 const scanner = new IntradayScanner(config, marketClient, journal, undefined, undefined, () => sources.acquireScan());
 const tradingSelection = scanner.getTradingSelection();

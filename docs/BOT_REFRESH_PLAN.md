@@ -340,7 +340,7 @@ typecheck/build — PASS, **52 Python regressions** — PASS. Compiled Node24 sm
 deployed image. Отдельный настоящий curl в таком контейнере отказал без сети,
 вернул только fixed error и очистил свои private temp artifacts.
 
-Новых broker order/funding calls нет. Actual non-empty cursor API compatibility, владение
+Новых broker order/funding calls нет. Actual owned cursor cash proof, владение
 ненулевой комиссией архивного zero-fill SELL, выбранный strategy round trip и
 экономические R10 gates остаются непроверенными; unknown остаётся incomplete.
 ### Принятый денежный контракт и следующий локальный safety slice
@@ -374,3 +374,37 @@ production код этим не менялся. Это draft dist overlay, не 
 Нового broker BUY/STOP/SELL/cash cycle нет. Старое nano-расхождение не принято
 и не стерто. Cash-cycle acceptance, свежий штатный scanner pass, независимый
 forward evidence, R9b и R10 остаются открытыми; прибыль и real GO не заявлены.
+
+### Принятая technical cash safety и durable local source
+
+[PR #86](https://github.com/AndStrel/trading/pull/86) объединён после
+[CI 37134254920](https://github.com/AndStrel/trading/actions/runs/37134254920),
+Code Review и Security Review на exact head `a5f010c`, без findings/threads.
+Main `c9cbf1294aab9e7e0032a3d71f8ad467dca3dfb1` прошёл
+[CI 37134687540](https://github.com/AndStrel/trading/actions/runs/37134687540)
+и [deploy 37134687566](https://github.com/AndStrel/trading/actions/runs/37134687566).
+Фактический runtime: exact revision, running/restartCount=0, disabled/kill=true,
+unresolvedCount=0/ordersSubmitted=false; Mini App HTML/JS/401, candidate config,
+HTTPS готовы. После этого deploy снова проверен и выбран «Компьютер» через
+защищённый operator API, прежний report сброшен; Telegram-device не проверен.
+
+Actual исторический cursor-window теперь непустой: 1 page/4 items,
+BUY/SELL/2 BROKER_FEE, no writes. Отдельный shape probe не подтвердил
+fee-parent linkage; соответствие комиссий остаётся unknown, не false zero
+и не готовый cash proof. [Точные границы](SANDBOX_CASH_EVIDENCE.md).
+Legacy baseline не усыновлён, старое nano-расхождение не объяснено этим чтением.
+
+Следующий draft устраняет source reset после deploy: отдельная tiny v1 запись
+операторского предпочтения, fresh health не сохраняется, никакого fallback
+на «Сервер». Ошибки load/save безопасно отказывают; lease/freshness и fetch
+контракт сохранены. [Контракт local runtime](LOCAL_READONLY_RUNTIME.md).
+Локальные 1 684 TS tests / 82 files + 23 ops-local, typecheck/build и compiled
+Node24 synthetic restart/no-fallback smoke — PASS; независимый source review
+не нашёл P1/P2. Runtime restart этого draft ещё не заявлен принятым.
+
+- [x] Установить реальную причину source reset: preference не сохранялся.
+- [x] Добавить и локально проверить durable read-only source preference.
+- [ ] Exact-head CI/review, accepted deploy и фактический restart/readback
+  сохранённого «Компьютер» для следующей версии.
+- [ ] Штатный scanner pass, новый owned sandbox cash-cycle и R9b/R10:
+  экономические/реальные ворота не менялись и не пройдены.

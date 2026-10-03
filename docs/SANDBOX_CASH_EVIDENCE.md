@@ -102,8 +102,22 @@ forward/OOS/executable-price экономика и отдельный real execu
 24 часов вернуло одну страницу без items. Raw payload, account identity и
 credentials не публиковались; заявок/пополнений/изменений счёта не было.
 
-Это подтверждает только endpoint/transport и empty-window pagination contract.
-Не проверены nonempty trade/fee schema, ownership, baseline и точная денежная
-сверка после новой сделки. `cashProven:false`; пустое окно не является
-успешным торговым циклом. Новые технические ворота описаны в
+Затем bounded read исторического дня технического теста вернул одну полную
+страницу с четырьмя items: BUY, SELL и две BROKER_FEE. Дополнительный read-only
+shape probe не подтвердил связь fee `parentOperationId` с торговыми row IDs;
+`feeLinkageSchemaConfirmed:false`, `feePaymentsMatchSummaries:null`, безопасная
+категория `fee-parent-link`. Неподтверждённое соответствие комиссий не объявляется
+совпадением или нулём расходов. Raw IDs/платежи не публиковались, broker writes
+не было. Этот probe не пытался доказать ownership и не усыновлял baseline.
+
+В [официальном REST контракте](https://developer.tbank.ru/invest/services/operations/methods)
+`id` и `parent_operation_id` — отдельные поля; ID могут меняться. Одного
+совпадения суммы/времени недостаточно для замены явной owned linkage.
+Операционная причина неподтверждённой связи и старого nano-расхождения пока
+не установлена; gate не ослабляется.
+
+Подтверждены endpoint/transport и пустая/непустая bounded pagination, но не
+полный owned trade/fee proof, immutable baseline и точная денежная сверка
+после новой сделки. `cashProven:false`; чтение истории не является успешным
+торговым циклом. Новые технические ворота описаны в
 [VTBR acceptance](SANDBOX_VTBR_ACCEPTANCE.md).
