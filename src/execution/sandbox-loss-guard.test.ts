@@ -5,7 +5,10 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../config.js';
 import { ScenarioJournal } from '../journal/scenario-journal.js';
-import { parseSandboxOrderState } from './sandbox-order-state.js';
+import { parseSandboxOrderState, type SandboxOrderSnapshot } from './sandbox-order-state.js';
+import { nativeStopKey } from './sandbox-stop-state.js';
+import { sandboxCloseKey } from './sandbox-session-policy.js';
+import { sandboxTargetEconomics } from './sandbox-target-policy.js';
 import { SandboxExitService } from './sandbox-exit-service.js';
 import { SandboxLossGuard } from './sandbox-loss-guard.js';
 import { ExecutionService } from './execution-service.js';
@@ -19,7 +22,7 @@ const entryAt = '2026-10-01T07:55:00.000Z'; const stopAt = '2026-10-01T07:58:00.
 const dirs: string[] = [];
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
-function setup(open = true) {
+function setup(open = true, targetMetadata = false) {
   const dir = mkdtempSync(join(tmpdir(), 'trading-loss-')); dirs.push(dir);
   const path = join(dir, 'journal.sqlite'); const journal = new ScenarioJournal(path);
   seedPreparedSandbox(journal, 'local-account');
@@ -28,7 +31,10 @@ function setup(open = true) {
     T_INVEST_SANDBOX_PROTECTION_ENABLED: 'true', T_INVEST_SANDBOX_LOSS_GUARD_ENABLED: 'true' });
   const scenario = journal.record({ observedAt: entryAt, strategy: 'intraday', instrumentId: 'local-instrument',
     input: { side: 'long', entryPrice: 10, stopPrice: 9.9, targetPrice: 11, lotSize: 10, slippageRate: 0.0005 },
-    decision: 'candidate', blockers: [], warnings: [], snapshot: { tradePlan: { lots: 5, positionRub: 500, totalRiskRub: 9 } } });
+    decision: 'candidate', blockers: [], warnings: [], snapshot: { tradePlan: { lots: 5, positionRub: 500, totalRiskRub: 9 },
+      ...(targetMetadata ? { source: 'intraday-scanner', tradingStrategy: { id: 'trend-momentum-v1', version: '1' },
+        instrument: { instrumentId: 'local-instrument', lotSize: 10, priceStep: 0.01 },
+        sandboxTargetExitPolicy: { version: '1', enabled: true, commissionRateNano: '3000000', slippageRateNano: '500000' } } : {}) } });
   const order = journal.queueExecution({ scenarioId: scenario.id, mode: 'sandbox', instrumentId: scenario.instrumentId, side: 'long',
     lots: 5, limitPrice: 10, estimatedRiskRub: 9, orderRequestId: randomUUID() });
   const entryPayload = () => ({ orderId: 'local-entry', orderRequestId: order.orderRequestId, instrumentUid: scenario.instrumentId,
@@ -69,7 +75,43 @@ function setup(open = true) {
     instrumentUid: scenario.instrumentId, tradingStatus: 'SECURITY_TRADING_STATUS_NORMAL_TRADING', apiTradeAvailableFlag: true, limitOrderAvailableFlag: true }) };
   const exits = new SandboxExitService(config, client, journal); const guard = new SandboxLossGuard(config, client, market, exits, journal);
   const noWrites = () => { for (const fn of [client.postLimitOrder, client.postSandboxStopLimit, client.openSandboxAccount, client.sandboxPayIn]) expect(fn).not.toHaveBeenCalled(); };
-  return { path, journal, config, scenario, order, entryPayload, childPayload, stopPayload, flat, held, bid, client, market, guard, noWrites };
+  return { path, journal, config, scenario, order, entryPayload, childPayload, stopPayload, flat, held, bid, client, market, guard, exits, noWrites };
+}
+
+function submittedTarget(f: ReturnType<typeof setup>) {
+  const entry = f.journal.getExecutionSnapshot(f.scenario.id)!; const native = f.journal.getNativeStop(f.scenario.id)!.intent;
+  const proof = sandboxTargetEconomics(entry, { lotSize: 10, targetNano: '11000000000', stopNano: '9900000000', tickNano: '10000000',
+    commissionRateNano: '3000000', slippageRateNano: '500000' })!;
+  const close = f.journal.claimSandboxSessionExit({ scenarioId: f.scenario.id, accountId: 'local-account', entryRequestId: f.order.orderRequestId,
+    instrumentId: f.scenario.instrumentId, lots: 5, stopId: 'local-stop', generation: 0 }, now, 'target', proof).intent;
+  const closeKey = sandboxCloseKey(close);
+  f.journal.observeNativeStop(f.scenario.id, { status: 'STOP_ORDER_STATUS_CANCELED', childOrderId: null }, nativeStopKey(native));
+  f.journal.claimSandboxSessionSubmission(f.scenario.id, f.journal.getSandboxLossLedger().revision, proof.targetNano, now, closeKey, proof);
+  const zero: SandboxOrderSnapshot = { brokerOrderId: 'synthetic-zero-target', executionStatus: 'EXECUTION_REPORT_STATUS_CANCELLED',
+    terminal: true, lotsExecuted: 0, grossNano: '0', commissionNano: '1000000000', stages: [] };
+  f.journal.recordCloseSellObservation(closeKey, zero, now);
+  const zeroPayload = (feeUnits = '2') => ({ ...f.childPayload(0, 'EXECUTION_REPORT_STATUS_CANCELLED'), orderId: zero.brokerOrderId,
+    orderRequestId: close.requestId, executedCommission: { currency: 'rub', units: feeUnits, nano: 0 }, serviceCommission: { currency: 'rub', units: '0', nano: 0 } });
+  return { close, closeKey, zeroPayload };
+}
+function archivedTarget(f: ReturnType<typeof setup>, closed = false) {
+  const { close, closeKey, zeroPayload } = submittedTarget(f);
+  const restore = f.journal.claimProtectionRestore(closeKey, f.journal.getSandboxLossLedger().revision, { accountId: 'local-account',
+    instrumentId: f.scenario.instrumentId, lots: 5, lotSize: 10, positionUnits: '50', checkedAt: now.toISOString(), noActiveOrders: true,
+    noOtherActiveStops: true, stop: { status: 'STOP_ORDER_STATUS_CANCELED', childOrderId: null } }, now);
+  const pendingKey = nativeStopKey(restore.record.intent);
+  f.journal.acknowledgeNativeStop(f.scenario.id, pendingKey.requestId, 'synthetic-restored-stop', pendingKey);
+  const key = nativeStopKey(f.journal.getNativeStop(f.scenario.id)!.intent);
+  f.journal.observeNativeStop(f.scenario.id, { status: 'STOP_ORDER_STATUS_ACTIVE', childOrderId: null }, key);
+  f.journal.markProtectionRestored(closeKey, key, now);
+  f.client.getSandboxOrderState.mockImplementation(async (_account: string, request: string) => request === f.order.orderRequestId
+    ? f.entryPayload() : request === close.requestId ? zeroPayload() : Promise.reject(new Error('Synthetic unknown request')));
+  f.client.getSandboxStopOrders.mockResolvedValue({ stopOrders: [{ ...f.stopPayload(closed).stopOrders[0],
+    stopOrderId: key.brokerStopId!, createDate: now.toISOString() }] });
+  f.client.getSandboxChildOrderState.mockResolvedValue({ ...f.childPayload(),
+    stages: f.childPayload().stages.map(stage => ({ ...stage, executionTime: now.toISOString() })) });
+  if (closed) f.client.getSandboxPositions.mockResolvedValue(f.flat());
+  return { close, zeroPayload };
 }
 
 describe('Read-only sandbox loss guard', () => {
@@ -82,6 +124,59 @@ describe('Read-only sandbox loss guard', () => {
     const f = setup();
     expect(await f.guard.assess('local-account', now)).toMatchObject({ status: 'ok', closedLossNano: '0', openLossNano: '8740000000' });
     expect(f.journal.getExecutionByScenario(f.scenario.id)?.status).toBe('accepted'); expect(f.journal.isExecutionKilled()).toBe(true); f.noWrites();
+  });
+  it('keeps current failed target loss incomplete until native protection is restored and its fees archived', async () => {
+    const f = setup(true, true); const target = submittedTarget(f);
+    f.client.getSandboxOrderState.mockImplementation(async (_account: string, request: string) => request === f.order.orderRequestId
+      ? f.entryPayload() : target.zeroPayload());
+    f.client.getSandboxStopOrders.mockResolvedValue({ stopOrders: [{ ...f.stopPayload().stopOrders[0], status: 'STOP_ORDER_STATUS_CANCELED' }] });
+    expect(await f.guard.assess('local-account', now)).toMatchObject({ status: 'incomplete', openLossNano: null });
+    expect(f.journal.getSandboxExitEvidence(f.scenario.id)).toBeNull();
+    expect(f.market.getOrderBook).not.toHaveBeenCalled(); f.noWrites();
+  });
+  it('recovery before loss monitoring does not finalize a zero session SELL after target restoration', async () => {
+    const f = setup(true, true); const archived = archivedTarget(f);
+    const late = new Date('2026-10-01T15:30:00Z'); const native = f.journal.getNativeStop(f.scenario.id)!.intent;
+    const current = nativeStopKey(native);
+    const session = f.journal.claimSandboxSessionExit({ scenarioId: f.scenario.id, accountId: 'local-account', entryRequestId: f.order.orderRequestId,
+      instrumentId: f.scenario.instrumentId, lots: 5, stopId: native.brokerStopId!, generation: 1 }, late).intent;
+    const closeKey = sandboxCloseKey(session);
+    f.journal.observeNativeStop(f.scenario.id, { status: 'STOP_ORDER_STATUS_CANCELED', childOrderId: null }, current);
+    f.journal.claimSandboxSessionSubmission(f.scenario.id, f.journal.getSandboxLossLedger().revision, '9900000000', late, closeKey);
+    const zero = { ...archived.zeroPayload('0'), orderId: 'synthetic-zero-session', orderRequestId: session.requestId,
+      executionReportStatus: 'EXECUTION_REPORT_STATUS_NEW' };
+    f.client.getSandboxOrderState.mockImplementation(async (_account: string, request: string) => request === f.order.orderRequestId
+      ? f.entryPayload() : request === archived.close.requestId ? archived.zeroPayload() : zero);
+    f.client.getSandboxStopOrders.mockResolvedValue({ stopOrders: [{ ...f.stopPayload().stopOrders[0], stopOrderId: current.brokerStopId!,
+      status: 'STOP_ORDER_STATUS_CANCELED', createDate: now.toISOString() }] });
+    expect(session.targetConsumed).toBe(true);
+    expect(await f.exits.reconcile('local-account', f.scenario.id, late)).toMatchObject({ complete: false, soldLots: 0 });
+    zero.executionReportStatus = 'EXECUTION_REPORT_STATUS_CANCELLED';
+    expect(await f.guard.assess('local-account', late)).toMatchObject({ status: 'incomplete', openLossNano: null });
+    expect(f.journal.getSandboxSessionExit(f.scenario.id)?.sellSnapshot?.terminal).toBe(true);
+    expect(f.journal.getSandboxExitEvidence(f.scenario.id)).toBeNull(); f.noWrites();
+  });
+  it.each([false, true])('includes each archived failed target fee once in open/closed loss (%s)', async closed => {
+    const f = setup(true, true); const archived = archivedTarget(f, closed);
+    const expected = closed ? { closedLossNano: '11000000000', openLossNano: '0' }
+      : { closedLossNano: '0', openLossNano: '10740000000' };
+    expect(await f.guard.assess('local-account', now)).toMatchObject({ status: 'ok', ...expected });
+    expect(await f.guard.assess('local-account', now)).toMatchObject({ status: 'ok', ...expected });
+    expect(f.journal.getSandboxLossLedger().orders[0]).toMatchObject({ failedCloseFeesNano: '2000000000', failedCloseAttempts: 1 });
+    expect(f.client.getSandboxOrderState).toHaveBeenCalledWith('local-account', archived.close.requestId); f.noWrites();
+  });
+  it('does not price an archived unknown fee as zero or place a replacement order', async () => {
+    const f = setup(true, true); const archived = archivedTarget(f);
+    f.client.getSandboxOrderState.mockImplementation(async (_account: string, request: string) => request === f.order.orderRequestId
+      ? f.entryPayload() : { ...archived.zeroPayload(), serviceCommission: undefined });
+    expect(await f.guard.assess('local-account', now)).toMatchObject({ status: 'incomplete', closedLossNano: null, openLossNano: null }); f.noWrites();
+  });
+  it('rejects a generation change while the first stop read is pending', async () => {
+    const f = setup(true, true); const originalStops = f.stopPayload();
+    f.client.getSandboxStopOrders.mockImplementationOnce(async () => { archivedTarget(f); return originalStops; });
+    expect(await f.guard.assess('local-account', now)).toMatchObject({ status: 'incomplete', openLossNano: null });
+    expect(f.journal.getNativeStop(f.scenario.id)?.intent.generation).toBe(1);
+    expect(f.journal.getNativeStop(f.scenario.id)?.observation?.status).toBe('STOP_ORDER_STATUS_ACTIVE'); f.noWrites();
   });
   it('kills at the approved trade loss threshold', async () => {
     const f = setup(); f.journal.setExecutionKilled(false);

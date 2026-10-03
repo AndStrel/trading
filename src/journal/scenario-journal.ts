@@ -5,19 +5,23 @@ import { DatabaseSync } from 'node:sqlite';
 import type { ExecutionMode, Strategy } from '../config.js';
 import { riskBudgetFits } from '../execution/live-pilot-risk.js';
 import { assertSnapshotProgress, type SandboxOrderSnapshot } from '../execution/sandbox-order-state.js';
-import { decimalPriceNano, type SandboxStopIntent, type SandboxStopObservation } from '../execution/sandbox-stop-state.js';
+import { decimalPriceNano, nativeStopKey, type NativeStopKey, type SandboxStopIntent, type SandboxStopObservation } from '../execution/sandbox-stop-state.js';
 import { analyzeSandboxRoundTrip } from '../execution/sandbox-round-trip.js';
 import { randomUUID } from 'node:crypto';
 import { moscowLossDay, type SandboxLossAssessment, type SandboxLossProof } from '../execution/sandbox-loss-policy.js';
-import { sandboxSessionCloseDue, type SandboxSessionExitIntent } from '../execution/sandbox-session-policy.js';
+import { sandboxSessionCloseDue, sandboxCloseKey, type SandboxCloseKey, type SandboxProtectionRestoreProof, type SandboxSessionExitIntent } from '../execution/sandbox-session-policy.js';
 import { nanoQuotation } from '../execution/sandbox-stop-state.js';
 import { assertTechnicalScope } from '../execution/sandbox-technical-scope.js';
+import { assertSandboxTargetProof, type SandboxTargetProof } from '../execution/sandbox-target-policy.js';
+import { isTradingStrategyId, getStrategyDescriptor } from '../strategies/catalog.js';
 
 export class SandboxPreparationChangedError extends Error {
   constructor() { super('Sandbox arming or preparation changed during entry preflight'); }
 }
 
 export type NativeStopRecord = { intent: SandboxStopIntent; observation: SandboxStopObservation | null };
+export type SandboxCloseHistoryRecord = { intent: SandboxSessionExitIntent; native: NativeStopRecord;
+  sellSnapshot: SandboxOrderSnapshot | null; observedAt: string };
 export type SandboxExitEvidence = { snapshot: SandboxOrderSnapshot; flatConfirmedAt: string | null; observedAt: string };
 export type SandboxSafetyReason = 'protection-unconfirmed' | 'loss-incomplete' | 'loss-limit' | 'monitor-unavailable';
 export type SandboxSafetyNotice = { incidentId: string; attemptId: string; reason: SandboxSafetyReason; checkedAt: string };
@@ -343,6 +347,32 @@ const schema = `
     intent_json TEXT NOT NULL,
     updated_at TEXT NOT NULL
   ) STRICT;
+
+  -- Immutable identities survive pointer changes; later fee observations append.
+  CREATE TABLE IF NOT EXISTS native_stop_history (
+    scenario_id INTEGER NOT NULL REFERENCES scenario_journal(id),
+    generation INTEGER NOT NULL CHECK(generation >= 0),
+    request_id TEXT NOT NULL UNIQUE,
+    intent_json TEXT NOT NULL,
+    observation_json TEXT NOT NULL,
+    archived_at TEXT NOT NULL,
+    PRIMARY KEY (scenario_id,generation)
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS sandbox_close_history (
+    request_id TEXT PRIMARY KEY,
+    scenario_id INTEGER NOT NULL REFERENCES scenario_journal(id),
+    generation INTEGER NOT NULL CHECK(generation >= 0),
+    intent_json TEXT NOT NULL,
+    native_json TEXT NOT NULL,
+    archived_at TEXT NOT NULL
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS sandbox_close_history_scenario ON sandbox_close_history(scenario_id,generation);
+  CREATE TABLE IF NOT EXISTS sandbox_close_history_observations (
+    id INTEGER PRIMARY KEY,
+    request_id TEXT NOT NULL REFERENCES sandbox_close_history(request_id),
+    snapshot_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL
+  ) STRICT;
 `;
 
 function parseJson<T>(value: string, fallback: T): T {
@@ -357,6 +387,21 @@ function parseStringArray(value: string): string[] {
   const parsed = parseJson<unknown>(value, []);
   return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
 }
+
+function assertNativeKey(intent: SandboxStopIntent, expected?: NativeStopKey): void {
+  const key = nativeStopKey(intent);
+  if (!expected ? key.generation !== 0 : Object.entries(key).some(([name,value]) => expected[name as keyof NativeStopKey] !== value)) {
+    throw new Error('Native stop generation or identity changed');
+  }
+}
+function assertCloseKey(intent: SandboxSessionExitIntent, expected?: SandboxCloseKey): void {
+  const key = sandboxCloseKey(intent);
+  if (!expected ? key.generation !== 0 || intent.purpose === 'target' : Object.entries(key).some(([name,value]) => expected[name as keyof SandboxCloseKey] !== value)) {
+    throw new Error('Close attempt generation or identity changed');
+  }
+}
+const recordObject = (value: unknown): Record<string,unknown> | null => value !== null && typeof value === 'object' && !Array.isArray(value)
+  ? value as Record<string,unknown> : null;
 
 export class ScenarioJournal {
   private readonly databasePath: string;
@@ -979,10 +1024,12 @@ export class ScenarioJournal {
     const db = this.open();
     try {
       db.exec('BEGIN IMMEDIATE');
+      if (nativeStopKey(intent).generation !== 0) throw new Error('Initial stop generation must be zero');
       const prior = db.prepare('SELECT intent_json, observation_json FROM native_stop_intents WHERE scenario_id = ?').get(intent.scenarioId) as
         { intent_json: string; observation_json: string | null } | undefined;
       if (prior) {
         const persisted = JSON.parse(prior.intent_json) as SandboxStopIntent;
+        assertNativeKey(persisted);
         if (persisted.accountId !== intent.accountId || persisted.instrumentId !== intent.instrumentId
           || persisted.entryRequestId !== intent.entryRequestId || persisted.lots !== intent.lots
           || persisted.stopNano !== intent.stopNano || persisted.limitNano !== intent.limitNano) throw new Error('Stop intent contradicts earlier evidence');
@@ -1011,13 +1058,14 @@ export class ScenarioJournal {
     finally { db.close(); }
   }
 
-  acknowledgeNativeStop(scenarioId: number, requestId: string, brokerStopId: string): void {
+  acknowledgeNativeStop(scenarioId: number, requestId: string, brokerStopId: string, expected?: NativeStopKey): void {
     const db = this.open();
     try {
       db.exec('BEGIN IMMEDIATE');
       const row = db.prepare('SELECT intent_json FROM native_stop_intents WHERE scenario_id = ?').get(scenarioId) as { intent_json: string } | undefined;
       if (!row) throw new Error('Stop intent was not found');
       const intent = JSON.parse(row.intent_json) as SandboxStopIntent;
+      assertNativeKey(intent, expected);
       if (intent.requestId !== requestId || intent.brokerStopId !== null || !brokerStopId || brokerStopId.length > 256
         || /[\u0000-\u001f\u007f]/.test(brokerStopId)) throw new Error('Stop acknowledgement contradicts earlier evidence');
       intent.brokerStopId = brokerStopId;
@@ -1031,13 +1079,14 @@ export class ScenarioJournal {
     finally { db.close(); }
   }
 
-  observeNativeStop(scenarioId: number, observation: SandboxStopObservation): void {
+  observeNativeStop(scenarioId: number, observation: SandboxStopObservation, expected?: NativeStopKey): void {
     const db = this.open();
     try {
       db.exec('BEGIN IMMEDIATE');
       const row = db.prepare('SELECT intent_json, observation_json FROM native_stop_intents WHERE scenario_id = ?').get(scenarioId) as
         { intent_json: string; observation_json: string | null } | undefined;
       if (!row || !(JSON.parse(row.intent_json) as SandboxStopIntent).brokerStopId) throw new Error('Stop acknowledgement is missing');
+      assertNativeKey(JSON.parse(row.intent_json) as SandboxStopIntent, expected);
       const prior = row.observation_json ? JSON.parse(row.observation_json) as SandboxStopObservation : null;
       if (prior && ((prior.status !== 'STOP_ORDER_STATUS_ACTIVE' && observation.status !== prior.status)
         || (prior.childOrderId && prior.childOrderId !== observation.childOrderId))) throw new Error('Stop observation contradicts earlier evidence');
@@ -1069,7 +1118,7 @@ export class ScenarioJournal {
     } finally { db.close(); }
   }
 
-  claimSandboxSessionExit(input: { scenarioId: number; accountId: string; entryRequestId: string; instrumentId: string; lots: number; stopId: string }, now = new Date(), purpose: 'session' | 'technical-acceptance' = 'session') {
+  claimSandboxSessionExit(input: { scenarioId: number; accountId: string; entryRequestId: string; instrumentId: string; lots: number; stopId: string; generation?: number }, now = new Date(), purpose: 'session' | 'technical-acceptance' | 'target' = 'session', targetProof?: SandboxTargetProof) {
     const db = this.open();
     try {
       db.exec('BEGIN IMMEDIATE');
@@ -1079,10 +1128,17 @@ export class ScenarioJournal {
         assertTechnicalScope(this.toRecord(scenario), input.lots);
       }
       const prior = db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(input.scenarioId) as { intent_json: string } | undefined;
+      let targetConsumed = false;
       if (prior) {
         const intent = JSON.parse(prior.intent_json) as SandboxSessionExitIntent;
-        if (Object.entries(input).some(([key,value]) => intent[key as keyof SandboxSessionExitIntent] !== value)) throw new Error('Session exit identity changed');
-        db.exec('COMMIT'); return { claimed: false, intent };
+        targetConsumed = intent.targetConsumed === true || intent.purpose === 'target';
+        if (intent.phase !== 'restored') {
+          if (Object.entries(input).some(([key,value]) => (key === 'generation' ? sandboxCloseKey(intent).generation : intent[key as keyof SandboxSessionExitIntent]) !== value)
+            || (input.generation ?? 0) !== sandboxCloseKey(intent).generation) throw new Error('Session exit identity changed');
+          db.exec('COMMIT'); return { claimed: false, intent };
+        }
+        if (purpose !== 'session' || intent.purpose === 'session' || input.generation !== intent.restoreGeneration
+          || this.closeHistory(db,input.scenarioId).some(item=>item.intent.purpose==='session')) throw new Error('Only one new session close may follow target restoration');
       }
       const row = db.prepare(`SELECT o.*,e.snapshot_json,n.intent_json,n.observation_json FROM execution_orders o
         JOIN execution_evidence e ON e.execution_order_id=o.id JOIN native_stop_intents n ON n.scenario_id=o.scenario_id
@@ -1094,14 +1150,22 @@ export class ScenarioJournal {
         || !entry?.terminal || entry.lotsExecuted <= 0 || entry.commissionNano === null || entry.lotsExecuted !== input.lots
         || row.instrument_id !== input.instrumentId || row.order_request_id !== input.entryRequestId
         || native?.accountId !== input.accountId || native.brokerStopId !== input.stopId || native.lots !== input.lots
+        || nativeStopKey(native).generation !== (input.generation ?? 0)
         || native.entryRequestId !== input.entryRequestId || native.instrumentId !== input.instrumentId
         || observed?.status !== 'STOP_ORDER_STATUS_ACTIVE' || observed.childOrderId !== null || !Number.isFinite(now.getTime())
-        || (purpose !== 'technical-acceptance' && !sandboxSessionCloseDue(new Date(Math.max(...entry.stages.map(stage => Date.parse(stage.executedAt)))).toISOString(), now))
+        || (purpose === 'session' && !sandboxSessionCloseDue(new Date(Math.max(...entry.stages.map(stage => Date.parse(stage.executedAt)))).toISOString(), now))
         || db.prepare('SELECT scenario_id FROM sandbox_exit_evidence WHERE scenario_id=?').get(input.scenarioId)
         || db.prepare("SELECT id FROM execution_orders WHERE status IN ('accepted','submitting') AND scenario_id<>? LIMIT 1").get(input.scenarioId)) throw new Error('Session close requires an exclusive approved protected position');
+      if (purpose === 'target') {
+        if (targetConsumed) throw new Error('Target close has already been attempted');
+        this.validateTargetProof(db, input.scenarioId, entry, targetProof);
+        targetConsumed = true;
+      }
       const intent: SandboxSessionExitIntent = { ...input, requestId: randomUUID(), phase: 'cancel-claimed', createdAt: now.toISOString(),
-        submitClaimedAt: null, limitNano: null, brokerOrderId: null };
-      db.prepare('INSERT INTO sandbox_session_exit_intents (scenario_id,request_id,intent_json,updated_at) VALUES (?,?,?,?)')
+        submitClaimedAt: null, limitNano: null, brokerOrderId: null, generation: input.generation ?? 0, purpose, targetConsumed,
+        ...(purpose === 'target' ? { targetProof: targetProof! } : {}) };
+      db.prepare(`INSERT INTO sandbox_session_exit_intents (scenario_id,request_id,intent_json,updated_at) VALUES (?,?,?,?)
+        ON CONFLICT(scenario_id) DO UPDATE SET request_id=excluded.request_id,intent_json=excluded.intent_json,updated_at=excluded.updated_at`)
         .run(input.scenarioId,intent.requestId,JSON.stringify(intent),intent.createdAt);
       this.appendExecutionEvent(db,Number(row.id),'sandbox_session_cancel_claimed',{requestId:intent.requestId,purpose},intent.createdAt);
       this.bumpSandboxRevision(db);
@@ -1111,7 +1175,7 @@ export class ScenarioJournal {
     } catch(error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
   }
 
-  claimSandboxSessionSubmission(scenarioId: number, revision: string, limitNano: string, now = new Date()) {
+  claimSandboxSessionSubmission(scenarioId: number, revision: string, limitNano: string, now = new Date(), expected?: SandboxCloseKey, targetProof?: SandboxTargetProof) {
     nanoQuotation(limitNano);
     const db = this.open();
     try {
@@ -1119,7 +1183,9 @@ export class ScenarioJournal {
       const raw = db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(scenarioId) as { intent_json: string } | undefined;
       if (!raw) throw new Error('Session exit is not claimed');
       const intent = JSON.parse(raw.intent_json) as SandboxSessionExitIntent;
+      assertCloseKey(intent, expected);
       if (intent.phase === 'submitted') { db.exec('COMMIT'); return { claimed: false, intent }; }
+      if (intent.phase !== 'cancel-claimed') throw new Error('Close attempt no longer permits a SELL');
       const row = db.prepare(`SELECT o.id,o.status,o.order_request_id,e.snapshot_json,n.intent_json,n.observation_json FROM execution_orders o
         JOIN execution_evidence e ON e.execution_order_id=o.id JOIN native_stop_intents n ON n.scenario_id=o.scenario_id WHERE o.scenario_id=?`).get(scenarioId) as
         { id:number; status:string; order_request_id:string; snapshot_json:string|null; intent_json:string; observation_json:string|null };
@@ -1129,8 +1195,14 @@ export class ScenarioJournal {
       if (revision !== this.sandboxRevision(db) || row?.status !== 'accepted' || row.order_request_id !== intent.entryRequestId
         || !entry?.terminal || entry.lotsExecuted !== intent.lots || entry.commissionNano === null
         || stop?.status !== 'STOP_ORDER_STATUS_CANCELED' || stop.childOrderId !== null || native?.brokerStopId !== intent.stopId
+        || nativeStopKey(native).generation !== sandboxCloseKey(intent).generation
         || !Number.isFinite(now.getTime()) || now.getTime() < Date.parse(intent.createdAt)
         || db.prepare('SELECT scenario_id FROM sandbox_exit_evidence WHERE scenario_id=?').get(scenarioId)) throw new Error('Canceled stop and current session exit evidence are not confirmed');
+      if (intent.purpose === 'target') {
+        this.validateTargetProof(db, scenarioId, entry, targetProof, intent.targetProof);
+        if (limitNano !== targetProof!.targetNano) throw new Error('Target SELL must preserve its exact price floor');
+        intent.targetProof = targetProof!;
+      }
       intent.phase='submitted'; intent.limitNano=limitNano; intent.submitClaimedAt=now.toISOString();
       db.prepare('UPDATE sandbox_session_exit_intents SET intent_json=?,updated_at=? WHERE scenario_id=?').run(JSON.stringify(intent),intent.submitClaimedAt,scenarioId);
       this.appendExecutionEvent(db,row.id,'sandbox_session_sell_claimed',{requestId:intent.requestId,lots:intent.lots},intent.submitClaimedAt);
@@ -1138,12 +1210,13 @@ export class ScenarioJournal {
     } catch(error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
   }
 
-  acknowledgeSandboxSessionExit(scenarioId:number,requestId:string,brokerOrderId:string):void {
+  acknowledgeSandboxSessionExit(scenarioId:number,requestId:string,brokerOrderId:string,expected?:SandboxCloseKey):void {
     const db=this.open();
     try {
       db.exec('BEGIN IMMEDIATE');
       const raw=db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(scenarioId) as {intent_json:string}|undefined;
       if(!raw) throw new Error('Session exit intent is missing'); const intent=JSON.parse(raw.intent_json) as SandboxSessionExitIntent;
+      assertCloseKey(intent,expected);
       if(intent.phase!=='submitted'||intent.requestId!==requestId||!brokerOrderId||brokerOrderId.length>256||/[\u0000-\u001f\u007f]/.test(brokerOrderId)
         || (intent.brokerOrderId!==null&&intent.brokerOrderId!==brokerOrderId)) throw new Error('Session exit acknowledgement changed identity');
       if(intent.brokerOrderId===null) {
@@ -1156,7 +1229,182 @@ export class ScenarioJournal {
     } catch(error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
   }
 
-  recordSandboxExitEvidence(scenarioId: number, exit: SandboxOrderSnapshot, flatConfirmedAt: string | null, now = new Date()) {
+  private validateTargetProof(db: DatabaseSync, scenarioId: number, entry: SandboxOrderSnapshot, proof: SandboxTargetProof | undefined, original?: SandboxTargetProof): void {
+    const row = db.prepare('SELECT * FROM scenario_journal WHERE id=?').get(scenarioId) as JournalRow | undefined;
+    const snapshot = row ? recordObject(JSON.parse(row.snapshot_json) as unknown) : null;
+    const strategy = recordObject(snapshot?.tradingStrategy), instrument = recordObject(snapshot?.instrument), policy = recordObject(snapshot?.sandboxTargetExitPolicy);
+    if (!row || row.strategy !== 'intraday' || snapshot?.source !== 'intraday-scanner' || !isTradingStrategyId(strategy?.id)
+      || strategy.version !== '1' || getStrategyDescriptor(strategy.id).version !== '1'
+      || instrument?.instrumentId !== row.instrument_id || instrument.lotSize !== row.lot_size || typeof instrument.priceStep !== 'number'
+      || policy?.version !== '1' || policy.enabled !== true || typeof policy.commissionRateNano !== 'string' || typeof policy.slippageRateNano !== 'string'
+      || !/^(0|[1-9]\d{0,9})$/.test(policy.commissionRateNano) || !/^(0|[1-9]\d{0,9})$/.test(policy.slippageRateNano)) throw new Error('Original sandbox target policy is not confirmed');
+    const core = { lotSize: row.lot_size, targetNano: decimalPriceNano(row.target_price), stopNano: decimalPriceNano(row.stop_price),
+      tickNano: decimalPriceNano(instrument.priceStep) };
+    assertSandboxTargetProof(proof, entry, core);
+    if (!proof || proof.lots !== entry.lotsExecuted || BigInt(proof.commissionRateNano) < 3_000_000n
+      || BigInt(proof.commissionRateNano) < BigInt(policy.commissionRateNano)
+      || BigInt(proof.slippageRateNano) < BigInt(policy.slippageRateNano)
+      || BigInt(proof.slippageRateNano) < BigInt(row.slippage_rate === 0 ? '0' : decimalPriceNano(row.slippage_rate))) throw new Error('Target expenses do not preserve the original policy');
+    if (original && (['lotSize','lots','targetNano','stopNano','tickNano','commissionRateNano','slippageRateNano'] as const)
+      .some(key => original[key] !== proof[key])) throw new Error('Immutable target parameters changed');
+  }
+
+  recordCloseSellObservation(key: SandboxCloseKey, snapshot: SandboxOrderSnapshot, now = new Date()): void {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const raw = db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(key.scenarioId) as {intent_json:string}|undefined;
+      if (!raw) throw new Error('Close attempt is absent');
+      const intent = JSON.parse(raw.intent_json) as SandboxSessionExitIntent; assertCloseKey(intent,key);
+      const row = db.prepare(`SELECT o.id,e.snapshot_json,s.lot_size FROM execution_orders o JOIN execution_evidence e ON e.execution_order_id=o.id
+        JOIN scenario_journal s ON s.id=o.scenario_id WHERE o.scenario_id=?`).get(key.scenarioId) as {id:number;snapshot_json:string;lot_size:number}|undefined;
+      if (!row || intent.phase !== 'submitted' || !intent.submitClaimedAt || !Number.isFinite(now.getTime())
+        || now.getTime() < Date.parse(intent.submitClaimedAt) || (intent.brokerOrderId !== null && intent.brokerOrderId !== snapshot.brokerOrderId)
+        || snapshot.stages.some(stage => Date.parse(stage.executedAt) < Date.parse(intent.submitClaimedAt!))) throw new Error('Close SELL identity or phase is not confirmed');
+      analyzeSandboxRoundTrip(JSON.parse(row.snapshot_json) as SandboxOrderSnapshot,snapshot,row.lot_size);
+      if (intent.sellSnapshot) assertSnapshotProgress(intent.sellSnapshot,snapshot);
+      const changed = JSON.stringify(intent.sellSnapshot) !== JSON.stringify(snapshot) || intent.brokerOrderId === null;
+      intent.brokerOrderId = snapshot.brokerOrderId; intent.sellSnapshot = snapshot; intent.sellObservedAt = now.toISOString();
+      db.prepare('UPDATE sandbox_session_exit_intents SET intent_json=?,updated_at=? WHERE scenario_id=?').run(JSON.stringify(intent),now.toISOString(),key.scenarioId);
+      if (changed) { this.appendExecutionEvent(db,row.id,'sandbox_close_sell_observed',{requestId:key.requestId,snapshot},now.toISOString()); this.bumpSandboxRevision(db); }
+      db.exec('COMMIT');
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  claimProtectionRestore(key: SandboxCloseKey, revision: string, proof: SandboxProtectionRestoreProof, now = new Date()) {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const raw = db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(key.scenarioId) as {intent_json:string}|undefined;
+      const n = db.prepare('SELECT intent_json,observation_json FROM native_stop_intents WHERE scenario_id=?').get(key.scenarioId) as {intent_json:string;observation_json:string|null}|undefined;
+      if (!raw || !n) throw new Error('Protection restoration is not claimed');
+      const intent = JSON.parse(raw.intent_json) as SandboxSessionExitIntent; assertCloseKey(intent,key);
+      const native = JSON.parse(n.intent_json) as SandboxStopIntent;
+      const observed = n.observation_json ? JSON.parse(n.observation_json) as SandboxStopObservation : null;
+      if (intent.phase === 'restore-claimed' || intent.phase === 'restored') {
+        if (intent.restoreGeneration !== nativeStopKey(native).generation || native.accountId !== intent.accountId) throw new Error('Restoration generation changed');
+        db.exec('COMMIT'); return { claimed:false, record:{intent:native,observation:observed}, intent };
+      }
+      const row = db.prepare(`SELECT o.*,e.snapshot_json,s.lot_size FROM execution_orders o JOIN execution_evidence e ON e.execution_order_id=o.id
+        JOIN scenario_journal s ON s.id=o.scenario_id WHERE o.scenario_id=?`).get(key.scenarioId) as (ExecutionOrderRow & {snapshot_json:string;lot_size:number})|undefined;
+      const entry = row?.snapshot_json ? JSON.parse(row.snapshot_json) as SandboxOrderSnapshot : null;
+      const age = now.getTime() - Date.parse(proof.checkedAt);
+      if (!['target','session'].includes(intent.purpose??'') || intent.targetConsumed !== true || revision !== this.sandboxRevision(db)
+        || nativeStopKey(native).generation !== key.generation || key.generation >= 1_000_000
+        || native.brokerStopId !== intent.stopId || native.accountId !== intent.accountId || native.entryRequestId !== intent.entryRequestId
+        || native.instrumentId !== intent.instrumentId
+        || observed?.status !== 'STOP_ORDER_STATUS_CANCELED' || observed.childOrderId !== null
+        || proof.stop.status !== 'STOP_ORDER_STATUS_CANCELED' || proof.stop.childOrderId !== null
+        || !Number.isFinite(age) || age < 0 || age > 15_000 || proof.noActiveOrders !== true || proof.noOtherActiveStops !== true
+        || !row || row.mode !== 'sandbox' || row.status !== 'accepted' || row.side !== 'long' || !row.approved_by_chat_id
+        || !entry?.terminal || entry.lotsExecuted !== intent.lots || native.lots !== intent.lots
+        || row.instrument_id !== intent.instrumentId || row.order_request_id !== intent.entryRequestId
+        || proof.accountId !== intent.accountId || proof.instrumentId !== intent.instrumentId || proof.lots !== intent.lots || proof.lotSize !== row.lot_size
+        || !/^\d{1,16}$/.test(proof.positionUnits) || BigInt(proof.positionUnits) !== BigInt(intent.lots) * BigInt(row.lot_size)
+        || db.prepare('SELECT scenario_id FROM sandbox_exit_evidence WHERE scenario_id=?').get(key.scenarioId)
+        || db.prepare("SELECT id FROM execution_orders WHERE status IN ('accepted','submitting') AND scenario_id<>? LIMIT 1").get(key.scenarioId)) throw new Error('Fresh exclusive restoration evidence is not confirmed');
+      if (intent.phase === 'submitted') {
+        const sell = intent.sellSnapshot;
+        if (!sell || !sell.terminal || !['EXECUTION_REPORT_STATUS_REJECTED','EXECUTION_REPORT_STATUS_CANCELLED'].includes(sell.executionStatus)
+          || sell.lotsExecuted !== 0 || sell.stages.length !== 0 || sell.grossNano !== '0' || !intent.brokerOrderId
+          || sell.brokerOrderId !== intent.brokerOrderId) throw new Error('Unknown or nonzero SELL forbids a new stop');
+        analyzeSandboxRoundTrip(entry,sell,row.lot_size);
+      } else if (intent.phase !== 'cancel-claimed' || intent.submitClaimedAt !== null || intent.brokerOrderId !== null || intent.sellSnapshot) {
+        throw new Error('Close attempt cannot be aborted safely');
+      }
+      if (!intent.sellSnapshot) analyzeSandboxRoundTrip(entry,{brokerOrderId:randomUUID(),executionStatus:'EXECUTION_REPORT_STATUS_NEW',
+        lotsExecuted:0,terminal:false,grossNano:'0',commissionNano:'0',stages:[]},row.lot_size);
+      const at = now.toISOString();
+      db.prepare('INSERT INTO native_stop_history (scenario_id,generation,request_id,intent_json,observation_json,archived_at) VALUES (?,?,?,?,?,?)')
+        .run(key.scenarioId,key.generation,native.requestId,n.intent_json,n.observation_json!,at);
+      db.prepare('INSERT INTO sandbox_close_history (request_id,scenario_id,generation,intent_json,native_json,archived_at) VALUES (?,?,?,?,?,?)')
+        .run(key.requestId,key.scenarioId,key.generation,raw.intent_json,JSON.stringify({intent:native,observation:observed}),at);
+      const restored: SandboxStopIntent = { ...native, generation:key.generation+1, requestId:randomUUID(), createdAt:at, brokerStopId:null };
+      intent.phase='restore-claimed'; intent.restoreGeneration=key.generation+1;
+      db.prepare('UPDATE native_stop_intents SET request_id=?,intent_json=?,observation_json=NULL,updated_at=? WHERE scenario_id=?')
+        .run(restored.requestId,JSON.stringify(restored),at,key.scenarioId);
+      db.prepare('UPDATE sandbox_session_exit_intents SET intent_json=?,updated_at=? WHERE scenario_id=?').run(JSON.stringify(intent),at,key.scenarioId);
+      this.appendExecutionEvent(db,Number(row.id),'sandbox_protection_restore_claimed',{closeRequestId:key.requestId,generation:restored.generation,requestId:restored.requestId},at);
+      this.bumpSandboxRevision(db);
+      db.prepare(`INSERT INTO runtime_state (key,value,updated_at) VALUES ('execution.kill_switch','true',?)
+        ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at`).run(at);
+      db.exec('COMMIT'); return {claimed:true,record:{intent:restored,observation:null},intent};
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  markProtectionRestored(key: SandboxCloseKey, expected: NativeStopKey, now = new Date()): void {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const row=db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(key.scenarioId) as {intent_json:string}|undefined;
+      const raw=db.prepare('SELECT intent_json,observation_json FROM native_stop_intents WHERE scenario_id=?').get(key.scenarioId) as {intent_json:string;observation_json:string|null}|undefined;
+      if (!row || !raw) throw new Error('Restoration is absent');
+      const intent=JSON.parse(row.intent_json) as SandboxSessionExitIntent; assertCloseKey(intent,key);
+      const native=JSON.parse(raw.intent_json) as SandboxStopIntent; assertNativeKey(native,expected);
+      const observed=raw.observation_json ? JSON.parse(raw.observation_json) as SandboxStopObservation : null;
+      if (!['restore-claimed','restored'].includes(intent.phase) || intent.restoreGeneration !== expected.generation
+        || observed?.status !== 'STOP_ORDER_STATUS_ACTIVE' || observed.childOrderId !== null || !native.brokerStopId || !Number.isFinite(now.getTime())
+        || now.getTime()<Date.parse(native.createdAt)) throw new Error('Restored ACTIVE protection is not confirmed');
+      if (intent.phase !== 'restored') {
+        intent.phase='restored'; db.prepare('UPDATE sandbox_session_exit_intents SET intent_json=?,updated_at=? WHERE scenario_id=?').run(JSON.stringify(intent),now.toISOString(),key.scenarioId);
+        const order=db.prepare('SELECT id FROM execution_orders WHERE scenario_id=?').get(key.scenarioId) as {id:number};
+        this.appendExecutionEvent(db,order.id,'sandbox_protection_restored',{generation:expected.generation},now.toISOString()); this.bumpSandboxRevision(db);
+      }
+      db.exec('COMMIT');
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  private closeHistory(db: DatabaseSync, scenarioId: number): SandboxCloseHistoryRecord[] {
+    const rows=db.prepare(`SELECT h.intent_json,h.native_json,h.archived_at,
+      (SELECT snapshot_json FROM sandbox_close_history_observations v WHERE v.request_id=h.request_id ORDER BY v.id DESC LIMIT 1) AS snapshot_json,
+      (SELECT observed_at FROM sandbox_close_history_observations v WHERE v.request_id=h.request_id ORDER BY v.id DESC LIMIT 1) AS observed_at
+      FROM sandbox_close_history h WHERE scenario_id=? ORDER BY generation`).all(scenarioId) as Array<{intent_json:string;native_json:string;archived_at:string;snapshot_json:string|null;observed_at:string|null}>;
+    return rows.map(row=>{ const intent=JSON.parse(row.intent_json) as SandboxSessionExitIntent;
+      return {intent,native:JSON.parse(row.native_json) as NativeStopRecord,
+        sellSnapshot:row.snapshot_json ? JSON.parse(row.snapshot_json) as SandboxOrderSnapshot : intent.sellSnapshot??null,
+        observedAt:row.observed_at??intent.sellObservedAt??row.archived_at}; });
+  }
+
+  getSandboxCloseHistory(scenarioId: number): SandboxCloseHistoryRecord[] {
+    const db=this.open(); try { return this.closeHistory(db,scenarioId); } finally { db.close(); }
+  }
+
+  refreshArchivedCloseObservation(key: SandboxCloseKey, snapshot: SandboxOrderSnapshot, now = new Date()): void {
+    const db=this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const history=this.closeHistory(db,key.scenarioId).find(item=>item.intent.requestId===key.requestId);
+      if (!history) throw new Error('Archived close attempt is absent'); assertCloseKey(history.intent,key);
+      const row=db.prepare(`SELECT o.id,e.snapshot_json,s.lot_size FROM execution_orders o JOIN execution_evidence e ON e.execution_order_id=o.id
+        JOIN scenario_journal s ON s.id=o.scenario_id WHERE o.scenario_id=?`).get(key.scenarioId) as {id:number;snapshot_json:string;lot_size:number};
+      if (!history.intent.submitClaimedAt || !history.sellSnapshot || snapshot.brokerOrderId!==history.sellSnapshot.brokerOrderId
+        || !snapshot.terminal || snapshot.lotsExecuted!==0 || snapshot.stages.length!==0 || snapshot.grossNano!=='0' || !Number.isFinite(now.getTime())
+        || now.getTime()<Date.parse(history.observedAt)) throw new Error('Archived zero-fill SELL identity changed');
+      analyzeSandboxRoundTrip(JSON.parse(row.snapshot_json) as SandboxOrderSnapshot,snapshot,row.lot_size);
+      assertSnapshotProgress(history.sellSnapshot,snapshot);
+      if (JSON.stringify(history.sellSnapshot)!==JSON.stringify(snapshot)) {
+        db.prepare('INSERT INTO sandbox_close_history_observations (request_id,snapshot_json,observed_at) VALUES (?,?,?)').run(key.requestId,JSON.stringify(snapshot),now.toISOString());
+        this.appendExecutionEvent(db,row.id,'sandbox_archived_close_observed',{requestId:key.requestId,snapshot},now.toISOString()); this.bumpSandboxRevision(db);
+      }
+      db.exec('COMMIT');
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  private failedCloseCosts(db: DatabaseSync, scenarioId: number) {
+    const history=this.closeHistory(db,scenarioId); let fees=0n; let complete=true;
+    for (const item of history) {
+      if (!item.intent.submitClaimedAt) continue;
+      if (item.sellSnapshot?.commissionNano===null || item.sellSnapshot?.commissionNano===undefined) complete=false;
+      else fees+=BigInt(item.sellSnapshot.commissionNano);
+    }
+    return {commissionNano:complete?String(fees):null,attempts:history.length};
+  }
+
+  getSandboxFailedCloseCosts(scenarioId: number) {
+    const db=this.open(); try { return this.failedCloseCosts(db,scenarioId); } finally { db.close(); }
+  }
+
+  recordSandboxExitEvidence(scenarioId: number, exit: SandboxOrderSnapshot, flatConfirmedAt: string | null, now = new Date(), expected?: NativeStopKey, expectedClose?: SandboxCloseKey) {
     const db = this.open();
     try {
       db.exec('BEGIN IMMEDIATE');
@@ -1169,6 +1417,7 @@ export class ScenarioJournal {
       if (!row || row.mode !== 'sandbox' || row.status !== 'accepted' || !row.approved_by_chat_id || !row.entry_json || !row.observation_json) throw new Error();
       const entry = JSON.parse(row.entry_json) as SandboxOrderSnapshot;
       const intent = JSON.parse(row.intent_json) as SandboxStopIntent;
+      assertNativeKey(intent,expected);
       const stop = JSON.parse(row.observation_json) as SandboxStopObservation;
       const sessionRaw = db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(scenarioId) as {intent_json:string}|undefined;
       const session = sessionRaw ? JSON.parse(sessionRaw.intent_json) as SandboxSessionExitIntent : null;
@@ -1176,6 +1425,8 @@ export class ScenarioJournal {
       const sessionExit = stop.status === 'STOP_ORDER_STATUS_CANCELED' && stop.childOrderId === null && session?.phase === 'submitted'
         && session.stopId === intent.brokerStopId && session.accountId === intent.accountId && session.entryRequestId === intent.entryRequestId
         && session.lots === entry.lotsExecuted && session.brokerOrderId === exit.brokerOrderId;
+      if (sessionExit || (session?.purpose==='target' && sandboxCloseKey(session).generation===nativeStopKey(intent).generation)) assertCloseKey(session!,expectedClose);
+      if (sessionExit && sandboxCloseKey(session!).generation!==nativeStopKey(intent).generation) throw new Error('Close stop generation changed');
       if (!intent.brokerStopId || (!nativeExit && !sessionExit) || intent.lots !== entry.lotsExecuted || !Number.isFinite(now.getTime())) throw new Error();
       if (sessionExit && (!session.submitClaimedAt || !Number.isFinite(Date.parse(session.submitClaimedAt))
         || exit.stages.some(stage => Date.parse(stage.executedAt) < Date.parse(session.submitClaimedAt!)))) throw new Error();
@@ -1193,8 +1444,12 @@ export class ScenarioJournal {
         executionStatus: exit.executionStatus, lotsExecuted: exit.lotsExecuted, grossNano: exit.grossNano, commissionNano: exit.commissionNano,
       }, now.toISOString());
       if (!prior || prior.snapshot_json !== serialized || (prior.flat_confirmed_at === null) !== (flatConfirmedAt === null)) this.bumpSandboxRevision(db);
+      const historicalCosts=this.failedCloseCosts(db,scenarioId);
+      const netPnlNano=result.netPnlNano===null || historicalCosts.commissionNano===null ? null
+        : String(BigInt(result.netPnlNano)-BigInt(historicalCosts.commissionNano));
       db.exec('COMMIT');
-      return { ...result, flatConfirmedAt, observedAt: now.toISOString(), complete: result.fullySold && result.netPnlNano !== null && flatConfirmedAt !== null };
+      return { ...result, netPnlNano, failedCloseFeesNano:historicalCosts.commissionNano, failedCloseAttempts:historicalCosts.attempts,
+        flatConfirmedAt, observedAt: now.toISOString(), complete: result.fullySold && netPnlNano !== null && flatConfirmedAt !== null };
     } catch { try { db.exec('ROLLBACK'); } catch {} throw new Error('Sandbox exit contradicts the approved stop or earlier evidence'); }
     finally { db.close(); }
   }
@@ -1210,8 +1465,11 @@ export class ScenarioJournal {
         Array<{ scenario_id: number; exit_json: string; entry_json: string; lot_size: number; flat_confirmed_at: string | null; observed_at: string }>;
       return rows.map(row => {
         const result = analyzeSandboxRoundTrip(JSON.parse(row.entry_json) as SandboxOrderSnapshot, JSON.parse(row.exit_json) as SandboxOrderSnapshot, row.lot_size);
-        return { scenarioId: row.scenario_id, ...result, flatConfirmedAt: row.flat_confirmed_at, observedAt: row.observed_at,
-          complete: result.fullySold && result.netPnlNano !== null && row.flat_confirmed_at !== null };
+        const costs=this.failedCloseCosts(db,row.scenario_id);
+        const netPnlNano=result.netPnlNano===null || costs.commissionNano===null ? null : String(BigInt(result.netPnlNano)-BigInt(costs.commissionNano));
+        return { scenarioId: row.scenario_id, ...result, netPnlNano, failedCloseFeesNano:costs.commissionNano, failedCloseAttempts:costs.attempts,
+          flatConfirmedAt: row.flat_confirmed_at, observedAt: row.observed_at,
+          complete: result.fullySold && netPnlNano !== null && row.flat_confirmed_at !== null };
       });
     } finally { db.close(); }
   }
@@ -1330,15 +1588,15 @@ export class ScenarioJournal {
           order_request_id: string; instrument_id: string; lots: number; lot_size: number; slippage_rate: number;
           entry_json: string | null; exit_json: string | null; flat_confirmed_at: string | null; observed_at: string | null;
           intent_json: string | null; observation_json: string | null; session_json: string | null }>;
-      const orders = rows.slice(0, limit).map(row => ({ scenarioId: row.scenario_id, status: row.status, side: row.side,
+      const orders = rows.slice(0, limit).map(row => { const costs=this.failedCloseCosts(db,row.scenario_id); return ({ scenarioId: row.scenario_id, status: row.status, side: row.side,
         approved: Boolean(row.approved_by_chat_id), requestId: row.order_request_id, instrumentId: row.instrument_id,
-        lots: row.lots, lotSize: row.lot_size, slippageRate: row.slippage_rate,
+        lots: row.lots, lotSize: row.lot_size, slippageRate: row.slippage_rate, failedCloseFeesNano:costs.commissionNano, failedCloseAttempts:costs.attempts,
         entry: row.entry_json ? JSON.parse(row.entry_json) as SandboxOrderSnapshot : null,
         exit: row.exit_json ? { snapshot: JSON.parse(row.exit_json) as SandboxOrderSnapshot, flatConfirmedAt: row.flat_confirmed_at,
           observedAt: row.observed_at! } : null,
         session: row.session_json ? JSON.parse(row.session_json) as SandboxSessionExitIntent : null,
         native: row.intent_json ? { intent: JSON.parse(row.intent_json) as SandboxStopIntent,
-          observation: row.observation_json ? JSON.parse(row.observation_json) as SandboxStopObservation : null } : null }));
+          observation: row.observation_json ? JSON.parse(row.observation_json) as SandboxStopObservation : null } : null }); });
       db.exec('COMMIT'); return { revision, orders, morePending: rows.length > limit };
     } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
   }

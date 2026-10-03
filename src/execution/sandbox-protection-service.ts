@@ -4,7 +4,7 @@ import type { JournalScenarioRecord } from '../journal/scenario-journal.js';
 import { ScenarioJournal, type NativeStopRecord } from '../journal/scenario-journal.js';
 import { assessLivePilotRisk } from './live-pilot-risk.js';
 import { parseSandboxOrderState } from './sandbox-order-state.js';
-import { assertNoActiveSandboxStops, assertSandboxPosition, decimalPriceNano, parseSandboxStop } from './sandbox-stop-state.js';
+import { assertNoActiveSandboxStops, assertSandboxPosition, decimalPriceNano, nativeStopKey, parseSandboxStop } from './sandbox-stop-state.js';
 import type { TInvestOrderClient } from './tinvest-order-client.js';
 import { assertNoSandboxOrders, sandboxFlatCashNano } from './sandbox-flat-account.js';
 
@@ -66,9 +66,10 @@ export class SandboxProtectionService {
         createdAt: now.toISOString(), brokerStopId: null });
       if (!claim.claimed) return await this.verify(accountId, claim.record, now);
       const intent = claim.record.intent;
+      const expectedNative = nativeStopKey(intent);
       const brokerId = await this.client.postSandboxStopLimit({ mode: 'sandbox', accountId, instrumentId: intent.instrumentId,
         requestId: intent.requestId, lots: intent.lots, stopNano: intent.stopNano, limitNano: intent.limitNano });
-      this.journal.acknowledgeNativeStop(scenarioId, intent.requestId, brokerId);
+      this.journal.acknowledgeNativeStop(scenarioId, intent.requestId, brokerId, expectedNative);
       return await this.verify(accountId, this.journal.getNativeStop(scenarioId)!, now);
     } catch {
       this.journal.setExecutionKilled(true);
@@ -78,6 +79,7 @@ export class SandboxProtectionService {
 
   private async verify(accountId: string, record: NativeStopRecord, now: Date) {
     if (record.intent.accountId !== accountId || !record.intent.brokerStopId) throw new Error();
+    const expectedNative = nativeStopKey(record.intent);
     const entry = this.journal.getExecutionSnapshot(record.intent.scenarioId);
     const scenario = this.journal.getScenario(record.intent.scenarioId);
     if (!entry?.terminal || entry.lotsExecuted !== record.intent.lots || !scenario) throw new Error();
@@ -86,7 +88,7 @@ export class SandboxProtectionService {
       assertSandboxPosition(await this.client.getSandboxPositions(accountId), accountId, record.intent.instrumentId,
         BigInt(record.intent.lots) * BigInt(scenario.input.lotSize));
     }
-    this.journal.observeNativeStop(record.intent.scenarioId, observation);
+    this.journal.observeNativeStop(record.intent.scenarioId, observation, expectedNative);
     if (observation.status !== 'STOP_ORDER_STATUS_ACTIVE') this.journal.setExecutionKilled(true);
     // Executed STOP means a child order was CREATED, not that the position is flat.
     return { status: observation.status, lots: record.intent.lots, positionClosed: false as const };

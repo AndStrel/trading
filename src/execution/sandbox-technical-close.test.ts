@@ -39,6 +39,7 @@ function fixture() {
       ...(state.stop==='STOP_ORDER_STATUS_EXECUTED'?{exchangeOrderId:'exit'}:{}),instrumentUid:'vtbr',currency:'rub',direction:'STOP_ORDER_DIRECTION_SELL',orderType:'STOP_ORDER_TYPE_STOP_LIMIT',
       lotsRequested:'1',stopPrice:{currency:'rub',units:'51',nano:0},price:{currency:'rub',units:'51',nano:0},createDate:'2026-10-02T08:59:02Z'}]})),
     cancelSandboxStop:vi.fn(async()=>{state.stop='STOP_ORDER_STATUS_CANCELED';}),
+    postSandboxStopLimit:vi.fn(),
     postSandboxSessionExit:vi.fn(async(input:{requestId:string})=>{state.sellRequest=input.requestId;state.sold=true;return 'exit';})};
   const market={getInstrumentBy:vi.fn(async()=>({instrument:{uid:'vtbr',ticker:'VTBR',classCode:'TQBR',instrumentType:'share',currency:'rub',lot:1,
     apiTradeAvailableFlag:true,sellAvailableFlag:true,minPriceIncrement:{units:'0',nano:10000000}}})),

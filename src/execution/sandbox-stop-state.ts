@@ -17,7 +17,14 @@ export type SandboxStopIntent = {
   scenarioId: number; accountId: string; requestId: string; instrumentId: string;
   entryRequestId: string; lots: number; stopNano: string; limitNano: string; createdAt: string;
   brokerStopId: string | null;
+  generation?: number;
 };
+export type NativeStopKey = { scenarioId: number; generation: number; requestId: string; brokerStopId: string | null };
+export function nativeStopKey(intent: SandboxStopIntent): NativeStopKey {
+  const generation = intent.generation ?? 0;
+  if (!Number.isSafeInteger(generation) || generation < 0 || generation > 1_000_000) throw new Error('Invalid native stop generation');
+  return { scenarioId: intent.scenarioId, generation, requestId: intent.requestId, brokerStopId: intent.brokerStopId };
+}
 export type SandboxStopObservation = { status: z.infer<typeof status>; childOrderId: string | null };
 
 export function decimalPriceNano(value: number): string {

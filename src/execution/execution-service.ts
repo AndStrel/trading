@@ -385,6 +385,7 @@ export class ExecutionService {
           if (!this.sessionClose) throw new Error('Sandbox session closing module is not connected');
           const closed = await this.sessionClose.advance(this.accountId!, order.scenarioId, now);
           if (closed) {
+            if (closed.kind === 'restored') { result.active++; continue; }
             if (closed.kind === 'native') result.triggered++;
             if (closed.complete) result.closed++; else result.unconfirmed++;
             continue;

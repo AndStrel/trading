@@ -5,6 +5,7 @@ import { evaluateTradingSignal, type TradingSignalInput } from '../strategies/si
 import { TradingSelectionController, type TradingSelection } from '../strategies/selection.js';
 import type { TradingStrategyId } from '../strategies/catalog.js';
 import { sandboxBidValue } from '../execution/sandbox-loss-policy.js';
+import { decimalPriceNano } from '../execution/sandbox-stop-state.js';
 import { quotationToNumber, type Quotation } from '../domain/money.js';
 import { assessTradeScenario } from '../domain/trade-scenario.js';
 import { calculateTradePlan } from '../domain/trade-plan.js';
@@ -606,6 +607,11 @@ export class IntradayScanner {
         source: 'intraday-scanner',
         tradingSelection: selection,
         tradingStrategy: {id:selection.strategyId,version:'1',referenceStartMinutes:this.config.scanner.sessionStartMinutes},
+        sandboxTargetExitPolicy: {
+          version:'1', enabled:this.config.execution.sandboxTargetExitEnabled === true,
+          commissionRateNano:decimalPriceNano(Math.max(0.003,this.config.commissionRate)),
+          slippageRateNano:this.config.scanner.slippageRate === 0 ? '0' : decimalPriceNano(this.config.scanner.slippageRate),
+        },
         instrument: {
           ticker: candidate.instrument.ticker,
           label: candidate.instrument.label,
