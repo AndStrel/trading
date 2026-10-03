@@ -99,7 +99,13 @@ test('source must be a private regular 0600 file', () => {
     assert.ok(!fs.existsSync(f.output));
   }
   const f = fixture();
-  assert.equal(prepareLocalReadCapsule({ source: f.directory, output: f.output }).reason, 'source-not-private');
+  // Keep the immediate parent private on both macOS and Linux. Passing the
+  // fixture root itself makes this case depend on the host temp parent mode.
+  const directorySource = join(f.directory, 'source-directory');
+  fs.mkdirSync(directorySource, { mode: 0o700 });
+  assert.equal(prepareLocalReadCapsule({ source: directorySource, output: f.output }).reason, 'source-not-private');
+  assert.ok(fs.lstatSync(directorySource).isDirectory());
+  assert.ok(!fs.existsSync(f.output));
 });
 
 test('source or output immediate parent must already be private 0700', () => {
