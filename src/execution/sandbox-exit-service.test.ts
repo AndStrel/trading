@@ -11,13 +11,15 @@ import { nativeStopKey } from './sandbox-stop-state.js';
 import { sandboxCloseKey } from './sandbox-session-policy.js';
 import { sandboxTargetEconomics } from './sandbox-target-policy.js';
 import { buildMiniAppView } from '../web/mini-app-view.js';
+import { seedPreparedSandbox } from './sandbox-prepared.test-helper.js';
+import { sandboxBootstrapKey } from './sandbox-prepared-account.js';
 
 const now = new Date('2026-10-01T08:00:00.000Z');
 const entryAt = '2026-10-01T07:55:00.000Z'; const stopAt = '2026-10-01T07:58:00.000Z'; const exitAt = '2026-10-01T07:59:00.000Z';
 const directories: string[] = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
 
-function setup(entryLots = 5, stopExecuted = true, targetMetadata = false) {
+function setup(entryLots = 5, stopExecuted = true, targetMetadata = false, withCashBaseline = false) {
   const directory = mkdtempSync(join(tmpdir(), 'trading-sandbox-exit-')); directories.push(directory);
   const path = join(directory, 'journal.sqlite'); const journal = new ScenarioJournal(path);
   const config = loadConfig({ T_INVEST_TOKEN: 'readonly-local', T_INVEST_TRADING_TOKEN: 'isolated-local',
@@ -42,7 +44,16 @@ function setup(entryLots = 5, stopExecuted = true, targetMetadata = false) {
     executedCommission: { currency: 'rub', units: '1', nano: 500000000 }, serviceCommission: { currency: 'rub', units: '0', nano: 500000000 } });
   const flat = () => ({ accountId: 'local-account', limitsLoadingInProgress: false, securities: [], futures: [], options: [],
     money: [{ currency: 'rub', units: '1000', nano: 0 }], blocked: [] });
-  journal.claimExecution(scenario.id, '42'); journal.markExecutionAccepted(scenario.id, 'local-entry', 'accepted', entryLots);
+  if (withCashBaseline) {
+    seedPreparedSandbox(journal, 'local-account'); journal.setExecutionKilled(false);
+    const raw = journal.getRuntimeState(sandboxBootstrapKey)!, generation = journal.getRuntimeState('execution.kill_generation')!;
+    const beforeEntry = '2026-10-01T07:54:59.000Z';
+    journal.claimExecution(scenario.id, '42', { from: '2026-09-30T21:00:00.000Z', to: '2026-10-01T21:00:00.000Z', now: beforeEntry,
+      maxOrders: 3, maxRiskRub: 60, singlePosition: true, preparedSandbox: { raw, generation, accountId: 'local-account' },
+      cashBaseline: { version: 1, accountId: 'local-account', entryRequestId: order.orderRequestId, cashNano: '1000000000000',
+        observedFrom: beforeEntry, observedAt: beforeEntry, ledgerRevision: journal.getSandboxLedgerRevision(), killGeneration: generation, preparedRaw: raw } });
+  } else journal.claimExecution(scenario.id, '42');
+  journal.markExecutionAccepted(scenario.id, 'local-entry', 'accepted', entryLots);
   journal.recordExecutionReconciliation(scenario.id, parseSandboxOrderState(entryPayload(), {
     requestId: order.orderRequestId, instrumentId: scenario.instrumentId, lots: 5, lotSize: 10 }, now));
   journal.claimNativeStop({ scenarioId: scenario.id, accountId: 'local-account', requestId: 'ed9e9b29-7867-4f5f-84bd-6ce7318a775a',
@@ -59,6 +70,7 @@ function setup(entryLots = 5, stopExecuted = true, targetMetadata = false) {
     getSandboxChildOrderState: vi.fn().mockImplementation(async () => childPayload()),
     getSandboxStopOrders: vi.fn().mockImplementation(async () => stopPayload()),
     getSandboxPositions: vi.fn().mockImplementation(async () => flat()), getSandboxOrders: vi.fn().mockResolvedValue({ orders: [] }),
+    getSandboxCashOperationsWindow: vi.fn(),
     postLimitOrder: vi.fn(), postSandboxStopLimit: vi.fn(), openSandboxAccount: vi.fn(), sandboxPayIn: vi.fn(), getSandboxAccounts: vi.fn() };
   const exits = new SandboxExitService(config, client, journal);
   const protection = { protect: vi.fn().mockResolvedValue({ status: 'STOP_ORDER_STATUS_EXECUTED', lots: entryLots, positionClosed: false }), preflightForEntry: vi.fn() };
@@ -68,6 +80,21 @@ function setup(entryLots = 5, stopExecuted = true, targetMetadata = false) {
     expect(client.openSandboxAccount).not.toHaveBeenCalled(); expect(client.sandboxPayIn).not.toHaveBeenCalled();
   };
   return { path, journal, config, scenario, order, client, exits, execution, noWrites, entryPayload, childPayload, flat, stopPayload };
+}
+
+function ownedCashWindow(accountId: string, from: string, to: string) {
+  const money = (units: string, nano = 0) => ({ currency: 'rub', units, nano });
+  const trade = (id: string, type: 'BUY' | 'SELL', date: string, gross: string, price: ReturnType<typeof money>, num: string) => ({
+    id, brokerAccountId: accountId, date, type: `OPERATION_TYPE_${type}`, state: 'OPERATION_STATE_EXECUTED', instrumentUid: 'local-instrument',
+    payment: money(gross), price, commission: money('2'), quantity: '50', quantityRest: '0', quantityDone: '50',
+    tradesInfo: { trades: [{ num, date, quantity: '50', price }] },
+  });
+  const fee = (id: string, parentOperationId: string, date: string) => ({ id, parentOperationId, brokerAccountId: accountId,
+    date, type: 'OPERATION_TYPE_BROKER_FEE', state: 'OPERATION_STATE_EXECUTED', payment: money('-2') });
+  return { version: 1 as const, accountId, from, to, pages: [{ cursor: null, payload: { hasNext: false, nextCursor: '', items: [
+    trade('cash-buy', 'BUY', entryAt, '-500', money('10'), 'local-buy'), fee('cash-buy-fee', 'cash-buy', entryAt),
+    trade('cash-sell', 'SELL', exitAt, '495', money('9', 900000000), 'local-sell'), fee('cash-sell-fee', 'cash-sell', exitAt),
+  ] } }] };
 }
 
 function submittedTarget(f: ReturnType<typeof setup>, status: 'EXECUTION_REPORT_STATUS_CANCELLED' | 'EXECUTION_REPORT_STATUS_NEW' = 'EXECUTION_REPORT_STATUS_CANCELLED') {
@@ -109,6 +136,58 @@ function restoredTarget(f: ReturnType<typeof setup>, markRestored = true) {
 }
 
 describe('Read-only sandbox sale evidence and durable accounting', () => {
+  it('proves exact cash only with the immutable winning baseline and fully owned unfiltered broker operations', async () => {
+    const f = setup(5, true, false, true);
+    f.client.getSandboxPositions.mockResolvedValue({ ...f.flat(), money: [{ currency: 'rub', units: '991', nano: 0 }] });
+    f.client.getSandboxCashOperationsWindow.mockImplementation(async (account: string, from: string, to: string) => ownedCashWindow(account, from, to));
+    const result = await f.exits.reconcile('local-account', f.scenario.id, now);
+    expect(result).toMatchObject({ complete: true, cashProven: true, netPnlNano: '-9000000000',
+      cashReconciliation: { status: 'reconciled', deltaNano: '-9000000000', expectedDeltaNano: '-9000000000' } });
+    expect(f.journal.listSandboxResults()[0]?.cashProven).toBe(true);
+    expect(f.journal.getSandboxCashObservations(f.scenario.id)).toHaveLength(1);
+    f.noWrites();
+  });
+
+  it.each(['missing-operations', 'foreign-deposit', 'offsetting-funding', 'late-fee'])
+    ('keeps %s cash evidence incomplete or mismatched without funding, retry or a tolerance', async condition => {
+      const f = setup(5, true, false, true);
+      f.client.getSandboxPositions.mockResolvedValue({ ...f.flat(), money: [{ currency: 'rub', units: condition === 'foreign-deposit' ? '992' : '991', nano: 0 }] });
+      f.client.getSandboxCashOperationsWindow.mockImplementation(async (account: string, from: string, to: string) => {
+        if (condition === 'missing-operations') throw new Error('synthetic private transport failure');
+        const window = ownedCashWindow(account, from, to);
+        if (condition === 'offsetting-funding') {
+          const funding = (id: string, type: string, units: string) => ({ id, type, brokerAccountId: account, date: exitAt,
+            state: 'OPERATION_STATE_EXECUTED', payment: { currency: 'rub', units, nano: 0 } });
+          (window.pages[0]!.payload.items as unknown[]).push(funding('foreign-input', 'OPERATION_TYPE_INPUT', '1'),
+            funding('foreign-output', 'OPERATION_TYPE_OUTPUT', '-1'));
+        }
+        return window;
+      });
+      if (condition === 'late-fee') f.client.getSandboxOrderState.mockResolvedValue({ ...f.entryPayload(),
+        executedCommission: { currency: 'rub', units: '2', nano: 500000000 } });
+      const result = await f.exits.reconcile('local-account', f.scenario.id, now);
+      expect(result).toMatchObject({ complete: true, cashProven: false,
+        cashReconciliation: { status: ['foreign-deposit', 'late-fee'].includes(condition) ? 'mismatch' : 'incomplete' } });
+      expect(f.journal.isExecutionKilled()).toBe(true); f.noWrites();
+    });
+
+  it.each(['kill', 'prepared', 'selection', 'late-fee'])
+    ('rejects a %s change while the full account cursor read is pending', async condition => {
+      const f = setup(5, true, false, true);
+      f.client.getSandboxPositions.mockResolvedValue({ ...f.flat(), money: [{ currency: 'rub', units: '991', nano: 0 }] });
+      f.client.getSandboxCashOperationsWindow.mockImplementation(async (account: string, from: string, to: string) => {
+        if (condition === 'kill') f.journal.setExecutionKilled(true);
+        if (condition === 'prepared') f.journal.setRuntimeState(sandboxBootstrapKey, '{}');
+        if (condition === 'selection') f.journal.setRuntimeState('trading.selection.v1', '{"revision":99}');
+        if (condition === 'late-fee') f.journal.recordExecutionReconciliation(f.scenario.id,
+          { ...f.journal.getExecutionSnapshot(f.scenario.id)!, commissionNano: '3000000000' });
+        return ownedCashWindow(account, from, to);
+      });
+      await expect(f.exits.reconcile('local-account', f.scenario.id, now)).rejects.toThrow('prior risk remains reserved');
+      expect(f.journal.getSandboxCashObservations(f.scenario.id)).toEqual([]);
+      expect(f.journal.listSandboxResults()[0]?.cashProven).toBe(false);
+      f.noWrites();
+    });
   it('confirms known child, full sale, fees and empty account without any broker writes or reserve release', async () => {
     const f = setup(); f.journal.setExecutionKilled(true);
     expect(await f.exits.reconcile('local-account', f.scenario.id, now)).toMatchObject({ soldLots: 5, remainingLots: 0, fullySold: true,

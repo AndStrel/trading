@@ -1,4 +1,5 @@
 import type { SandboxOrderSnapshot } from './sandbox-order-state.js';
+import { sandboxCashTimestampNano } from './sandbox-cash-operations.js';
 
 function validate(snapshot: SandboxOrderSnapshot, lotSize: number) {
   const statuses = ['EXECUTION_REPORT_STATUS_FILL', 'EXECUTION_REPORT_STATUS_PARTIALLYFILL', 'EXECUTION_REPORT_STATUS_NEW',
@@ -13,8 +14,8 @@ function validate(snapshot: SandboxOrderSnapshot, lotSize: number) {
   let lots = 0; let gross = 0n; const ids = new Set<string>();
   for (const stage of snapshot.stages) {
     if (!stage.tradeId || ids.has(stage.tradeId) || !Number.isSafeInteger(stage.lots) || stage.lots <= 0
-      || !/^\d{1,30}$/.test(stage.priceNano) || BigInt(stage.priceNano) <= 0n
-      || !Number.isFinite(Date.parse(stage.executedAt))) throw new Error('Invalid sandbox fill stages');
+      || !/^\d{1,30}$/.test(stage.priceNano) || BigInt(stage.priceNano) <= 0n) throw new Error('Invalid sandbox fill stages');
+    sandboxCashTimestampNano(stage.executedAt);
     lots += stage.lots; gross += BigInt(stage.priceNano) * BigInt(stage.lots) * BigInt(lotSize); ids.add(stage.tradeId);
   }
   if (lots !== snapshot.lotsExecuted || gross !== BigInt(snapshot.grossNano)) throw new Error('Incomplete sandbox fill stages');
@@ -26,8 +27,10 @@ export function analyzeSandboxRoundTrip(entry: SandboxOrderSnapshot, exit: Sandb
     throw new Error('Sandbox exit contradicts the confirmed entry');
   }
   const boughtIds = new Set(entry.stages.map(stage => stage.tradeId));
-  const lastEntry = Math.max(...entry.stages.map(stage => Date.parse(stage.executedAt)));
-  if (exit.stages.some(stage => boughtIds.has(stage.tradeId) || Date.parse(stage.executedAt) < lastEntry)) {
+  const lastEntry = entry.stages.reduce((latest, stage) => {
+    const at = sandboxCashTimestampNano(stage.executedAt); return at > latest ? at : latest;
+  }, sandboxCashTimestampNano(entry.stages[0]!.executedAt));
+  if (exit.stages.some(stage => boughtIds.has(stage.tradeId) || sandboxCashTimestampNano(stage.executedAt) < lastEntry)) {
     throw new Error('Sandbox exit precedes or reuses entry fills');
   }
   const fullySold = exit.terminal && exit.lotsExecuted === entry.lotsExecuted;
@@ -36,7 +39,8 @@ export function analyzeSandboxRoundTrip(entry: SandboxOrderSnapshot, exit: Sandb
   const netPnlNano = fullySold && entry.commissionNano !== null && exit.commissionNano !== null
     ? String(BigInt(exit.grossNano) - BigInt(entry.grossNano) - BigInt(entry.commissionNano) - BigInt(exit.commissionNano)) : null;
   return { soldLots: exit.lotsExecuted, remainingLots: entry.lotsExecuted - exit.lotsExecuted, fullySold, netPnlNano,
-    closedAt: fullySold ? new Date(Math.max(...exit.stages.map(stage => Date.parse(stage.executedAt)))).toISOString() : null };
+    closedAt: fullySold ? exit.stages.reduce((latest, stage) => sandboxCashTimestampNano(stage.executedAt)
+      > sandboxCashTimestampNano(latest) ? stage.executedAt : latest, exit.stages[0]!.executedAt) : null };
 }
 
 // Display only: profits rounded down, losses away from zero to kopeks. Exact

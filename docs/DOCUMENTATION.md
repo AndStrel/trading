@@ -13,8 +13,10 @@
 | [DEPLOY_TELEGRAM_SERVICE](DEPLOY_TELEGRAM_SERVICE.md) | Автоматизация production deploy и сохранность конфигурации |
 | [LIVE_PILOT_READBACK](LIVE_PILOT_READBACK.md) | Проверка существующего боевого дневного счёта только чтением, без включения real-исполнения |
 | [MARKET_SOURCE_SWITCH](MARKET_SOURCE_SWITCH.md) | Доступность и переключение источника рыночных данных |
+| [LOCAL_READONLY_RUNTIME](LOCAL_READONLY_RUNTIME.md) | Изолированный локальный контейнер, минимальный read-token и границы подтверждённого доступа |
 | [INTRADAY_SCANNER](INTRADAY_SCANNER.md) | Сканер, источники свечей и системный сервис |
 | [SANDBOX_EXECUTION](SANDBOX_EXECUTION.md) | Состояния заявок, подготовка счёта и защитные ограничения |
+| [SANDBOX_CASH_EVIDENCE](SANDBOX_CASH_EVIDENCE.md) | Immutable pre-BUY baseline, точный cash/operations proof и отличие от полного исполнения |
 | [SANDBOX_TARGET_EXIT](SANDBOX_TARGET_EXIT.md) | Opt-in цель, поколения native stop, безопасный rearm и архив расходов |
 | [SANDBOX_VTBR_ACCEPTANCE](SANDBOX_VTBR_ACCEPTANCE.md) | Техническое доказательство sandbox-цикла и известные ограничения |
 | [ARCHITECTURE](ARCHITECTURE.md) | Модули и границы полномочий |

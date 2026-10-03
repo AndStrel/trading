@@ -10,15 +10,16 @@ import {
 } from '../journal/scenario-journal.js';
 import type { TInvestClient } from '../tbank/client.js';
 import { TInvestOrderClient, TInvestOrderError } from './tinvest-order-client.js';
-import { assessLivePilotRisk } from './live-pilot-risk.js';
+import { assessLivePilotRisk, pilotEntryCashRequiredNano } from './live-pilot-risk.js';
 import { parseSandboxOrderState } from './sandbox-order-state.js';
 import type { SandboxProtectionService } from './sandbox-protection-service.js';
 import type { SandboxExitService } from './sandbox-exit-service.js';
 import type { SandboxLossGuard } from './sandbox-loss-guard.js';
-import { sandboxBidValue } from './sandbox-loss-policy.js';
+import { sandboxBidValue, type SandboxLossProof } from './sandbox-loss-policy.js';
 import type { SandboxSessionClose } from './sandbox-session-close.js';
 import { sandboxSessionEntryAllowed } from './sandbox-session-policy.js';
-import { decimalPriceNano } from './sandbox-stop-state.js';
+import { assertNoActiveSandboxStops, decimalPriceNano } from './sandbox-stop-state.js';
+import type { SandboxCashBaseline } from './sandbox-cash-reconciliation.js';
 import { assertSandboxInstrument } from './sandbox-instrument.js';
 import { assertNoSandboxOrders, sandboxFlatCashNano } from './sandbox-flat-account.js';
 import { readPreparedSandbox, sandboxAccountKey, sandboxBootstrapKey, sandboxEndpoint } from './sandbox-prepared-account.js';
@@ -33,6 +34,7 @@ type TradePlanSnapshot = {
   lots: number;
   positionRub: number;
   totalRiskRub: number;
+  cashRequiredNano?: string;
 };
 
 export type ExecutionSubmitResult = {
@@ -276,14 +278,39 @@ export class ExecutionService {
       if (!this.protection) throw new Error('Sandbox protective module is not connected; no entry was sent');
       await this.protection.preflightForEntry(this.accountId!, scenario, plan.lots);
     }
-    let lossProof;
+    let lossProof: SandboxLossProof | undefined;
     if (this.config.execution.sandboxLossGuardEnabled) {
       if (!this.lossGuard) throw new Error('Sandbox loss guard is not connected; no entry was sent');
       lossProof = await this.lossGuard.assess(this.accountId!);
       if (lossProof.status !== 'ok') throw new Error('Sandbox loss allowance is not confirmed; no entry was sent');
       await this.validateCurrentMarket(scenario, plan.lots);
     }
-    const claimNow = versionedScanner ? currentTime() : lossProof ? new Date() : now;
+    // Cash evidence is captured last and pinned to the journal revision before
+    // these asynchronous reads. Only the winning atomic BUY claim can store it.
+    // Loss proofs use the actual confirmation day; a forward wall-clock move
+    // must not make an old proof or candidate fresh. Monotonic time is a floor.
+    const cashTime = () => lossProof ? new Date(Math.max(currentTime().getTime(), Date.now())) : currentTime();
+    if (this.config.execution.sandboxSessionCloseEnabled && !sandboxSessionEntryAllowed(cashTime())) {
+      throw new Error('Sandbox entry window ended during preflight');
+    }
+    this.assertScannerEntryWindow(scenario, cashTime());
+    const cashFrom = cashTime().toISOString();
+    const cashRevision = this.journal.getSandboxLedgerRevision();
+    const [cashPositions, cashOrders, cashStops] = await Promise.all([
+      this.orderClient.getSandboxPositions(this.accountId!), this.orderClient.getSandboxOrders(this.accountId!),
+      this.orderClient.getSandboxStopOrders(this.accountId!),
+    ]);
+    const cashNano = sandboxFlatCashNano(cashPositions, this.accountId!);
+    assertNoSandboxOrders(cashOrders);
+    assertNoActiveSandboxStops(cashStops);
+    const claimNow = cashTime();
+    if (claimNow.getTime() - Date.parse(cashFrom) > 30_000) throw new Error('Sandbox pre-BUY cash reads are stale');
+    if (!plan.cashRequiredNano || cashNano < BigInt(plan.cashRequiredNano)) {
+      throw new Error('Fresh sandbox cash including entry costs is insufficient');
+    }
+    const cashBaseline: SandboxCashBaseline = { version: 1, accountId: this.accountId!, entryRequestId: existing.orderRequestId,
+      cashNano: String(cashNano), observedFrom: cashFrom, observedAt: claimNow.toISOString(), ledgerRevision: cashRevision,
+      killGeneration: killGeneration!, preparedRaw: prepared.raw, ...(selectionProof ? { selection: selectionProof } : {}) };
     if (lossProof || versionedScanner) {
       const finalAge = claimNow.getTime() - Date.parse(scenario.observedAt);
       if (finalAge < 0 || finalAge > this.config.execution.candidateMaxAgeMinutes * 60_000) throw new Error('Candidate expired during sandbox loss preflight');
@@ -300,6 +327,7 @@ export class ExecutionService {
         maxRiskRub: this.config.execution.maxDailyRiskRub,
         singlePosition: this.config.livePilot.prepare,
         preparedSandbox: { ...prepared, generation: killGeneration },
+        cashBaseline,
         ...(selectionProof ? {tradingSelection:selectionProof} : {}),
         ...(lossProof ? { lossGuard: { proofId: lossProof.proofId, accountId: this.accountId!,
           maxDailyLossRub: this.config.livePilot.maxDailyLossRub, maxTradeLossRub: this.config.livePilot.maxTradeRiskRub } } : {}),
@@ -471,7 +499,10 @@ export class ExecutionService {
   }
 
   private readValidatedPlan(scenario: JournalScenarioRecord): TradePlanSnapshot {
-    const plan = readTradePlan(scenario);
+    const rawPlan = readTradePlan(scenario);
+    const plan = { ...rawPlan, cashRequiredNano: pilotEntryCashRequiredNano({ entryPrice: scenario.input.entryPrice,
+      lots: rawPlan.lots, lotSize: scenario.input.lotSize, commissionRate: this.config.commissionRate,
+      slippageRate: Math.max(this.config.scanner.slippageRate, scenario.input.slippageRate) }) };
     if (!this.config.livePilot.prepare) return plan;
     const assessment = assessLivePilotRisk(this.config.livePilot, {
       side: scenario.input.side,
@@ -489,7 +520,8 @@ export class ExecutionService {
     });
     if (!assessment.allowed) throw new Error(assessment.blockers.join('; '));
     // Never accept a cheaper historical snapshot as the monetary source of truth.
-    return { ...plan, positionRub: Math.max(plan.positionRub, assessment.positionRub), totalRiskRub: Math.max(plan.totalRiskRub, assessment.totalRiskRub) };
+    return { ...plan, positionRub: Math.max(plan.positionRub, assessment.positionRub), totalRiskRub: Math.max(plan.totalRiskRub, assessment.totalRiskRub),
+      cashRequiredNano: plan.cashRequiredNano };
   }
 
   private async validateCurrentMarket(scenario: JournalScenarioRecord, lots: number): Promise<void> {

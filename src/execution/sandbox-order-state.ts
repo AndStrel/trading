@@ -1,4 +1,5 @@
 import { z } from 'zod/v4';
+import { sandboxCashTimestampNano } from './sandbox-cash-operations.js';
 
 const statuses = z.enum([
   'EXECUTION_REPORT_STATUS_FILL', 'EXECUTION_REPORT_STATUS_PARTIALLYFILL',
@@ -13,11 +14,12 @@ const money = z.object({
   units: z.string().regex(/^\d{1,12}$/).default('0'),
   nano: z.number().int().min(0).max(999_999_999).default(0),
 });
+const brokerTimestamp = z.iso.datetime({ offset: true });
 const stage = z.object({
   tradeId: identifier,
   price: money,
   quantity: integer.pipe(z.number().positive()),
-  executionTime: z.iso.datetime({ offset: true }),
+  executionTime: brokerTimestamp,
   evidenceSource: z.literal('sandbox-operation').optional(),operationId: identifier.optional(),
 });
 const state = z.object({
@@ -43,6 +45,21 @@ export type SandboxOrderSnapshot = {
 
 function nano(value: z.infer<typeof money>): bigint {
   return BigInt(value.units) * 1_000_000_000n + BigInt(value.nano);
+}
+
+// Date only normalizes whole seconds/offsets. Never give it a broker fraction:
+// converting that fraction through JS milliseconds would erase real trades.
+function utcTimestamp(value: string): string {
+  brokerTimestamp.parse(value);
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?)(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!match) throw new Error('Invalid execution timestamp');
+  const whole = match[1]!.length === 16 ? `${match[1]}:00` : match[1]!;
+  const utc = new Date(`${whole}${match[3]}`).toISOString();
+  const fraction = (match[2] ?? '').padEnd(9, '0');
+  const precision = Math.max(3, fraction.replace(/0+$/, '').length);
+  const result = `${utc.slice(0, 19)}.${fraction.slice(0, precision)}Z`;
+  sandboxCashTimestampNano(result);
+  return result;
 }
 
 export function parseSandboxOrderState(payload: unknown, expected: {
@@ -72,6 +89,7 @@ function parseOrderState(payload: unknown, expected: { instrumentId: string; lot
     | { kind: 'session-exit'; requestId: string; brokerOrderId: string | null; notBefore: string }), now: Date): SandboxOrderSnapshot {
   try {
     const parsed = state.parse(payload);
+    const notBefore = expected.kind === 'entry' ? null : sandboxCashTimestampNano(utcTimestamp(expected.notBefore));
     if (expected.kind !== 'exit' && (!parsed.orderRequestId || !expected.requestId)) throw new Error('Own order request identity is required');
     if ((expected.kind === 'entry' && (parsed.orderRequestId !== expected.requestId || parsed.direction !== 'ORDER_DIRECTION_BUY'))
       || (expected.kind === 'exit' && (parsed.orderId !== expected.brokerOrderId || parsed.direction !== 'ORDER_DIRECTION_SELL'
@@ -96,15 +114,16 @@ function parseOrderState(payload: unknown, expected: { instrumentId: string; lot
     let gross = 0n;
     const stages = parsed.stages.map(item => {
       const price = nano(item.price);
-      const executedAt = new Date(item.executionTime);
-      if ((Boolean(item.evidenceSource)!==Boolean(item.operationId)) || ids.has(item.tradeId) || price <= 0n || executedAt.getTime() > now.getTime() + 60_000
-        || (expected.kind !== 'entry' && executedAt.getTime() < Date.parse(expected.notBefore))) {
+      const executedAt = utcTimestamp(item.executionTime), executedNano = sandboxCashTimestampNano(executedAt);
+      if ((Boolean(item.evidenceSource)!==Boolean(item.operationId)) || ids.has(item.tradeId) || price <= 0n
+        || executedNano > BigInt(now.getTime()) * 1_000_000n + 60_000_000_000n
+        || (notBefore !== null && executedNano < notBefore)) {
         throw new Error('Invalid execution stage');
       }
       ids.add(item.tradeId);
       lots += item.quantity;
       gross += price * BigInt(item.quantity) * BigInt(expected.lotSize);
-      return { tradeId: item.tradeId, lots: item.quantity, priceNano: String(price), executedAt: executedAt.toISOString(),
+      return { tradeId: item.tradeId, lots: item.quantity, priceNano: String(price), executedAt,
         ...(item.evidenceSource&&item.operationId?{evidenceSource:item.evidenceSource,operationId:item.operationId}:{}) };
     });
     if (lots !== parsed.lotsExecuted) throw new Error('Incomplete execution stages');

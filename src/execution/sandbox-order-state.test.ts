@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { assertSnapshotProgress, parseSandboxExitOrderState, parseSandboxOrderState, parseSandboxSessionExitOrderState } from './sandbox-order-state.js';
+import { assessSandboxCashOperations } from './sandbox-cash-operations.js';
 
 const now = new Date('2026-09-30T12:00:00.000Z');
 const expected = { requestId: 'local-request', instrumentId: 'local-instrument', lots: 5, lotSize: 10 };
@@ -26,6 +27,53 @@ describe('Sandbox order evidence', () => {
   it('retains terminal partial fills instead of declaring no position', () => {
     expect(parseSandboxOrderState(payload({ executionReportStatus: 'EXECUTION_REPORT_STATUS_CANCELLED' }), expected, now))
       .toMatchObject({ terminal: true, lotsExecuted: 3 });
+  });
+  it.each([
+    ['2026-09-30T12:00:00.123456789Z', '2026-09-30T12:00:00.123456789Z'],
+    ['2026-09-30T15:00:00.123456789+03:00', '2026-09-30T12:00:00.123456789Z'],
+    ['2026-09-30T09:00:00.000000001-03:00', '2026-09-30T12:00:00.000000001Z'],
+    ['2026-09-30T15:00:00.123000000+03:00', '2026-09-30T12:00:00.123Z'],
+    ['2026-09-30T12:00:00.1Z', '2026-09-30T12:00:00.100Z'],
+    ['2026-09-30T12:00:00.1234Z', '2026-09-30T12:00:00.1234Z'],
+  ])('normalizes %s to UTC without losing any nanosecond value', (executionTime, executedAt) => {
+    const parsed = parseSandboxOrderState(payload({ stages: [{ ...payload().stages[0], executionTime }] }), expected, now);
+    expect(parsed.stages[0]!.executedAt).toBe(executedAt);
+  });
+  it.each(['2026-09-30T12:00Z', '2026-09-30T12:00:00.1234567891Z', '2026-09-30T12:01:00.000000001Z'])('rejects incomplete time, unsupported precision or a one-nano future bound overflow: %s', executionTime => {
+    expect(() => parseSandboxOrderState(payload({ stages: [{ ...payload().stages[0], executionTime }] }), expected, now)).toThrow('incomplete, inconsistent');
+  });
+  it('enforces a sub-millisecond notBefore for both native children and own session exits', () => {
+    const sell = payload({ direction: 'ORDER_DIRECTION_SELL',
+      stages: [{ ...payload().stages[0], executionTime: '2026-09-30T12:00:00.123456788Z' }] });
+    const child = { brokerOrderId: 'local-broker-order', instrumentId: expected.instrumentId, lots: 5, lotSize: 10,
+      notBefore: '2026-09-30T12:00:00.123456789Z' };
+    expect(() => parseSandboxExitOrderState(sell, child, now)).toThrow();
+    expect(() => parseSandboxSessionExitOrderState(sell, { ...child, requestId: expected.requestId }, now)).toThrow();
+  });
+  it('matches freshly parsed nine-digit fills to cursor operations, never a legacy truncated snapshot', () => {
+    const entryAt = '2026-09-30T12:00:00.123456789Z', exitAt = '2026-09-30T12:00:00.123456790Z';
+    const price = { currency: 'rub', units: '100', nano: 0 }, zero = { currency: 'rub', units: '0', nano: 0 };
+    const entry = parseSandboxOrderState(payload({ executionReportStatus: 'EXECUTION_REPORT_STATUS_CANCELLED',
+      executedCommission: zero, serviceCommission: zero,
+      stages: [{ ...payload().stages[0], price, executionTime: entryAt }] }), expected, now);
+    const exit = parseSandboxExitOrderState(payload({ orderId: 'local-cash-exit', direction: 'ORDER_DIRECTION_SELL',
+      executionReportStatus: 'EXECUTION_REPORT_STATUS_CANCELLED', executedCommission: zero, serviceCommission: zero,
+      stages: [{ ...payload().stages[0], tradeId: 'cash-exit-trade', price, executionTime: exitAt }] }),
+    { brokerOrderId: 'local-cash-exit', instrumentId: expected.instrumentId, lots: 5, lotSize: 10, notBefore: entryAt }, now);
+    const operation = (side: 'BUY' | 'SELL', date: string, num: string) => ({ id: `synthetic-${side}`, brokerAccountId: 'synthetic-account',
+      instrumentUid: expected.instrumentId, date, type: `OPERATION_TYPE_${side}`, state: 'OPERATION_STATE_EXECUTED',
+      quantity: '30', quantityDone: '30', quantityRest: '0', price, commission: zero,
+      payment: { currency: 'rub', units: side === 'BUY' ? '-3000' : '3000', nano: 0 },
+      tradesInfo: { trades: [{ num, date, quantity: '30', price }] } });
+    const window = { version: 1 as const, accountId: 'synthetic-account', from: '2026-09-30T11:59:00.000Z', to: '2026-09-30T12:01:00.000Z',
+      pages: [{ cursor: null, payload: { hasNext: false, nextCursor: '',
+        items: [operation('BUY', entryAt, entry.stages[0]!.tradeId), operation('SELL', exitAt, exit.stages[0]!.tradeId)] } }] };
+    const ownership = { accountId: window.accountId, from: window.from, to: window.to, instrumentId: expected.instrumentId,
+      lotSize: 10, failedCloseFeesNano: '0', entry, exit };
+    expect(assessSandboxCashOperations(window, ownership)).toEqual({ complete: true, paymentNano: '0', reasons: [] });
+    const legacy = { ...entry, stages: [{ ...entry.stages[0]!, executedAt: '2026-09-30T12:00:00.123Z' }] };
+    expect(assessSandboxCashOperations(window, { ...ownership, entry: legacy }).complete).toBe(false);
+    expect(() => assertSnapshotProgress(legacy, entry)).toThrow('contradicts');
   });
   it.each(['', undefined])('accepts native child client ID %j only with the exact acknowledged exchange child', orderRequestId => {
     const sell = payload({ orderRequestId, direction: 'ORDER_DIRECTION_SELL' });

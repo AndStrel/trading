@@ -16,8 +16,10 @@
 - [x] Добавить отдельную read-only проверку существующего боевого дневного
   счёта с pinned SHA/runtime и обезличенными JSON-гейтами;
   [границы проверки](LIVE_PILOT_READBACK.md).
-- [ ] Фактический read-back боевого счёта после принятого main/deploy новой
-  проверки. Успех приложения или наличие credentials не заменяет этот шаг.
+- [x] Запустить фактический read-back боевого счёта после принятого main/deploy
+  новой проверки. Результат отрицательный: account checks не подтверждены.
+- [ ] Получить успешный свежий account read-back; успех приложения или наличие
+  credentials не заменяет этот шаг. Локальные metadata reads не являются этим допуском.
 - [ ] Новый forward/OOS, executable evidence, выбранный strategy sandbox-cycle,
   immutable cash baseline/точная post-flat сверка и отдельный real executor.
 
@@ -247,3 +249,91 @@ ordersSubmitted=false; Mini App/JS/401/candidate/HTTPS готовы.
 новый bounded публичный source на прежнем frozen window, реальные raw bytes
 и request-window SHA/provenance, allowlisted новый файл. Исходная SQLite
 не открывается/не копируется/не исправляется. Алгоритм и ворота не меняются.
+
+### Полный каталог и локальный broker runtime — 3 октября
+
+[PR #84](https://github.com/AndStrel/trading/pull/84) объединён в main
+`f1d56be84d2d8a4f7776cbd8d1b56ba6b0379e63` после exact-head CI/review.
+[Main CI 37128476243](https://github.com/AndStrel/trading/actions/runs/37128476243)
+и [deploy 37128476346](https://github.com/AndStrel/trading/actions/runs/37128476346)
+успешны; runtime соответствует revision, running/restartCount=0,
+execution disabled, kill=true, ordersSubmitted=false.
+
+Все три текущие стратегии проверены на заранее объявленном SBER-источнике:
+18 альтернативных model screens, 14 пустых, четыре с одной убыточной модельной
+сделкой. Ни один не прошёл gates; четыре результата не являются четырьмя
+независимыми рыночными сделками. Параметры, расходы и ворота не ретюнились.
+Это development-only screen, не новый OOS и не прибыльность выбранного счёта.
+
+Фактический [live read-only preflight 37128587399](https://github.com/AndStrel/trading/actions/runs/37128587399)
+не прошёл: `accountChecksPassed:false`, `broker-read-unconfirmed`,
+`liveSubmissionAllowed:false`. Дополнительная no-token диагностика показала
+container TCP timeouts к брокеру до TLS; VPS tbank достигает TCP, но штатная
+проверка CA не проходит. Это не доказательство блокировки провайдером/невалидного
+токена. TLS не отключался, host CA store не менялся.
+
+По запросу пользователя собран и фактически запущен актуальный main локально:
+узкий market relay без второго Telegram poller, live/sandbox credentials,
+общего `.env`, journal или production volumes. Only loopback, read-only FS,
+минимальная read-capsule; [контракт запуска](LOCAL_READONLY_RUNTIME.md).
+Authenticated market read успешен, no-auth/account-method guards подтверждены.
+Отдельные `GetAccounts`/`GetInfo` read успешны, заданные оператором профили
+проверены; персональные broker metadata в Git не сохраняются. Balance,
+configured account IDs, позиции/заявки и live credential этим не подтверждены.
+Broker writes не выполнялись. Затем восстановлен existing private SSH/socket
+channel: старый verified stale socket сохранён, новый доступен только root:node,
+secret/env/server process не менялись. Server-to-local 401/400/`Shares` proof
+успешен; operator view показал local configured/available. Выбран «Компьютер»
+при disabled+kill и сброшен прежний report. Реальное Telegram-устройство этим
+не проверено; новый scanner pass ждёт штатного окна, расписание не обходилось.
+
+- [x] Безопасно подготовить минимальную read-capsule без изменения исходного snapshot.
+- [x] Собрать current-main локальный образ с изолированным CA и проверить actual runtime.
+- [x] Проверить authenticated market read, relay boundaries и два account metadata reads.
+- [x] Проверить host helpers: 23 offline tests; приложение до cash slice —
+  1 326 tests, typecheck/build PASS.
+- [x] Проверить и восстановить безопасный tunnel, подтвердить доступность локального
+  источника и выбрать его серверному scanner без переключения account/real execution.
+- [ ] Получить свежий штатный scanner report из локального источника в разрешённое окно.
+- [x] Immutable pre-BUY baseline и append-only post-flat cash/operations/late-fee
+  proof: integrated implementation, offline tests и независимое ревью завершены.
+- [ ] Actual broker-совместимость нового cash/operations протокола и новый полный
+  sandbox round trip. Программная проверка не заменяет эту приёмку.
+- [ ] Полный выбранный strategy sandbox cycle, новый forward/OOS/executable
+  evidence, успешный account preflight и отдельный real executor. R9b/R10 открыты.
+
+### Интегрированный денежный контракт sandbox
+
+Локальная ветка `codex/local-broker-readiness-2026-10-03` добавляет baseline
+атомарно с выигравшим BUY claim, immutable identity и append-only post-flat
+observations с current epoch/ledger/native/close CAS. Перед POST заново проверяется
+полная стоимость входа с прежним Investor floor; gross-only наличных недостаточно.
+Точный cash delta сопоставляется с fills, всеми известными расходами и полным
+owned account-window operations evidence. Чужие/компенсирующие потоки, missing
+данные, late fee, stale epoch и любое nano-расхождение не получают cash proof.
+[Подробный контракт](SANDBOX_CASH_EVIDENCE.md).
+
+`complete` сохраняет прежнее fills/flat значение; новый `cashProven` требует
+`reconciled`. Legacy записи без pre-BUY baseline не усыновляют новый proof.
+Интерфейс отделяет «По исполнениям» от денег, сверенных на момент проверки;
+real actual PnL остаётся null, kill/reservations автоматически не снимаются.
+
+Независимое review выявило и подтвердило исправления: cleanup чужого временного
+файла при EEXIST/подмене inode; неограниченное ожидание отмены stream; усечение
+broker Timestamp перед точным ownership comparison. Добавлены regressions,
+deadline независимо ограничивает hung fetch/read/curl, fresh timestamps/closedAt
+сохраняют наносекунды; tolerance или усыновления truncated history нет.
+Финальный read-only review: 481 связанных тестов PASS, открытых P1/P2 не найдено;
+bounded curl отдельно — 22 tests и пять независимых VM checks PASS.
+
+Локальный полный `check`: **1 598 TS tests / 79 files + 23 offline ops tests**;
+typecheck/build — PASS, **52 Python regressions** — PASS. Compiled Node24 smoke
+в контейнере с network none/read-only FS/без private inputs и real volumes
+проверяет arming/selection/source guards; это local draft overlay, не новый
+deployed image. Отдельный настоящий curl в таком контейнере отказал без сети,
+вернул только fixed error и очистил свои private temp artifacts.
+
+Новых broker order/funding calls нет. Actual cursor API compatibility, владение
+ненулевой комиссией архивного zero-fill SELL, выбранный strategy round trip и
+экономические R10 gates остаются непроверенными; unknown остаётся incomplete.
+CI/deploy нового head будут записаны только после их фактического завершения.

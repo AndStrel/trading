@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { TInvestOrderClient, TInvestOrderError } from './tinvest-order-client.js';
+import { sandboxEndpoint } from './sandbox-prepared-account.js';
 
 const input = {
   mode: 'sandbox' as const,
@@ -13,6 +14,123 @@ const input = {
 };
 
 describe('TInvestOrderClient', () => {
+  const cashFrom = '2026-10-03T07:00:00.000Z', cashTo = '2026-10-03T07:10:00.000Z';
+  it('reads every cash cursor page without filtering fees, pending states or other account flows', async () => {
+    const fetcher = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ hasNext: true, nextCursor: 'cursor-1', items: [{ id: 'synthetic-1' }] })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ hasNext: false, nextCursor: '', items: [{ id: 'synthetic-2' }] })));
+    const window = await new TInvestOrderClient('isolated', sandboxEndpoint, fetcher)
+      .getSandboxCashOperationsWindow('synthetic-account', cashFrom, cashTo);
+    expect(window.pages).toHaveLength(2);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls.map(call => JSON.parse(String(call[1]?.body)))).toEqual([
+      { accountId: 'synthetic-account', from: cashFrom, to: cashTo, limit: 100,
+        withoutCommissions: false, withoutTrades: false, withoutOvernights: false },
+      { accountId: 'synthetic-account', from: cashFrom, to: cashTo, cursor: 'cursor-1', limit: 100,
+        withoutCommissions: false, withoutTrades: false, withoutOvernights: false },
+    ]);
+    expect(fetcher.mock.calls.every(call => String(call[0]).endsWith('SandboxService/GetSandboxOperationsByCursor') && call[1]?.redirect === 'error')).toBe(true);
+  });
+  it.each(['missing-next', 'missing-has-next', 'duplicate-operation', 'cursor-cycle', 'http', 'invalid-json'])
+    ('fails closed on %s cash coverage with no retry', async failure => {
+      const fetcher = vi.fn<typeof fetch>();
+      const first = { hasNext: true, nextCursor: 'cursor-1', items: [{ id: 'synthetic-1' }] };
+      if (failure === 'http') fetcher.mockResolvedValue(new Response('private secret', { status: 500 }));
+      else if (failure === 'invalid-json') fetcher.mockResolvedValue(new Response('private secret'));
+      else if (failure === 'missing-next') fetcher.mockResolvedValue(new Response(JSON.stringify({ hasNext: false, items: [] })));
+      else if (failure === 'missing-has-next') fetcher.mockResolvedValue(new Response(JSON.stringify({ nextCursor: '', items: [] })));
+      else fetcher.mockResolvedValueOnce(new Response(JSON.stringify(first)))
+        .mockResolvedValue(new Response(JSON.stringify(failure === 'duplicate-operation'
+          ? { hasNext: false, nextCursor: '', items: first.items } : { hasNext: true, nextCursor: 'cursor-1', items: [{ id: 'synthetic-2' }] })));
+      await expect(new TInvestOrderClient('isolated', sandboxEndpoint, fetcher)
+        .getSandboxCashOperationsWindow('synthetic-account', cashFrom, cashTo)).rejects.toThrow('coverage is not confirmed');
+      expect(fetcher.mock.calls.length).toBeLessThanOrEqual(2);
+    });
+  it('never issues an eleventh cash cursor request', async () => {
+    let page = 0;
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => new Response(JSON.stringify({ hasNext: true,
+      nextCursor: `cursor-${++page}`, items: [{ id: `synthetic-${page}` }] })));
+    await expect(new TInvestOrderClient('isolated', sandboxEndpoint, fetcher)
+      .getSandboxCashOperationsWindow('synthetic-account', cashFrom, cashTo)).rejects.toThrow('coverage');
+    expect(fetcher).toHaveBeenCalledTimes(10);
+  });
+  it('rejects an oversized streaming cash response before JSON parsing', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(' '.repeat(1_048_577)));
+    await expect(new TInvestOrderClient('isolated', sandboxEndpoint, fetcher)
+      .getSandboxCashOperationsWindow('synthetic-account', cashFrom, cashTo)).rejects.toThrow('coverage');
+    expect(fetcher).toHaveBeenCalledOnce();
+  });
+  it('enforces the total cash cursor deadline after an awaited body read', async () => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(0);
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => {
+      clock.mockReturnValue(30_001);
+      return new Response(JSON.stringify({ hasNext: false, nextCursor: '', items: [] }));
+    });
+    try {
+      await expect(new TInvestOrderClient('isolated', sandboxEndpoint, fetcher)
+        .getSandboxCashOperationsWindow('synthetic-account', cashFrom, cashTo)).rejects.toThrow('coverage');
+      expect(fetcher).toHaveBeenCalledOnce();
+    } finally { clock.mockRestore(); }
+  });
+  it.each(['oversized', 'elapsed'])('settles a %s failure even when stream cancellation never acknowledges', async failure => {
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(0);
+    const cancel = vi.fn(() => new Promise<void>(() => {}));
+    const stream = new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(failure === 'oversized' ? ' '.repeat(1_048_577) : '{}'));
+    }, cancel });
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => {
+      if (failure === 'elapsed') clock.mockReturnValue(30_001);
+      return new Response(stream);
+    });
+    try {
+      await expect(new TInvestOrderClient('isolated', sandboxEndpoint, fetcher)
+        .getSandboxCashOperationsWindow('synthetic-account', cashFrom, cashTo)).rejects.toThrow('coverage is not confirmed');
+      expect(cancel).toHaveBeenCalledOnce(); expect(fetcher).toHaveBeenCalledOnce();
+    } finally { clock.mockRestore(); }
+  });
+  it.each(['fetch', 'read', 'system-transport'])('independently times out a hung %s that ignores abort signals', async failure => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(0);
+    const cancel = vi.fn(() => new Promise<void>(() => {}));
+    const stream = new ReadableStream<Uint8Array>({ pull: () => new Promise<void>(() => {}), cancel });
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(() => failure === 'fetch'
+      ? new Promise<Response>(() => {}) : Promise.resolve(new Response(stream)));
+    const boundedCurl = vi.fn(() => new Promise<{ status: number; body: string }>(() => {}));
+    const client = new TInvestOrderClient('isolated', sandboxEndpoint, fetcher,
+      failure === 'system-transport' ? { transport: 'system-curl', boundedCurlPost: boundedCurl } : {});
+    let settled = false;
+    const result = client.getSandboxCashOperationsWindow('synthetic-account', cashFrom, cashTo)
+      .then(() => { settled = true; return 'unexpected-success'; }, (error: unknown) => {
+        settled = true; return error instanceof Error ? error.message : 'unexpected-error';
+      });
+    try {
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await result).toBe('Sandbox cash operations coverage is not confirmed');
+      expect(settled).toBe(true);
+      if (failure === 'system-transport') { expect(fetcher).not.toHaveBeenCalled(); expect(boundedCurl).toHaveBeenCalledOnce(); }
+      else expect(fetcher).toHaveBeenCalledOnce();
+      if (failure === 'read') expect(cancel).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { clock.mockRestore(); vi.useRealTimers(); }
+  });
+  it('uses only the configured bounded system transport for cash coverage, never the old unbounded helper or fetch', async () => {
+    const fetcher = vi.fn<typeof fetch>(), oldCurl = vi.fn();
+    const bounded = vi.fn().mockResolvedValue({ status: 200, body: '{"hasNext":false,"nextCursor":"","items":[]}' });
+    await new TInvestOrderClient('isolated', sandboxEndpoint, fetcher,
+      { transport: 'system-curl', curlPost: oldCurl, boundedCurlPost: bounded })
+      .getSandboxCashOperationsWindow('synthetic-account', cashFrom, cashTo);
+    expect(bounded).toHaveBeenCalledOnce(); expect(fetcher).not.toHaveBeenCalled(); expect(oldCurl).not.toHaveBeenCalled();
+    expect(bounded.mock.calls[0]?.[0]).toMatchObject({ maxBytes: 1_048_576, timeoutMs: expect.any(Number) });
+  });
+  it.each(['https://example.test/rest', 'https://invest-public-api.tbank.ru/rest', `${sandboxEndpoint}?secret=private`])
+    ('rejects a noncanonical cash endpoint before any request: %s', async endpoint => {
+      const fetcher = vi.fn<typeof fetch>();
+      await expect(new TInvestOrderClient('isolated', endpoint, fetcher)
+        .getSandboxCashOperationsWindow('synthetic-account', cashFrom, cashTo)).rejects.toThrow('not available');
+      expect(fetcher).not.toHaveBeenCalled();
+    });
   const exitInput={mode:'sandbox' as const,accountId:'local-account',instrumentId:'local-instrument',requestId:input.orderRequestId,lots:3,limitNano:'9900000001'};
   const exitAck=()=>({orderId:'local-sell',orderRequestId:exitInput.requestId,instrumentUid:exitInput.instrumentId,direction:'ORDER_DIRECTION_SELL',
     orderType:'ORDER_TYPE_LIMIT',executionReportStatus:'EXECUTION_REPORT_STATUS_FILL',lotsRequested:'3',lotsExecuted:'3'});

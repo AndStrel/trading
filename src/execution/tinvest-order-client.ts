@@ -3,6 +3,9 @@ import { numberToQuotation } from '../domain/money.js';
 import { postWithSystemCurl, type CurlPost, type TInvestTransport } from '../tbank/client.js';
 import { nanoQuotation } from './sandbox-stop-state.js';
 import { hydrateSandboxSingleUnitOrder, sandboxOrderNeedsOperations } from './sandbox-operation-evidence.js';
+import { assertSandboxCashOperationsWindow, type SandboxCashOperationsWindow } from './sandbox-cash-operations.js';
+import { postBoundedSandboxCurl, type BoundedSandboxCurlPost } from '../tbank/bounded-curl.js';
+import { sandboxEndpoint } from './sandbox-prepared-account.js';
 
 type FetchLike = typeof fetch;
 
@@ -56,7 +59,7 @@ export class TInvestOrderClient {
     private readonly token: string | undefined,
     private readonly baseUrl: string,
     private readonly fetchImpl: FetchLike = fetch,
-    private readonly options: { transport?: TInvestTransport; curlPost?: CurlPost } = {},
+    private readonly options: { transport?: TInvestTransport; curlPost?: CurlPost; boundedCurlPost?: BoundedSandboxCurlPost } = {},
   ) {}
 
   async postLimitOrder(input: LimitOrderInput): Promise<LimitOrderResult> {
@@ -151,6 +154,96 @@ export class TInvestOrderClient {
   getSandboxStopOrders(accountId: string): Promise<unknown> {
     return this.request('tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxStopOrders',
       { accountId, status: 'STOP_ORDER_STATUS_ALL' }, false);
+  }
+
+  async getSandboxCashOperationsWindow(accountId: string, from: string, to: string): Promise<SandboxCashOperationsWindow> {
+    // Separate from the narrow one-unit hydration above: no state, instrument,
+    // or operation-type filter may hide an account cash flow or a pending item.
+    const started = performance.now();
+    const validTime = (value: string) => Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+    if (!this.token || this.baseUrl !== sandboxEndpoint || !/^[A-Za-z0-9_-]{1,128}$/.test(accountId) || !validTime(from) || !validTime(to)
+      || Date.parse(to) <= Date.parse(from) || Date.parse(to) - Date.parse(from) > 7 * 86_400_000) {
+      throw new TInvestOrderError('Bounded sandbox cash operations are not available', false);
+    }
+    const window: SandboxCashOperationsWindow = { version: 1, accountId, from, to, pages: [] };
+    const seenCursors = new Set<string>();
+    let cursor: string | null = null;
+    let items = 0;
+    const controller = new AbortController();
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    // A custom fetch/stream need not honour AbortSignal. Fence awaited I/O
+    // independently, while still asking the actual transport to abort.
+    const deadline = new Promise<never>((_, reject) => {
+      deadlineTimer = setTimeout(() => {
+        reject(new Error());
+        controller.abort();
+      }, Math.max(1, Math.floor(30_000 - (performance.now() - started))));
+    });
+    const bounded = <T>(operation: Promise<T>): Promise<T> => Promise.race([operation, deadline]);
+    try {
+      for (let page = 0; page < 10; page += 1) {
+        const elapsed = performance.now() - started;
+        if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= 30_000) throw new Error();
+        const url = `${this.baseUrl}/tinkoff.public.invest.api.contract.v1.SandboxService/GetSandboxOperationsByCursor`;
+        const body = JSON.stringify({ accountId, from, to, ...(cursor === null ? {} : { cursor }), limit: 100,
+          withoutCommissions: false, withoutTrades: false, withoutOvernights: false });
+        let payload: unknown;
+        if (this.options.transport === 'system-curl') {
+          const response = await bounded((this.options.boundedCurlPost ?? postBoundedSandboxCurl)({ url, token: this.token,
+            body, maxBytes: 1_048_576, timeoutMs: Math.max(1, Math.floor(30_000 - elapsed)) }));
+          if (response.status < 200 || response.status >= 300 || Buffer.byteLength(response.body) > 1_048_576) throw new Error();
+          payload = JSON.parse(response.body) as unknown;
+        } else {
+          const response = await bounded(this.fetchImpl(url, {
+            method: 'POST', headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json',
+              'x-app-name': 'AndStrel.trading-executor' }, redirect: 'error',
+            signal: controller.signal, body,
+          }));
+          if (!response.ok || !response.body) throw new Error();
+          const reader = response.body.getReader();
+          const chunks: Uint8Array[] = [];
+          let bytes = 0;
+          try {
+            while (true) {
+              const part = await bounded(reader.read());
+              const age = performance.now() - started;
+              if (!Number.isFinite(age) || age < 0 || age >= 30_000) throw new Error();
+              if (part.done) break;
+              bytes += part.value.byteLength;
+              if (bytes > 1_048_576) throw new Error();
+              chunks.push(part.value);
+            }
+          } catch (error) {
+            // Cancellation is resource cleanup, never a condition for the
+            // deadline failure to settle. Some injected streams never ACK it.
+            try { void reader.cancel().catch(() => {}); } catch {}
+            throw error;
+          } finally { try { reader.releaseLock(); } catch {} }
+          payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))) as unknown;
+        }
+        const parsed = asRecord(payload);
+        if (!parsed || typeof parsed.hasNext !== 'boolean' || typeof parsed.nextCursor !== 'string'
+          || parsed.nextCursor.length > 256 || !Array.isArray(parsed.items) || parsed.items.length > 100) throw new Error();
+        items += parsed.items.length;
+        if (items > 1000) throw new Error();
+        window.pages.push({ cursor, payload });
+        if (!parsed.hasNext) {
+          assertSandboxCashOperationsWindow(window);
+          const age = performance.now() - started;
+          if (!Number.isFinite(age) || age < 0 || age >= 30_000) throw new Error();
+          return window;
+        }
+        if (!parsed.items.length || !parsed.nextCursor || seenCursors.has(parsed.nextCursor)) throw new Error();
+        seenCursors.add(parsed.nextCursor);
+        cursor = parsed.nextCursor;
+      }
+      throw new Error();
+    } catch {
+      throw new TInvestOrderError('Sandbox cash operations coverage is not confirmed', false);
+    } finally {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      controller.abort();
+    }
   }
 
   async postSandboxStopLimit(input: { mode: 'sandbox'; accountId: string; instrumentId: string;

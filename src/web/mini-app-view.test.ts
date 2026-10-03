@@ -1,13 +1,37 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../config.js';
 import { ScenarioJournal } from '../journal/scenario-journal.js';
 import { buildMiniAppView } from './mini-app-view.js';
 import type { IntradayScanner } from '../scanner/intraday-scanner.js';
 
 describe('Mini App safe view', () => {
+  it.each([
+    [false, 'incomplete', false],
+    [false, 'mismatch', false],
+    [true, 'reconciled', true],
+    [true, 'mismatch', false],
+  ] as const)('separates fill-complete from cash proof (%s, %s)', (cashProven, cashStatus, projectedProof) => {
+    const directory = mkdtempSync(join(tmpdir(), 'trading-mini-cash-view-'));
+    try {
+      const journal = new ScenarioJournal(join(directory, 'journal.sqlite'));
+      const fixture = {
+        scenarioId: 1, soldLots: 1, remainingLots: 0, netPnlNano: '1000000000', complete: true,
+        cashProven, cashReconciliation: { cashProven, status: cashStatus,
+          reasons: ['private-account-details'], deltaNano: '1000000000', expectedDeltaNano: '1000000000' },
+        observedAt: '2026-10-03T10:00:00Z', flatConfirmedAt: '2026-10-03T09:59:00Z',
+        accountId: 'private-account', baseline: { token: 'private-secret' }, flowEvidence: { items: ['private-operation'] },
+      } as unknown as ReturnType<ScenarioJournal['listSandboxResults']>[number];
+      vi.spyOn(journal, 'listSandboxResults').mockReturnValue([fixture]);
+      const view = buildMiniAppView(loadConfig({}), { isPaused: () => false, getLatestReport: () => null },
+        { mode: () => 'disabled', isKilled: () => true }, journal, new Date('2026-10-03T10:00:00Z'));
+      expect(view.sandboxResults[0]).toMatchObject({ complete: true, cashProven: projectedProof, cashStatus });
+      expect(view.execution.actualPnlRub).toBeNull();
+      expect(JSON.stringify(view)).not.toMatch(/private-|baseline|flowEvidence|deltaNano|expectedDeltaNano/);
+    } finally { vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }); }
+  });
   it.each([
     ['trend-momentum-v1', '2026-10-03T13:39:00Z', '2026-10-03T13:40:00Z'],
     ['opening-range-breakout-v1', '2026-10-03T08:39:00Z', '2026-10-03T08:40:00Z'],
