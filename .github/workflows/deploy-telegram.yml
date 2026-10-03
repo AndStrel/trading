@@ -79,7 +79,8 @@ jobs:
               # Validate the new image against the existing private environment
               # before replacing the still-running service. Never print .env.
               docker compose build --build-arg APP_REVISION="$deployment_expected_sha" telegram-service
-              docker compose run --rm --no-deps --entrypoint node telegram-service dist/strategy-config-preflight.js
+              # Do not let Compose consume the remaining remote bash script from STDIN.
+              docker compose run --rm --no-deps -T --interactive=false </dev/null --entrypoint node telegram-service dist/strategy-config-preflight.js
               docker compose up -d --no-build --remove-orphans
               docker compose ps
               docker compose logs --tail=40 telegram-service
