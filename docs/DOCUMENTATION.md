@@ -11,6 +11,7 @@
 | [TELEGRAM_SERVICE](TELEGRAM_SERVICE.md) | Команды и работа Telegram-сервиса; подробности sandbox |
 | [TELEGRAM_MINI_APP](TELEGRAM_MINI_APP.md) | Панель, авторизация, HTTPS, nginx и откат |
 | [DEPLOY_TELEGRAM_SERVICE](DEPLOY_TELEGRAM_SERVICE.md) | Автоматизация production deploy и сохранность конфигурации |
+| [LIVE_PILOT_READBACK](LIVE_PILOT_READBACK.md) | Проверка существующего боевого дневного счёта только чтением, без включения real-исполнения |
 | [MARKET_SOURCE_SWITCH](MARKET_SOURCE_SWITCH.md) | Доступность и переключение источника рыночных данных |
 | [INTRADAY_SCANNER](INTRADAY_SCANNER.md) | Сканер, источники свечей и системный сервис |
 | [SANDBOX_EXECUTION](SANDBOX_EXECUTION.md) | Состояния заявок, подготовка счёта и защитные ограничения |
