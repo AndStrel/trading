@@ -10,6 +10,7 @@ import { sandboxBidValue } from './sandbox-loss-policy.js';
 import { sandboxCloseKey, sandboxSessionCloseDue, type SandboxSessionExitIntent } from './sandbox-session-policy.js';
 import { assertSandboxInstrument } from './sandbox-instrument.js';
 import { assertTechnicalScope } from './sandbox-technical-scope.js';
+import { hasTechnicalCashRestorationBaseline } from './sandbox-technical-cash-policy.js';
 import { scenarioInstrument } from './scenario-instrument.js';
 import { isTradingStrategyId } from '../strategies/catalog.js';
 import { sandboxTargetEconomics, sandboxTargetModelNet, type SandboxTargetInput, type SandboxTargetProof } from './sandbox-target-policy.js';
@@ -78,7 +79,9 @@ export class SandboxSessionClose {
       const due=sandboxSessionCloseDue(entryAt,now());
       // A restored target never gets another target attempt. At most one later
       // session attempt is permitted; a rejected session stays protected.
-      if(prior?.phase==='restored' && (!due || prior.purpose==='session')) return this.confirmRestoration(accountId,scenarioId,prior,fixedNow);
+      // Explicit technical calls never consume the restored protection again.
+      // Only the ordinary, independently due session policy may later close it.
+      if(prior?.phase==='restored' && (technical || !due || prior.purpose==='session')) return this.confirmRestoration(accountId,scenarioId,prior,fixedNow);
       const targetInput=this.targetInput(scenarioId);
       if(!prior&&!technical&&!due&&(!this.config.execution.sandboxTargetExitEnabled||!targetInput)) return null;
       const entry=parseSandboxOrderState(await this.client.getSandboxOrderState(accountId,order.orderRequestId),
@@ -144,12 +147,20 @@ export class SandboxSessionClose {
       const intent=this.journal.getSandboxSessionExit(scenarioId);
       // Safe abort of a NOT-submitted target, or a proven terminal-zero SELL.
       // Unknown/NEW/partial outcomes never permit a stop or another SELL.
-      if(intent?.targetConsumed && (intent.phase==='cancel-claimed' || intent.phase==='submitted' && intent.sellSnapshot?.terminal
+      if(intent && this.restorationEnabled(intent,scenarioId) && (intent.phase==='cancel-claimed' || intent.phase==='submitted' && intent.sellSnapshot?.terminal
         && intent.sellSnapshot.lotsExecuted===0 && ['EXECUTION_REPORT_STATUS_REJECTED','EXECUTION_REPORT_STATUS_CANCELLED'].includes(intent.sellSnapshot.executionStatus))) {
         try { return await this.restoreProtection(accountId,scenarioId,intent,fixedNow); } catch { /* report unconfirmed below */ }
       }
       throw new Error('Sandbox intraday close is not confirmed; no cancellation or SELL is retried, positions and risk remain reserved');
     }
+  }
+
+  private restorationEnabled(intent:SandboxSessionExitIntent,scenarioId:number):boolean {
+    if(intent.targetConsumed) return true;
+    if(!['technical-acceptance','session'].includes(intent.purpose??'')) return false;
+    const scenario=this.journal.getScenario(scenarioId),order=this.journal.getExecutionByScenario(scenarioId);
+    return Boolean(scenario && order && hasTechnicalCashRestorationBaseline(scenario,order.lots,
+      this.journal.getSandboxCashBaseline(scenarioId),{accountId:intent.accountId,entryRequestId:intent.entryRequestId}));
   }
 
   private targetInput(scenarioId:number):SandboxTargetInput|null {
@@ -167,7 +178,7 @@ export class SandboxSessionClose {
 
   private async finishSubmission(accountId:string,scenarioId:number,intent:SandboxSessionExitIntent,fixedNow?:Date):Promise<CloseResult> {
     const now=fixedNow??new Date(),scenario=this.journal.getScenario(scenarioId); if(!scenario||!intent.submitClaimedAt) throw new Error();
-    if(intent.targetConsumed) {
+    if(this.restorationEnabled(intent,scenarioId)) {
       const sell=parseSandboxSessionExitOrderState(await this.client.getSandboxOrderState(accountId,intent.requestId),{
         requestId:intent.requestId,brokerOrderId:intent.brokerOrderId,instrumentId:intent.instrumentId,lots:intent.lots,
         lotSize:scenario.input.lotSize,notBefore:intent.submitClaimedAt},now);
@@ -186,7 +197,7 @@ export class SandboxSessionClose {
 
   private async restoreProtection(accountId:string,scenarioId:number,intent:SandboxSessionExitIntent,fixedNow?:Date):Promise<CloseResult> {
     const now=()=>fixedNow??new Date(),native=this.journal.getNativeStop(scenarioId),scenario=this.journal.getScenario(scenarioId);
-    if(!native?.intent.brokerStopId||!scenario||!intent.targetConsumed) throw new Error();
+    if(!native?.intent.brokerStopId||!scenario||!this.restorationEnabled(intent,scenarioId)) throw new Error();
     const key=nativeStopKey(native.intent),revision=this.journal.getSandboxLossLedger().revision,started=performance.now();
     const [positions,orders,stops,instrument]=await Promise.all([this.client.getSandboxPositions(accountId),this.client.getSandboxOrders(accountId),
       this.client.getSandboxStopOrders(accountId),this.market.getInstrumentBy(intent.instrumentId)]);
@@ -197,8 +208,11 @@ export class SandboxSessionClose {
     sandboxFlatCashNano({...positions as Record<string,unknown>,securities:[]},accountId);
     const stop=parseSandboxStop(stops,native.intent,now());
     if(stop.status!=='STOP_ORDER_STATUS_CANCELED'||stop.childOrderId!==null||performance.now()-started>15_000) throw new Error();
-    this.journal.observeNativeStop(scenarioId,stop,key);
-    const claim=this.journal.claimProtectionRestore(sandboxCloseKey(intent),revision,{accountId,instrumentId:intent.instrumentId,lots:intent.lots,
+    // A fresh canceled observation may itself advance the ledger. Fence the
+    // awaited reads against their original revision and carry only that exact
+    // transaction's resulting revision into the atomic replacement claim.
+    const observedRevision=this.journal.observeNativeStop(scenarioId,stop,key,revision);
+    const claim=this.journal.claimProtectionRestore(sandboxCloseKey(intent),observedRevision,{accountId,instrumentId:intent.instrumentId,lots:intent.lots,
       lotSize:scenario.input.lotSize,positionUnits:String(units),checkedAt:now().toISOString(),stop,noActiveOrders:true,noOtherActiveStops:true},now());
     if(claim.claimed) {
       const next=claim.record.intent;
