@@ -1,5 +1,15 @@
 # Автоматический deploy Telegram-сервиса
 
+Для первого локального или серверного запуска используйте [QUICKSTART](QUICKSTART.md):
+`npm run setup`, заполнение `.env`, `npm run doctor`, `npm run deploy`.
+Ни одна из этих команд не устанавливает домен/сертификат и не изменяет другие проекты.
+
+Локальный `npm run deploy` выполняет ту же защитную последовательность:
+сборка `telegram-service` → `strategy-config-preflight` в новом образе →
+`up -d --no-build telegram-service`. При ошибке сборки или конфигурации
+работающий контейнер не заменяется. Preflight не обращается к брокеру и журналу;
+`doctor` использует эту же проверку перед дополнительной диагностикой профиля.
+
 Workflow **Deploy Telegram service** запускается после каждого push в `main` —
 то есть после merge PR. Ручной запуск сохранён для повторного deploy или отката.
 Он не получает T-Invest или Telegram токены из GitHub и не перезаписывает
@@ -11,13 +21,15 @@ Workflow **Deploy Telegram service** запускается после кажд�
 2. Подключается к серверу только по значениям `DEPLOY_HOST` и `DEPLOY_USER`, SSH-ключу и проверенному `known_hosts` из GitHub Secrets.
 3. Клонирует или обновляет проект в `/opt/andstrel/trading`.
 4. Останавливается, если `/opt/andstrel/trading/.env` отсутствует.
-5. Собирает и запускает `docker compose`, не открывая порты.
+5. Собирает новый образ, не останавливая работающий сервис.
+6. Проверяет существующий приватный `.env` командой `strategy-config-preflight`: без запросов брокеру, открытия журнала и печати секретов. Для режима `watchlist` нужны непустой список и биржевые тикеры в `label`; невалидная конфигурация останавливает deploy до замены контейнера.
+7. Только после успешной проверки заменяет контейнер. Mini App публикуется на `127.0.0.1:8088`, внешний доступ требует HTTPS reverse proxy.
 
 Он не обращается к другим каталогам и сервисам на сервере.
 
 ## Сертификаты T-Invest в образе
 
-Обычная production-сборка через `docker compose up -d --build` устанавливает
+Обычная production-сборка, выполняемая `npm run deploy`, устанавливает
 официальную цепочку CA Минцифры в контейнер и сохраняет проверку TLS. В CI эта
 операция намеренно отключена: проверка контейнера рендерит локальную PNG-карточку
 с сетью `none` и не обращается к T-Invest. Это не ослабляет production-образ и
@@ -41,7 +53,8 @@ T_INVEST_SCANNER_INTERVAL_SECONDS=300
 T_INVEST_SCANNER_LOOKBACK_MINUTES=360
 T_INVEST_SCANNER_CANDIDATE_COOLDOWN_MINUTES=30
 T_INVEST_SCANNER_SLIPPAGE_RATE=0.0005
-T_INVEST_COMMISSION_RATE=0.0005
+T_INVEST_COMMISSION_RATE=0.003
+T_INVEST_EXECUTION_MODE=disabled
 INTRADAY_MAX_RISK_RUB=500
 INTRADAY_MAX_POSITION_RUB=50000
 INTRADAY_MAX_SPREAD_PCT=0.3
@@ -53,6 +66,9 @@ TELEGRAM_POLLING_TIMEOUT_SECONDS=25
 ```
 
 У файла должны быть права `600`. Не кладите его в Git, GitHub Secrets или workflow logs.
+Полный актуальный список полей находится в `.env.example`. При включённом дневном
+prepare-профиле фактическая комиссия не ниже `0.003` на сторону; уменьшение значения
+в старом `.env` не отменяет этого ограничения.
 
 ## Запуск
 
@@ -72,6 +88,8 @@ service** → **Run workflow**. Выбирайте только `main`.
 
 После первого deploy подтвердите в GitHub log, что сервис запущен, затем проверьте:
 
+- перед заменой контейнера: `configReady: true`, `liveSubmissionAllowed: false`;
+- при запуске: событие `trading-selection-loaded` с выбранным алгоритмом, ревизией и публичными тикерами;
 - в Telegram: `/start`, потом `/status`;
 - на сервере: TLS-проверка T-Invest из контейнера возвращает `HTTP 404`;
 - в логах нет `Telegram polling failed`.
@@ -90,4 +108,4 @@ service** → **Run workflow**. Выбирайте только `main`.
 
 ## Откат
 
-Откат — это повторный ручной запуск workflow после revert в `main`. `.env` и Docker volume с журналом при этом сохраняются.
+Откат — это повторный ручной запуск workflow после revert в `main`. `.env` и Docker volume с журналом при этом сохраняются. До отката запретите новые входы и проверьте незавершённые позиции: старая версия сопровождения может не поддерживать новый выбранный актив, которого нет в её watchlist. До подтверждённого закрытия сохраняйте новый защитный модуль. Подробности — [план обновления](BOT_REFRESH_PLAN.md).

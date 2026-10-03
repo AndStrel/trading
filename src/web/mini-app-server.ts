@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { verifyTelegramInitData } from './telegram-auth.js';
 import type { MiniAppView } from './mini-app-view.js';
 import type { MarketSourceController, MarketSourceId } from '../tbank/market-source.js';
+import { isTradingStrategyId } from '../strategies/catalog.js';
 
 type Dependencies = {
   token: string; origin: string; allowedPrivateIds: string[];
@@ -11,6 +12,8 @@ type Dependencies = {
   now?: () => Date;
   marketSources?: Pick<MarketSourceController, 'view'>;
   selectMarketSource?: (source: MarketSourceId) => void;
+  selectTradingStrategy?: (strategyId: string, expectedRevision: number) => void;
+  selectTradingAssets?: (tickers: string[], expectedRevision: number) => void;
 };
 
 const policies = {
@@ -78,11 +81,42 @@ export function createMiniAppServer(dependencies: Dependencies) {
     if (Number(request.headers['content-length']) > 1024) {
       request.resume(); send(response, 413, { error: 'Request body is too large' }); return;
     }
-    const value = await body(request).catch(() => null) as { action?: unknown } | null;
-    if (!value || typeof value.action !== 'string' || !['pause', 'resume', 'kill', 'source-server', 'source-computer'].includes(value.action)) {
+    const value = await body(request).catch(() => null) as Record<string, unknown> | null;
+    if (!value || Array.isArray(value) || typeof value.action !== 'string'
+      || !['pause', 'resume', 'kill', 'source-server', 'source-computer', 'strategy-select', 'assets-select'].includes(value.action)) {
       send(response, 400, { error: 'Unsupported action' }); return;
     }
-    if (value.action === 'source-server' || value.action === 'source-computer') {
+    const selectionAction = value.action === 'strategy-select' || value.action === 'assets-select';
+    const keys = selectionAction ? ['action', 'expectedRevision', value.action === 'strategy-select' ? 'strategyId' : 'tickers'] : ['action'];
+    if (Object.keys(value).some(key => !keys.includes(key))) { send(response, 400, { error: 'Unsupported action fields' }); return; }
+    if (selectionAction) {
+      const revision = value.expectedRevision;
+      if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1) {
+        send(response, 400, { error: 'A valid selection revision is required' }); return;
+      }
+      if (value.action === 'strategy-select' ? !isTradingStrategyId(value.strategyId)
+        : !Array.isArray(value.tickers) || value.tickers.length < 1 || value.tickers.length > 40
+          || value.tickers.some(ticker => typeof ticker !== 'string' || !/^[A-Z0-9.-]{1,16}$/.test(ticker))
+          || new Set(value.tickers).size !== value.tickers.length) {
+        send(response, 400, { error: 'Invalid strategy or asset selection' }); return;
+      }
+      const current = dependencies.view();
+      if (!current.tradingSelection || current.tradingSelection.revision !== revision) {
+        send(response, 409, { error: 'Selection has changed; refresh before applying' }); return;
+      }
+      try {
+        if (value.action === 'strategy-select') {
+          if (!dependencies.selectTradingStrategy) { send(response, 409, { error: 'Strategy selection unavailable' }); return; }
+          dependencies.selectTradingStrategy(value.strategyId as string, revision);
+        } else {
+          if (!dependencies.selectTradingAssets) { send(response, 409, { error: 'Asset selection unavailable' }); return; }
+          if ((value.tickers as string[]).some(ticker => !current.availableTickers?.includes(ticker))) {
+            send(response, 400, { error: 'Asset is not available for selection' }); return;
+          }
+          dependencies.selectTradingAssets(value.tickers as string[], revision);
+        }
+      } catch { send(response, 409, { error: 'Selection changed or scan in progress; refresh before applying' }); return; }
+    } else if (value.action === 'source-server' || value.action === 'source-computer') {
       if (!dependencies.selectMarketSource) { send(response, 409, { error: 'Source selection unavailable' }); return; }
       try { dependencies.selectMarketSource(value.action === 'source-server' ? 'server' : 'computer'); }
       catch { send(response, 409, { error: 'Source unavailable or scan in progress' }); return; }

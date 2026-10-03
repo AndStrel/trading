@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertSnapshotProgress, parseSandboxOrderState } from './sandbox-order-state.js';
+import { assertSnapshotProgress, parseSandboxExitOrderState, parseSandboxOrderState, parseSandboxSessionExitOrderState } from './sandbox-order-state.js';
 
 const now = new Date('2026-09-30T12:00:00.000Z');
 const expected = { requestId: 'local-request', instrumentId: 'local-instrument', lots: 5, lotSize: 10 };
@@ -27,8 +27,25 @@ describe('Sandbox order evidence', () => {
     expect(parseSandboxOrderState(payload({ executionReportStatus: 'EXECUTION_REPORT_STATUS_CANCELLED' }), expected, now))
       .toMatchObject({ terminal: true, lotsExecuted: 3 });
   });
+  it.each(['', undefined])('accepts native child client ID %j only with the exact acknowledged exchange child', orderRequestId => {
+    const sell = payload({ orderRequestId, direction: 'ORDER_DIRECTION_SELL' });
+    const child = { brokerOrderId: 'local-broker-order', instrumentId: expected.instrumentId, lots: 5, lotSize: 10, notBefore: now.toISOString() };
+    expect(parseSandboxExitOrderState(sell, child, now)).toMatchObject({ brokerOrderId: 'local-broker-order', lotsExecuted: 3 });
+    expect(() => parseSandboxExitOrderState(sell, { ...child, brokerOrderId: 'foreign-child' }, now)).toThrow();
+    expect(() => parseSandboxExitOrderState(sell, { ...child, instrumentId: 'foreign-instrument' }, now)).toThrow();
+    expect(() => parseSandboxOrderState(payload({ orderRequestId }), { ...expected, requestId: '' }, now)).toThrow();
+    expect(() => parseSandboxOrderState(payload({ orderRequestId }), expected, now)).toThrow();
+    for (const requestId of ['', expected.requestId]) {
+      expect(() => parseSandboxSessionExitOrderState(sell, { ...child, requestId }, now)).toThrow();
+    }
+  });
+  it('does not expand the broker string dialect to null request IDs', () => {
+    const sell = payload({ orderRequestId: null, direction: 'ORDER_DIRECTION_SELL' });
+    expect(() => parseSandboxExitOrderState(sell, { brokerOrderId: 'local-broker-order', instrumentId: expected.instrumentId,
+      lots: 5, lotSize: 10, notBefore: now.toISOString() }, now)).toThrow();
+  });
   it.each([
-    { orderRequestId: 'another-request' }, { orderRequestId: undefined }, { instrumentUid: 'another-instrument' },
+    { orderRequestId: 'another-request' }, { orderRequestId: undefined }, { orderRequestId: '' }, { orderRequestId: null }, { instrumentUid: 'another-instrument' },
     { direction: 'ORDER_DIRECTION_SELL' }, { currency: 'usd' }, { orderType: 'ORDER_TYPE_MARKET' },
     { lotsRequested: '6' }, { lotsExecuted: '6' }, { lotsExecuted: '3.0' }, { lotsExecuted: undefined },
     { executionReportStatus: 'EXECUTION_REPORT_STATUS_UNSPECIFIED' },

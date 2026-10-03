@@ -14,9 +14,18 @@ import { buildCandidateCardSvg, renderCandidateCardPng } from './candidate-card.
 import type { TelegramClient, TelegramUpdate } from './client.js';
 import { menuCommand, tradingMenu } from './menu.js';
 import { formatNanoRub } from '../execution/sandbox-round-trip.js';
+import { getStrategyDescriptor, isTradingStrategyId, STRATEGY_CATALOG, type TradingStrategyId } from '../strategies/catalog.js';
+import type { TradingSelection } from '../strategies/selection.js';
 
-type ScannerControl = Pick<IntradayScanner, 'isPaused' | 'pause' | 'resume'> &
-  Partial<Pick<IntradayScanner, 'getLatestReport'>>;
+type TradingReport = Omit<IntradayScanReport, 'strategyId' | 'selectionRevision' | 'recommendations'> &
+  Partial<Pick<IntradayScanReport, 'strategyId' | 'selectionRevision' | 'recommendations'>>;
+type ScannerControl = Pick<IntradayScanner, 'isPaused' | 'pause' | 'resume'> & {
+    getLatestReport?(): TradingReport | null;
+    getTradingSelection?(): TradingSelection;
+    getAvailableTickers?(): string[];
+    selectTradingStrategy?(id: TradingStrategyId, expectedRevision: number): void;
+    selectTradingAssets?(tickers: string[], expectedRevision: number): void;
+  };
 type ExecutionControl = Pick<
   ExecutionService,
   | 'mode'
@@ -45,6 +54,14 @@ function formatNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
+function formatTradePrice(value: number): string {
+  return new Intl.NumberFormat('en-US', {
+    useGrouping: false,
+    minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
+    maximumFractionDigits: 9,
+  }).format(value);
+}
+
 function formatDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
@@ -66,7 +83,11 @@ function snapshotInstrumentLabel(record: JournalScenarioRecord): string | null {
   return typeof label === 'string' && label.trim() ? label.trim() : null;
 }
 
-function formatMarketReport(report: IntradayScanReport): string {
+function selectionText(selection: TradingSelection | undefined): string {
+  return selection ? `Стратегия: ${getStrategyDescriptor(selection.strategyId).name} · ревизия ${selection.revision}\nАктивы: ${selection.tickers.join(', ')}` : '';
+}
+
+function formatMarketReport(report: TradingReport, selection?: TradingSelection): string {
   const top = report.topRanked.length
     ? report.topRanked.map((item, index) => {
         const state = item.candidateReady ? 'готов к проверке рынка' : 'наблюдение';
@@ -81,6 +102,7 @@ function formatMarketReport(report: IntradayScanReport): string {
 
   return [
     `Рынок · ${formatDate(report.observedAt)}`,
+    ...(selection ? [selectionText(selection)] : []),
     `Вселенная: ${report.universe.active}/${report.universe.requested} акций (${report.universe.source})`,
     `Проверено: ${report.scanned} · ликвидны: ${report.liquid} · тренд ↑: ${report.trendUp} · объём ≥1.0: ${report.volumeConfirmed}`,
     `До стакана допущено: ${report.readyForMarketCheck} · кандидатов рынка: ${report.marketCandidates} · сохранено: ${report.recordedCandidates}`,
@@ -106,7 +128,7 @@ function formatCandidateFallback(
 ): string {
   return [
     `Кандидат #${record.id} · ${instrumentLabel(record, config)}`,
-    `Вход: ${formatNumber(record.input.entryPrice)} ₽ · стоп: ${formatNumber(record.input.stopPrice)} ₽ · цель: ${formatNumber(record.input.targetPrice)} ₽`,
+    `Вход: ${formatTradePrice(record.input.entryPrice)} ₽ · стоп: ${formatTradePrice(record.input.stopPrice)} ₽ · цель: ${formatTradePrice(record.input.targetPrice)} ₽`,
     `Время: ${formatDate(record.observedAt)}`,
     `Карточка не сформировалась; брокерская заявка не отправлена.${executionHint}`,
   ].join('\n');
@@ -158,6 +180,11 @@ function helpText(): string {
     '/app — открыть Mini App в личном чате',
     '/status — состояние сканера',
     '/market — последний проход, фильтры и лучшие ситуации',
+    '/strategies — выбрать стратегию кнопкой',
+    '/strategy ID — выбрать стратегию командой',
+    '/assets — текущие активы и панель выбора',
+    '/assets VTBR,IRAO — выбрать активы',
+    '/recommendations — объяснения по выбранным активам',
     '/candidates — последние кандидаты',
     '/preview — тестовая карточка без запроса рынка',
     '/pause — поставить сканер на паузу',
@@ -207,12 +234,12 @@ export class TelegramTradingBot {
   async announceMenu(): Promise<void> {
     const app = this.config.telegram.miniApp;
     for (const chatId of this.config.telegram.allowedChatIds.filter(id => /^\d+$/.test(id))) {
-      const key = `telegram.menu.v1.${app.enabled ? 'miniapp' : 'buttons'}.${chatId}`;
+      const key = `telegram.menu.v2.${app.enabled ? 'miniapp' : 'buttons'}.${chatId}`;
       if (this.journal.getRuntimeState(key) === 'sent') continue;
       try {
         await this.client.sendMessage(chatId, app.enabled
           ? 'Теперь бот управляется кнопками. Mini App доступен через кнопку «Панель» или «📱 Мини-приложение». Реальная торговля остаётся выключенной.'
-          : 'Теперь бот управляется кнопками: статус, рынок, кандидаты и лимиты — в меню ниже. Реальная торговля остаётся выключенной.',
+          : 'Стратегии, активы и рекомендации — в меню ниже. Реальная торговля остаётся выключенной.',
         { replyMarkup: tradingMenu() });
         if (app.enabled && app.url) await this.client.setChatMenuButton?.(chatId, app.url);
         this.journal.setRuntimeState(key, 'sent');
@@ -322,6 +349,22 @@ export class TelegramTradingBot {
 
     if (command === '/candidates') {
       await this.sendRecentCandidates(normalizedChatId);
+      return;
+    }
+    if (command === '/strategies') {
+      await this.sendStrategies(normalizedChatId);
+      return;
+    }
+    if (command === '/strategy') {
+      await this.selectStrategyCommand(normalizedChatId, text);
+      return;
+    }
+    if (command === '/assets') {
+      await this.assetsCommand(normalizedChatId, menuCommand(text) ?? text, update.message?.chat?.type);
+      return;
+    }
+    if (command === '/recommendations') {
+      await this.client.sendMessage(normalizedChatId, this.recommendationsText());
       return;
     }
     if (command === '/market') {
@@ -508,6 +551,7 @@ export class TelegramTradingBot {
       `Сканер: ${this.scanner.isPaused() ? 'пауза' : 'активен'}`,
       `Интервал: ${this.config.scanner.intervalSeconds / 60} мин.`,
       `Вселенная: ${universe}`,
+      ...(this.scanner.getTradingSelection ? [selectionText(this.scanner.getTradingSelection())] : []),
       report ? `Последний проход: ${formatDate(report.observedAt)}` : 'Последний проход: ещё не завершён',
       `Cooldown кандидатов: ${this.config.scanner.candidateCooldownMinutes} мин.`,
       this.executionText(),
@@ -516,10 +560,107 @@ export class TelegramTradingBot {
 
   private marketText(): string {
     const report = this.scanner.getLatestReport?.();
+    const selection = this.scanner.getTradingSelection?.();
     if (!report) {
-      return 'Первый проход рынка ещё не завершён. Повторите /market через 1–2 минуты.';
+      return [selectionText(selection), 'Первый проход рынка с текущими настройками ещё не завершён. Повторите /market через 1–2 минуты.'].filter(Boolean).join('\n');
     }
-    return formatMarketReport(report);
+    return formatMarketReport(report, selection);
+  }
+
+  private recommendationsText(): string {
+    const selection = this.scanner.getTradingSelection?.();
+    const report = this.scanner.getLatestReport?.();
+    if (!report?.recommendations?.length || (selection && report.selectionRevision !== undefined
+      && (report.selectionRevision !== selection.revision || report.strategyId !== selection.strategyId))) {
+      return [selectionText(selection), 'Рекомендации для текущего выбора ещё не готовы. Дождитесь нового прохода рынка.'].filter(Boolean).join('\n');
+    }
+    const labels = { signal: 'сигнал для проверки', wait: 'наблюдать', blocked: 'пропустить', error: 'ошибка данных' };
+    const money = (value: number | null) => typeof value === 'number' && Number.isFinite(value) ? `${formatNumber(value)} ₽` : '—';
+    return [
+      `Рекомендации · ${formatDate(report.observedAt)}`, selectionText(selection),
+      ...report.recommendations.slice(0, 5).map(item => [
+        `${item.ticker}: ${labels[item.status]} · оценка ${item.score}/100`,
+        `Лот: ${money(item.lotCostRub)} · затраты круга: ${money(item.roundTripCostsRub)}`,
+        `Расчётный риск: ${money(item.totalRiskRub)} · потенциал после расходов: ${money(item.netRewardRub)}`,
+        ...item.reasons.slice(0, 2).map(reason => `• ${reason.slice(0, 240)}`),
+      ].join('\n')),
+      'Оценка отражает соответствие правилам, а не вероятность прибыльной сделки. Карточки кандидатов доступны через /candidates.',
+    ].filter(Boolean).join('\n\n');
+  }
+
+  private async sendStrategies(chatId: string): Promise<void> {
+    const selection = this.scanner.getTradingSelection?.();
+    const descriptions = STRATEGY_CATALOG.map(item => `${selection?.strategyId === item.id ? '✓ ' : ''}${item.name}\n${item.description}`);
+    await this.client.sendMessage(chatId, [
+      'Выберите торговый подход:', ...descriptions,
+      'После смены стратегии рекомендации пересчитываются. Прибыльность этих правил пока не подтверждена.',
+    ].join('\n\n'), selection && this.scanner.selectTradingStrategy ? {
+      replyMarkup: { inline_keyboard: STRATEGY_CATALOG.map(item => [{
+        text: `${selection.strategyId === item.id ? '✓ ' : ''}${item.name}`,
+        callback_data: `strategy:${item.id}:${selection.revision}`,
+      }]) },
+    } : { replyMarkup: tradingMenu() });
+  }
+
+  private async selectStrategyCommand(chatId: string, text: string): Promise<void> {
+    const parts = text.trim().split(/\s+/);
+    if (parts.length !== 2 || !isTradingStrategyId(parts[1])) {
+      await this.sendStrategies(chatId);
+      return;
+    }
+    const selection = this.scanner.getTradingSelection?.();
+    if (!selection || !this.scanner.selectTradingStrategy) {
+      await this.client.sendMessage(chatId, 'Выбор стратегии в этом процессе пока не подключён.');
+      return;
+    }
+    await this.applyStrategy(chatId, parts[1], selection.revision);
+  }
+
+  private async applyStrategy(chatId: string, id: TradingStrategyId, revision: number): Promise<void> {
+    if (!this.scanner.selectTradingStrategy) {
+      await this.client.sendMessage(chatId, 'Выбор стратегии в этом процессе пока не подключён.');
+      return;
+    }
+    try {
+      this.scanner.selectTradingStrategy(id, revision);
+    } catch {
+      await this.client.sendMessage(chatId, 'Выбор не применён: настройки уже изменились или недоступны. Откройте /strategies заново.');
+      return;
+    }
+    await this.client.sendMessage(chatId, `Выбрано: ${getStrategyDescriptor(id).name}. Рекомендации появятся после нового прохода рынка.`, { replyMarkup: tradingMenu() });
+  }
+
+  private async assetsCommand(chatId: string, text: string, chatType: string | undefined): Promise<void> {
+    const parts = text.trim().split(/\s+/);
+    const selection = this.scanner.getTradingSelection?.();
+    if (parts.length > 1) {
+      const tickers = parts[1]?.split(',').map(value => value.trim().toUpperCase()) ?? [];
+      if (parts.length !== 2 || !tickers.length || tickers.some(ticker => !/^[A-Z0-9.-]{1,16}$/.test(ticker))
+        || tickers.length > 40 || new Set(tickers).size !== tickers.length) {
+        await this.client.sendMessage(chatId, 'Формат выбора: /assets VTBR,IRAO — тикеры через запятую без повторов.');
+        return;
+      }
+      if (!selection || !this.scanner.selectTradingAssets) {
+        await this.client.sendMessage(chatId, 'Выбор активов в этом процессе пока не подключён.');
+        return;
+      }
+      try { this.scanner.selectTradingAssets(tickers, selection.revision); }
+      catch {
+        await this.client.sendMessage(chatId, 'Выбор не применён. Список должен содержать доступные активы; при изменении настроек откройте /assets заново.');
+        return;
+      }
+      await this.client.sendMessage(chatId, `Выбраны активы: ${tickers.join(', ')}. Рекомендации пересчитаются после нового прохода.`, { replyMarkup: tradingMenu() });
+      return;
+    }
+    const app = this.config.telegram.miniApp;
+    const available = this.scanner.getAvailableTickers?.() ?? [];
+    await this.client.sendMessage(chatId, [
+      selection ? `Текущие активы: ${selection.tickers.join(', ')}` : 'Выбор активов пока не подключён.',
+      available.length ? `Доступны: ${available.join(', ')}` : '',
+      'Выберите активы в панели или командой /assets VTBR,IRAO.',
+    ].filter(Boolean).join('\n'), app.enabled && app.url && chatType === 'private' ? {
+      replyMarkup: { inline_keyboard: [[{ text: 'Выбрать активы в панели', web_app: { url: app.url } }]] },
+    } : { replyMarkup: tradingMenu() });
   }
 
   private pilotText(): string {
@@ -554,7 +695,7 @@ export class TelegramTradingBot {
       'Последние sandbox-поручения:',
       ...orders.map(
         (order) =>
-          `#${order.scenarioId}: ${order.status}, ${order.lots} лот. по ${formatNumber(order.limitPrice)} ₽, риск ${formatNumber(order.estimatedRiskRub)} ₽`,
+          `#${order.scenarioId}: ${order.status}, ${order.lots} лот. по ${formatTradePrice(order.limitPrice)} ₽, риск ${formatNumber(order.estimatedRiskRub)} ₽`,
       ),
     ].join('\n');
   }
@@ -648,6 +789,19 @@ export class TelegramTradingBot {
     if (!this.config.telegram.allowedChatIds.includes(normalizedChatId)) {
       await this.client.answerCallbackQuery?.(callbackId, 'Нет доступа');
       this.log(`Ignored Telegram callback from an unauthorized chat: ${normalizedChatId}`);
+      return;
+    }
+
+    if (data.startsWith('strategy:')) {
+      const match = /^strategy:([a-z0-9-]{1,48}):([1-9]\d{0,15})$/.exec(data);
+      const id = match?.[1];
+      const revision = Number(match?.[2]);
+      if (data.length > 64 || !isTradingStrategyId(id) || !Number.isSafeInteger(revision) || revision < 1) {
+        await this.client.answerCallbackQuery?.(callbackId, 'Некорректный выбор стратегии');
+        return;
+      }
+      await this.client.answerCallbackQuery?.(callbackId, 'Проверяю выбор…');
+      await this.applyStrategy(normalizedChatId, id, revision);
       return;
     }
 

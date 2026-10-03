@@ -2,6 +2,7 @@ import { z } from 'zod/v4';
 
 import type { TInvestTransport } from './tbank/client.js';
 import { pilotPositionBudget } from './execution/live-pilot-risk.js';
+import { TRADING_STRATEGY_IDS, type TradingStrategyId } from './strategies/catalog.js';
 
 export type Strategy = 'intraday' | 'swing';
 export type ExecutionMode = 'disabled' | 'sandbox';
@@ -15,6 +16,8 @@ export type IntradayWatchlistItem = {
 };
 
 export type ScannerConfig = {
+  tradingStrategyId: TradingStrategyId;
+  sessionStartMinutes: number;
   intervalSeconds: number;
   lookbackMinutes: number;
   candidateCooldownMinutes: number;
@@ -168,6 +171,8 @@ const envSchema = z.object({
   T_INVEST_INTRADAY_WATCHLIST: z.string().default('[]'),
   T_INVEST_INTRADAY_UNIVERSE: z.enum(['moex-liquid', 'watchlist']).default('moex-liquid'),
   T_INVEST_INTRADAY_UNIVERSE_TICKERS: z.string().default(''),
+  T_INVEST_TRADING_STRATEGY_ID: z.enum(TRADING_STRATEGY_IDS).default('trend-momentum-v1'),
+  T_INVEST_STRATEGY_SESSION_START: z.string().regex(/^(0[6-9]|1[0-5]):(00|05|10|15|20|25|30|35|40|45|50|55)$/).default('09:10'),
   T_INVEST_SCANNER_UNIVERSE_REFRESH_MINUTES: z.coerce.number().int().min(60).max(10_080).default(1_440),
   T_INVEST_SCANNER_MAX_INSTRUMENTS: z.coerce.number().int().min(5).max(40).default(30),
   T_INVEST_SCANNER_MAX_CONCURRENT_REQUESTS: z.coerce.number().int().min(1).max(5).default(2),
@@ -255,6 +260,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   }
   // Leave cash for entry fees and estimated slippage; never round this budget up.
   const pilotPositionRub = pilotPositionBudget(parsed.T_INVEST_LIVE_CAPITAL_RUB, commissionRate, parsed.T_INVEST_SCANNER_SLIPPAGE_RATE);
+  const intradayWatchlist = parseIntradayWatchlist(parsed.T_INVEST_INTRADAY_WATCHLIST);
+  if (parsed.T_INVEST_INTRADAY_UNIVERSE === 'watchlist' && intradayWatchlist.some(item => !item.label || !/^[A-Z0-9.-]{1,16}$/.test(item.label))) {
+    throw new Error('Watchlist mode requires an uppercase exchange ticker label for each item; use moex-liquid for automatic metadata');
+  }
   return {
     ...(parsed.T_INVEST_TOKEN ? { token: parsed.T_INVEST_TOKEN } : {}),
     baseUrl: parsed.T_INVEST_BASE_URL.replace(/\/$/, ''),
@@ -264,6 +273,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     journalPath: parsed.T_INVEST_JOURNAL_PATH,
     marketDataPath: parsed.T_INVEST_MARKET_DATA_PATH,
     scanner: {
+      tradingStrategyId: parsed.T_INVEST_TRADING_STRATEGY_ID,
+      sessionStartMinutes: Number(parsed.T_INVEST_STRATEGY_SESSION_START.slice(0, 2)) * 60 + Number(parsed.T_INVEST_STRATEGY_SESSION_START.slice(3)),
       intervalSeconds: parsed.T_INVEST_SCANNER_INTERVAL_SECONDS,
       lookbackMinutes: parsed.T_INVEST_SCANNER_LOOKBACK_MINUTES,
       candidateCooldownMinutes: parsed.T_INVEST_SCANNER_CANDIDATE_COOLDOWN_MINUTES,
@@ -276,7 +287,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       minAverageCandleTurnoverRub:
         parsed.T_INVEST_SCANNER_MIN_AVERAGE_CANDLE_TURNOVER_RUB,
       maxCandidatesPerScan: parsed.T_INVEST_SCANNER_MAX_CANDIDATES_PER_SCAN,
-      intradayWatchlist: parseIntradayWatchlist(parsed.T_INVEST_INTRADAY_WATCHLIST),
+      intradayWatchlist,
     },
     telegram: {
       ...(parsed.TELEGRAM_BOT_TOKEN ? { token: parsed.TELEGRAM_BOT_TOKEN } : {}),

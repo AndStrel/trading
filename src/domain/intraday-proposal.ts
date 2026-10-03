@@ -1,5 +1,6 @@
 import type { CandleAnalysis } from './candle-analysis.js';
 import { quotationToNumber } from './money.js';
+import { MAX_SUPPORTED_PRICE, priceToNano, roundPriceToTick } from './price-tick.js';
 
 export type IntradayLongProposal = {
   entryPrice: number;
@@ -7,14 +8,6 @@ export type IntradayLongProposal = {
   targetPrice: number;
   reasons: string[];
 };
-
-function roundDownToStep(value: number, step: number) {
-  return Math.floor((value + Number.EPSILON) / step) * step;
-}
-
-function roundUpToStep(value: number, step: number) {
-  return Math.ceil((value - Number.EPSILON) / step) * step;
-}
 
 function bestAsk(orderBookPayload: unknown): number | null {
   if (typeof orderBookPayload !== 'object' || orderBookPayload === null) return null;
@@ -42,6 +35,7 @@ export function proposeIntradayLong(input: {
   if (!Number.isFinite(priceStep) || priceStep <= 0) {
     throw new Error('priceStep must be a finite number greater than zero');
   }
+  priceToNano(priceStep);
   if (
     !Number.isFinite(input.commissionRate) ||
     !Number.isFinite(input.slippageRate) ||
@@ -56,9 +50,9 @@ export function proposeIntradayLong(input: {
   if (candleAnalysis.averageTrueRange14 === null || candleAnalysis.averageTrueRange14 <= 0) return null;
 
   const bestAskPrice = bestAsk(input.orderBookPayload);
-  if (bestAskPrice === null) return null;
+  if (bestAskPrice === null || bestAskPrice > MAX_SUPPORTED_PRICE) return null;
 
-  const entryPrice = roundUpToStep(bestAskPrice, priceStep);
+  const entryPrice = roundPriceToTick(bestAskPrice, priceStep, 'ceil');
   const riskPerUnit = Math.max(candleAnalysis.averageTrueRange14 * 1.5, entryPrice * 0.001);
   const roundTripCostPerUnit = entryPrice * (input.commissionRate * 2 + input.slippageRate * 2);
   const targetDistance = Math.max(
@@ -67,8 +61,9 @@ export function proposeIntradayLong(input: {
   );
   if (targetDistance > candleAnalysis.averageTrueRange14 * 5) return null;
 
-  const stopPrice = roundDownToStep(entryPrice - riskPerUnit, priceStep);
-  const targetPrice = roundUpToStep(entryPrice + targetDistance, priceStep);
+  if (entryPrice - riskPerUnit <= 0 || entryPrice + targetDistance > MAX_SUPPORTED_PRICE) return null;
+  const stopPrice = roundPriceToTick(entryPrice - riskPerUnit, priceStep, 'floor');
+  const targetPrice = roundPriceToTick(entryPrice + targetDistance, priceStep, 'ceil');
   if (stopPrice <= 0 || stopPrice >= entryPrice || targetPrice <= entryPrice) return null;
 
   return {

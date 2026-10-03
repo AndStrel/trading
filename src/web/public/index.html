@@ -22,11 +22,30 @@
       <article class="risk-card"><div class="section-head"><h3>Контроль убытка · sandbox</h3><span id="sandbox-loss-state" class="tag">Нет данных</span></div><dl><div><dt>Убытки закрытых пар за день</dt><dd id="sandbox-closed-loss">Не подтверждены</dd></div><div><dt>Оценка открытого убытка</dt><dd id="sandbox-open-loss">Не подтверждена</dd></div><div><dt>Сумма для дневного порога</dt><dd id="sandbox-total-loss">Не подтверждена</dd></div></dl><p id="sandbox-loss-date" class="muted">Проверок ещё не было.</p><p class="muted">Виртуальный счёт, не live. Открытый убыток оценён по всему остатку в BID с расходами. Прибыль не компенсирует убытки других сделок. Устаревшие или неполные данные блокируют новые входы при включённой защите; автоматического закрытия этот контроль не выполняет.</p></article>
       <div class="section-head"><h2>Результаты песочницы</h2><span class="tag">Не live</span></div><p class="muted">По фактическим виртуальным исполнениям и известным комиссиям, до налогов и иных расходов счёта. Не оценка реальной доходности.</p><div id="sandbox-results" class="candidate-list"><article class="empty">Нет подтверждённых данных.</article></div>
     </section>
-    <section id="candidates" class="panel" hidden aria-labelledby="candidates-title"><div class="section-head"><h2 id="candidates-title">Кандидаты</h2><span id="candidate-count">—</span></div><p class="muted">Только свежие ситуации из журнала. Ручная проверка обязательна.</p><div id="candidate-list" class="candidate-list"><article class="empty">Нет подтверждённых данных.</article></div></section>
+    <section id="trading" class="panel" hidden aria-labelledby="trading-title">
+      <div class="section-head"><h2 id="trading-title">Стратегия и активы</h2><span id="selection-revision">—</span></div>
+      <article class="strategy-card">
+        <label for="strategy-select">Правила входа</label>
+        <select id="strategy-select" disabled><option>Ждём подключения</option></select>
+        <p id="strategy-description" class="muted">Выберите стратегию, чтобы увидеть её правила.</p>
+        <ul id="strategy-rules" class="strategy-rules"></ul>
+        <p class="muted">Результаты этих правил ещё проверяются. Доходность и 51% успешных сделок не подтверждены.</p>
+        <button id="save-strategy" class="button" disabled>Применить стратегию</button>
+      </article>
+      <article class="asset-card">
+        <fieldset><legend>Активы для сканирования</legend><div id="asset-options" class="asset-options"></div></fieldset>
+        <p id="selected-assets" class="muted">Настройки ещё не подключены.</p>
+        <button id="save-assets" class="button" disabled>Применить активы</button>
+      </article>
+      <div class="section-head"><h2>Рекомендации</h2><span id="recommendation-count">—</span></div>
+      <p class="muted">Пригодность к выбранным правилам и ограничениям. Баллы не являются вероятностью прибыли. Все суммы ниже — расчёт плана, не заработанные деньги.</p>
+      <div id="recommendation-list" class="candidate-list"><article class="empty">Ждём первый анализ выбранных активов.</article></div>
+    </section>
+    <section id="candidates" class="panel" hidden aria-labelledby="candidates-title"><div class="section-head"><h2 id="candidates-title">Кандидаты</h2><span id="candidate-count">—</span></div><p class="muted">Свежие ситуации выбранной стратегии и активов. Ручная проверка обязательна.</p><div id="candidate-list" class="candidate-list"><article class="empty">Нет подтверждённых данных.</article></div></section>
     <section id="risk" class="panel" hidden aria-labelledby="risk-title"><div class="section-head"><h2 id="risk-title">Ограничения</h2><span class="tag">Без плеча</span></div><article class="risk-card"><dl><div><dt>Максимум позиции</dt><dd id="position-limit">—</dd></div><div><dt>Комиссия на сторону</dt><dd id="commission">—</dd></div><div><dt>Проскальзывание в модели</dt><dd id="slippage">—</dd></div><div><dt>Порог дневного убытка</dt><dd id="loss-limit">—</dd></div><div><dt>Контроль фактического убытка</dt><dd>Не подключён</dd></div><div><dt>Реальные заявки</dt><dd>Заблокированы</dd></div></dl></article><p class="notice">Расчётный риск не гарантирует размер фактического убытка при резком движении рынка. Недельный счёт не используется.</p><button id="kill" class="button danger" disabled>Запретить новые входы</button><p class="muted">Запрет сохраняется после перезапуска. Эта кнопка не закрывает позиции и не отменяет уже принятые заявки.</p></section>
     <footer>Наблюдение ≠ доказанная прибыльность</footer>
   </main>
-  <nav aria-label="Разделы"><button data-tab="overview" aria-current="page">◉ <span>Обзор</span></button><button data-tab="candidates">⌁ <span>Кандидаты</span></button><button data-tab="risk">◇ <span>Риски</span></button></nav>
+  <nav aria-label="Разделы"><button data-tab="overview" aria-current="page">◉ <span>Обзор</span></button><button data-tab="trading">⚙ <span>Стратегия</span></button><button data-tab="candidates">⌁ <span>Кандидаты</span></button><button data-tab="risk">◇ <span>Риски</span></button></nav>
   <dialog id="confirm-kill"><h2>Запретить новые входы?</h2><p>Новые заявки будут заблокированы. Уже открытые позиции эта кнопка не закрывает.</p><div class="dialog-actions"><button id="cancel-kill" class="button">Отмена</button><button id="confirm-kill-button" class="button danger">Запретить входы</button></div></dialog>
 </body>
 </html>

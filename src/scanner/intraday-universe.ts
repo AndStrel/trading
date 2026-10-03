@@ -50,7 +50,7 @@ export type IntradayUniverseSnapshot = {
 };
 
 export type IntradayUniverseProvider = {
-  getSnapshot(now: Date): Promise<IntradayUniverseSnapshot>;
+  getSnapshot(now: Date, tickers?: readonly string[]): Promise<IntradayUniverseSnapshot>;
 };
 
 type SharePayload = {
@@ -158,23 +158,22 @@ export class TInvestIntradayUniverseProvider implements IntradayUniverseProvider
     private readonly client: Pick<TInvestClient, 'getShares'>,
   ) {}
 
-  async getSnapshot(now: Date): Promise<IntradayUniverseSnapshot> {
+  async getSnapshot(now: Date, tickers?: readonly string[]): Promise<IntradayUniverseSnapshot> {
     if (this.config.scanner.universeMode === 'watchlist') {
       return watchlistSnapshot(this.config, now, this.client);
     }
 
     const refreshAgeMs = this.config.scanner.universeRefreshMinutes * 60_000;
+    const requestedTickers = tickers ? [...tickers] : this.config.scanner.universeTickers.length
+      ? this.config.scanner.universeTickers : [...DEFAULT_MOEX_LIQUID_TICKERS];
     if (
       this.cached &&
+      JSON.stringify(this.cached.requestedTickers) === JSON.stringify(requestedTickers) &&
       now.getTime() - new Date(this.cached.refreshedAt).getTime() < refreshAgeMs
     ) {
       return this.cached;
     }
 
-    const requestedTickers =
-      this.config.scanner.universeTickers.length > 0
-        ? this.config.scanner.universeTickers
-        : [...DEFAULT_MOEX_LIQUID_TICKERS];
     const shares = parseShares(await this.client.getShares());
     const byTicker = new Map<string, ResolvedIntradayInstrument>();
 

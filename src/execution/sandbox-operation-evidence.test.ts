@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { hydrateSandboxSingleUnitOrder, sandboxOrderNeedsOperations } from './sandbox-operation-evidence.js';
-import { parseSandboxOrderState } from './sandbox-order-state.js';
+import { parseSandboxExitOrderState, parseSandboxOrderState, parseSandboxSessionExitOrderState } from './sandbox-order-state.js';
 import { TInvestOrderClient } from './tinvest-order-client.js';
 const at='2026-10-02T09:15:49.768830Z',now=new Date('2026-10-02T09:20:00Z');
 const price={currency:'rub',units:'52',nano:335000000};
@@ -14,6 +14,45 @@ function fixture(sell=false) {
   return{order,operation};
 }
 describe('Actual sandbox operation fill evidence, never invented stages',()=>{
+  it.each(['',undefined])('hydrates native child client ID %j only through exact broker identity and real operation proof',orderRequestId=>{
+    const f=fixture(true),order={...f.order,orderRequestId};
+    expect(sandboxOrderNeedsOperations(order)).toBe(true);
+    const hydrated=hydrateSandboxSingleUnitOrder(order,{operations:[f.operation]},{brokerOrderId:'broker-id'},now);
+    expect(hydrated.stages).toEqual([{tradeId:'actual-trade-id',price,quantity:1,executionTime:at,evidenceSource:'sandbox-operation',operationId:'actual-operation-id'}]);
+    const expected={brokerOrderId:'broker-id',instrumentId:'instrument',lots:1,lotSize:1,notBefore:'2026-10-02T09:15:00Z'};
+    expect(parseSandboxExitOrderState(hydrated,expected,now).terminal).toBe(true);
+    expect(()=>parseSandboxExitOrderState(hydrated,{...expected,brokerOrderId:'foreign'},now)).toThrow();
+    for(const requestId of ['', 'request-id']) {
+      expect(()=>parseSandboxSessionExitOrderState(hydrated,{...expected,requestId},now)).toThrow();
+      expect(()=>parseSandboxOrderState({...hydrated,direction:'ORDER_DIRECTION_BUY'},{requestId,instrumentId:'instrument',lots:1,lotSize:1},now)).toThrow();
+    }
+    expect(()=>hydrateSandboxSingleUnitOrder(order,{operations:[f.operation]},{requestId:'request-id'},now)).toThrow();
+    expect(()=>hydrateSandboxSingleUnitOrder(order,{operations:[f.operation]},{brokerOrderId:'foreign'},now)).toThrow();
+  });
+  it.each(['duplicate','instrument','side','payment'])('does not loosen %s operation proof for native children without client IDs',condition=>{
+    const f=fixture(true),order={...f.order,orderRequestId:''};let operations=[f.operation];
+    if(condition==='duplicate')operations.push({...f.operation,id:'another-operation'});
+    if(condition==='instrument')f.operation.instrumentUid='foreign';
+    if(condition==='side')f.operation.operationType='OPERATION_TYPE_BUY';
+    if(condition==='payment')f.operation.payment={...f.operation.payment,nano:330000000};
+    expect(()=>hydrateSandboxSingleUnitOrder(order,{operations},{brokerOrderId:'broker-id'},now)).toThrow();
+  });
+  it('rejects null client ID instead of guessing a new native-child dialect',()=>{
+    const f=fixture(true),order={...f.order,orderRequestId:null};
+    expect(sandboxOrderNeedsOperations(order)).toBe(false);
+    expect(()=>hydrateSandboxSingleUnitOrder(order,{operations:[f.operation]},{brokerOrderId:'broker-id'},now)).toThrow();
+  });
+  it('client recovers native child stages by exchange ID using read endpoints only',async()=>{
+    const f=fixture(true),order={...f.order,orderRequestId:''},requests:Array<{url:string;body:Record<string,unknown>}>=[];
+    const fetcher=vi.fn(async(url:unknown,init?:RequestInit)=>{
+      requests.push({url:String(url),body:JSON.parse(String(init?.body))});
+      return new Response(JSON.stringify(String(url).endsWith('/GetSandboxOperations')?{operations:[f.operation]}:order));
+    }) as unknown as typeof fetch;
+    const client=new TInvestOrderClient('synthetic-sandbox','https://example.test/rest',fetcher);
+    expect(await client.getSandboxChildOrderState('synthetic-account','broker-id')).toMatchObject({stages:[expect.objectContaining({tradeId:'actual-trade-id',operationId:'actual-operation-id'})]});
+    expect(requests.map(r=>r.url.split('/').at(-1))).toEqual(['GetSandboxOrderState','GetSandboxOperations']);
+    expect(requests[0]?.body).toMatchObject({orderId:'broker-id',orderIdType:'ORDER_ID_TYPE_EXCHANGE'});
+  });
   it.each([false,true])('recovers actual trade for BUY/SELL=%s and preserves provenance',sell=>{
     const f=fixture(sell),hydrated=hydrateSandboxSingleUnitOrder(f.order,{operations:[f.operation]},{requestId:'request-id'},now);
     expect(hydrated.stages[0]).toMatchObject({tradeId:'actual-trade-id',executionTime:at,evidenceSource:'sandbox-operation',operationId:'actual-operation-id'});

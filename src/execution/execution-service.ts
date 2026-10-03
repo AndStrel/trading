@@ -22,6 +22,10 @@ import { decimalPriceNano } from './sandbox-stop-state.js';
 import { assertSandboxInstrument } from './sandbox-instrument.js';
 import { assertNoSandboxOrders, sandboxFlatCashNano } from './sandbox-flat-account.js';
 import { readPreparedSandbox, sandboxAccountKey, sandboxBootstrapKey, sandboxEndpoint } from './sandbox-prepared-account.js';
+import { assertScenarioSelection } from '../strategies/selection.js';
+import { scenarioInstrument } from './scenario-instrument.js';
+import { getStrategyDescriptor, isTradingStrategyId } from '../strategies/catalog.js';
+import { strategyEntryWindow } from '../strategies/entry-window.js';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -173,6 +177,7 @@ export class ExecutionService {
       throw new Error('Only recorded intraday candidates can be queued');
     }
     if (scenario.input.side !== 'long') throw new Error('Short execution is disabled');
+    assertScenarioSelection(this.journal,scenario);
     this.assertSessionMetadata(scenario);
 
     const plan = this.readValidatedPlan(scenario);
@@ -211,6 +216,12 @@ export class ExecutionService {
   }
 
   private async submitGuarded(scenarioId: number, chatId: string, now: Date): Promise<ExecutionSubmitResult> {
+    const started = performance.now();
+    const currentTime = () => {
+      const elapsed = performance.now() - started;
+      if (!Number.isFinite(elapsed) || elapsed < 0) throw new Error('Execution preflight clock is not confirmed');
+      return new Date(now.getTime() + elapsed);
+    };
     if (!this.isReady()) throw new Error('Sandbox execution is disabled, unarmed or not fully configured');
     // An earlier HTTP timeout is NOT permission to send again. Reading state
     // remains possible after kill, restart or candidate expiry.
@@ -232,12 +243,14 @@ export class ExecutionService {
       throw new Error('A recorded intraday candidate was not found');
     }
     if (scenario.input.side !== 'long') throw new Error('Short execution is disabled');
+    const versionedScanner = this.assertScannerEntryWindow(scenario, currentTime());
 
     const ageMs = now.getTime() - new Date(scenario.observedAt).getTime();
     if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > this.config.execution.candidateMaxAgeMinutes * 60_000) {
       throw new Error(`Candidate is older than ${this.config.execution.candidateMaxAgeMinutes} minutes`);
     }
 
+    const selectionProof = assertScenarioSelection(this.journal,scenario);
     const plan = this.readValidatedPlan(scenario);
     this.assertStrategyLimits(plan);
     this.assertSessionMetadata(scenario);
@@ -270,8 +283,8 @@ export class ExecutionService {
       if (lossProof.status !== 'ok') throw new Error('Sandbox loss allowance is not confirmed; no entry was sent');
       await this.validateCurrentMarket(scenario, plan.lots);
     }
-    const claimNow = lossProof ? new Date() : now;
-    if (lossProof) {
+    const claimNow = versionedScanner ? currentTime() : lossProof ? new Date() : now;
+    if (lossProof || versionedScanner) {
       const finalAge = claimNow.getTime() - Date.parse(scenario.observedAt);
       if (finalAge < 0 || finalAge > this.config.execution.candidateMaxAgeMinutes * 60_000) throw new Error('Candidate expired during sandbox loss preflight');
     }
@@ -279,6 +292,7 @@ export class ExecutionService {
     if (this.config.execution.sandboxSessionCloseEnabled && !sandboxSessionEntryAllowed(claimNow)) {
       throw new Error('Sandbox entry window ended during preflight');
     }
+    this.assertScannerEntryWindow(scenario, claimNow);
     let claimed: ExecutionOrderRecord;
     try {
       claimed = this.journal.claimExecution(scenarioId, chatId, {
@@ -286,6 +300,7 @@ export class ExecutionService {
         maxRiskRub: this.config.execution.maxDailyRiskRub,
         singlePosition: this.config.livePilot.prepare,
         preparedSandbox: { ...prepared, generation: killGeneration },
+        ...(selectionProof ? {tradingSelection:selectionProof} : {}),
         ...(lossProof ? { lossGuard: { proofId: lossProof.proofId, accountId: this.accountId!,
           maxDailyLossRub: this.config.livePilot.maxDailyLossRub, maxTradeLossRub: this.config.livePilot.maxTradeRiskRub } } : {}),
       });
@@ -433,6 +448,27 @@ export class ExecutionService {
     if (plan.totalRiskRub > limits.maxRiskRub) throw new Error('Scenario exceeds the risk limit');
   }
 
+  private assertScannerEntryWindow(scenario: JournalScenarioRecord, now: Date): boolean {
+    const snapshot = asRecord(scenario.snapshot);
+    if (snapshot?.source !== 'intraday-scanner' || snapshot.tradingStrategy === undefined) return false;
+    const strategy = asRecord(snapshot.tradingStrategy);
+    if (!isTradingStrategyId(strategy?.id) || strategy.version !== getStrategyDescriptor(strategy.id).version
+      || typeof strategy.referenceStartMinutes !== 'number') throw new Error('Original scanner strategy entry window is not confirmed');
+    const selection = asRecord(snapshot.tradingSelection);
+    if (snapshot.tradingSelection !== undefined && selection?.strategyId !== strategy.id) {
+      throw new Error('Original scanner strategy entry window does not match the recorded selection');
+    }
+    const original = strategyEntryWindow(strategy.id, strategy.referenceStartMinutes, new Date(scenario.observedAt));
+    const current = strategyEntryWindow(strategy.id, this.config.scanner.sessionStartMinutes, now);
+    // Both windows must allow entry: a configuration change or a new Moscow day
+    // can tighten the original candidate's deadline, never extend it.
+    if (!original || !current || now.getTime() < Math.max(original.entryStartMs, current.entryStartMs)
+      || now.getTime() >= Math.min(original.entryEndMs, current.entryEndMs)) {
+      throw new Error('Versioned scanner entry window is closed; regenerate the candidate');
+    }
+    return true;
+  }
+
   private readValidatedPlan(scenario: JournalScenarioRecord): TradePlanSnapshot {
     const plan = readTradePlan(scenario);
     if (!this.config.livePilot.prepare) return plan;
@@ -456,16 +492,17 @@ export class ExecutionService {
   }
 
   private async validateCurrentMarket(scenario: JournalScenarioRecord, lots: number): Promise<void> {
+    const snapshot=asRecord(scenario.snapshot);
+    const versionedScanner=snapshot?.source==='intraday-scanner' && snapshot.tradingStrategy!==undefined;
     const [orderBookPayload, statusPayload, instrumentPayload] = await Promise.all([
       this.marketClient.getOrderBook(scenario.instrumentId, 20),
       this.marketClient.getTradingStatus(scenario.instrumentId),
-      this.config.execution.sandboxSessionCloseEnabled ? this.marketClient.getInstrumentBy?.(scenario.instrumentId) : undefined,
+      this.config.execution.sandboxSessionCloseEnabled || versionedScanner ? this.marketClient.getInstrumentBy?.(scenario.instrumentId) : undefined,
     ]);
-    if (this.config.execution.sandboxSessionCloseEnabled) {
-      const item=this.config.scanner.intradayWatchlist.find(item=>item.instrumentId===scenario.instrumentId)!;
-      assertSandboxInstrument(instrumentPayload,{instrumentId:scenario.instrumentId,lotSize:scenario.input.lotSize,priceStep:item.priceStep},true);
+    if (this.config.execution.sandboxSessionCloseEnabled || versionedScanner) {
+      assertSandboxInstrument(instrumentPayload,scenarioInstrument(this.config,scenario),true);
     }
-    if (this.config.execution.sandboxLossGuardEnabled) {
+    if (this.config.execution.sandboxLossGuardEnabled || versionedScanner) {
       sandboxBidValue(orderBookPayload, statusPayload, scenario.instrumentId, lots, scenario.input.lotSize, new Date());
     }
     const bid = bestPrice(orderBookPayload, 'bids');
@@ -494,10 +531,8 @@ export class ExecutionService {
 
   private assertSessionMetadata(scenario: JournalScenarioRecord): void {
     if (!this.config.execution.sandboxSessionCloseEnabled) return;
-    const items = this.config.scanner.intradayWatchlist.filter(item => item.instrumentId === scenario.instrumentId);
-    const item = items[0];
-    if (items.length !== 1 || !item || item.lotSize !== scenario.input.lotSize
-      || [scenario.input.entryPrice, scenario.input.stopPrice].some(price => BigInt(decimalPriceNano(price)) % BigInt(decimalPriceNano(item.priceStep)) !== 0n)) {
+    const item = scenarioInstrument(this.config,scenario);
+    if ([scenario.input.entryPrice, scenario.input.stopPrice].some(price => BigInt(decimalPriceNano(price)) % BigInt(decimalPriceNano(item.priceStep)) !== 0n)) {
       throw new Error('Configured lot size and price tick for sandbox closing are not confirmed');
     }
   }

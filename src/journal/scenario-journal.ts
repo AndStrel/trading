@@ -450,6 +450,7 @@ export class ScenarioJournal {
     strategy: Strategy;
     instrumentId: string;
     since: string;
+    selectionRevision?: number;
   }): boolean {
     const database = this.open();
 
@@ -461,10 +462,11 @@ export class ScenarioJournal {
              AND instrument_id = ?
              AND decision = 'candidate'
              AND recorded_at >= ?
+             AND (? IS NULL OR json_extract(snapshot_json, '$.tradingSelection.revision') = ?)
            ORDER BY id DESC
            LIMIT 1`,
         )
-        .get(input.strategy, input.instrumentId, input.since) as { id: number | bigint } | undefined;
+        .get(input.strategy, input.instrumentId, input.since, input.selectionRevision ?? null, input.selectionRevision ?? null) as { id: number | bigint } | undefined;
       return Boolean(row);
     } finally {
       database.close();
@@ -498,6 +500,20 @@ export class ScenarioJournal {
     } finally {
       database.close();
     }
+  }
+
+  compareAndSetRuntimeState(key: string, expected: string | null, value: string): boolean {
+    const database = this.open();
+    try {
+      database.exec('BEGIN IMMEDIATE');
+      const current = database.prepare('SELECT value FROM runtime_state WHERE key=?').get(key) as {value:string}|undefined;
+      if ((current?.value ?? null) !== expected) { database.exec('ROLLBACK'); return false; }
+      database.prepare('INSERT INTO runtime_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at')
+        .run(key, value, new Date().toISOString());
+      database.exec('COMMIT');
+      return true;
+    } catch (error) { try { database.exec('ROLLBACK'); } catch {} throw error; }
+    finally { database.close(); }
   }
 
   // Alert state is private, durable and separate from broker execution intents.
@@ -834,6 +850,7 @@ export class ScenarioJournal {
     from: string; to: string; now: string; maxOrders: number; maxRiskRub: number; singlePosition?: boolean;
     lossGuard?: { proofId: string; accountId: string; maxDailyLossRub: number; maxTradeLossRub: number };
     preparedSandbox?: { raw: string; accountId: string; generation: string | null };
+    tradingSelection?: { key: string; raw: string };
   }): ExecutionOrderRecord {
     const database = this.open();
     try {
@@ -857,6 +874,10 @@ export class ScenarioJournal {
             }
           }
           if (limits.lossGuard) this.assertLossProof(database, row, limits.now, limits.lossGuard);
+          if (limits.tradingSelection) {
+            const current = database.prepare('SELECT value FROM runtime_state WHERE key=?').get(limits.tradingSelection.key) as {value:string}|undefined;
+            if (current?.value !== limits.tradingSelection.raw) throw new Error('Trading selection changed; regenerate the candidate');
+          }
           if (limits.singlePosition && database.prepare(
             "SELECT id FROM execution_orders WHERE status IN ('submitting', 'accepted') LIMIT 1",
           ).get()) throw new Error('Pilot already has an unresolved order or open position');

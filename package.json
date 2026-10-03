@@ -8,11 +8,18 @@
     "node": ">=22"
   },
   "scripts": {
+    "setup": "node ops/setup.mjs",
+    "doctor": "node --import tsx ops/doctor.mjs",
+    "deploy": "docker compose build telegram-service && docker compose run --rm --no-deps --entrypoint node telegram-service dist/strategy-config-preflight.js && docker compose up -d --no-build telegram-service",
+    "stop": "docker compose stop telegram-service",
+    "logs": "docker compose logs --tail=80 -f telegram-service",
+    "status": "docker compose ps",
     "build": "tsc -p tsconfig.json && node dist/web/copy-assets.js",
     "check": "npm run typecheck && npm test",
     "dev": "node --env-file=.env --import tsx src/index.ts",
     "start": "node --env-file=.env dist/index.js",
     "smoke:candidate-card": "node dist/candidate-card-smoke.js",
+    "smoke:strategy-bot": "node dist/strategy-bot-smoke.js",
     "smoke:sandbox-arming": "node dist/sandbox-arming-smoke.js",
     "smoke:tinvest": "node --env-file=.env dist/smoke.js",
     "smoke:tinvest:ci": "node dist/smoke.js",
