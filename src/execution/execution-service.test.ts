@@ -558,7 +558,7 @@ describe('ExecutionService', () => {
     await expect(service.submitScenario(candidate.id, '42', now)).rejects.toThrow('risk remains reserved');
     expect(journal.getExecutionByScenario(candidate.id)?.status).toBe('submitting');
   });
-  it('reserves the daily budget atomically for concurrent confirmations', async () => {
+  it('allows only one concurrent confirmation against the same cash-ledger revision even outside the pilot', async () => {
     const journal = createJournal();
     const config = createConfig({ T_INVEST_EXECUTION_MAX_ORDERS_PER_DAY: '20',
       T_INVEST_LIVE_PILOT_PREPARE: 'false', T_INVEST_SANDBOX_INITIAL_BALANCE_RUB: '1000', T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB: '49' });
@@ -569,10 +569,62 @@ describe('ExecutionService', () => {
     for (const candidate of candidates) service.queueScenario(candidate);
     await service.armSandbox();
     const results = await Promise.allSettled(candidates.map(candidate => service.submitScenario(candidate.id, '42', now)));
-    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(7);
-    expect(postLimitOrder).toHaveBeenCalledTimes(7);
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(postLimitOrder).toHaveBeenCalledTimes(1);
     expect(results.filter(result => result.status === 'rejected')[0]).toMatchObject({ reason: expect.any(Error) });
-    expect(journal.listExecutionOrders(10).filter(order => order.status === 'pending')).toHaveLength(1);
+    expect(journal.listExecutionOrders(10).filter(order => order.status === 'pending')).toHaveLength(7);
+  });
+
+  it('stores immutable cash before POST and preserves it through unknown acknowledgement and restart reconciliation', async () => {
+    const journal = createJournal(), now = new Date('2026-09-30T07:00:00.000Z');
+    const candidate = recordCandidate(journal, now.toISOString());
+    const client = orderClient(vi.fn(async () => {
+      expect(journal.getExecutionByScenario(candidate.id)?.status).toBe('submitting');
+      expect(journal.getSandboxCashBaseline(candidate.id)).toMatchObject({ cashNano: '1000000000000', accountId: 'sandbox-account' });
+      throw new TInvestOrderError('synthetic unknown', true);
+    }));
+    const service = new ExecutionService(createConfig(), marketClient(), client, journal);
+    const queued = service.queueScenario(candidate)!; await service.armSandbox();
+    await expect(service.submitScenario(candidate.id, '42', now)).rejects.toThrow('use reconciliation');
+    const baseline = journal.getSandboxCashBaseline(candidate.id)!;
+    expect(baseline.entryRequestId).toBe(queued.orderRequestId);
+    client.getSandboxOrderState.mockResolvedValue(statePayload(queued.orderRequestId));
+    const restarted = new ExecutionService(createConfig(), marketClient(), client, journal);
+    await restarted.submitScenario(candidate.id, '42', new Date(now.getTime() + 60_000));
+    expect(journal.getSandboxCashBaseline(candidate.id)).toEqual(baseline);
+    expect(client.postLimitOrder).toHaveBeenCalledOnce();
+    expect(client.getSandboxPositions).toHaveBeenCalledTimes(2); // arming + the winning pre-BUY read only
+  });
+
+  it.each(['holding', 'blocked', 'order', 'stop', 'revision'])('does not claim or send after a %s pre-BUY cash contradiction', async condition => {
+    const journal = createJournal(), now = new Date(), candidate = recordCandidate(journal, now.toISOString());
+    const client = orderClient(), service = new ExecutionService(createConfig(), marketClient(), client, journal);
+    service.queueScenario(candidate); await service.armSandbox();
+    const flat = await client.getSandboxPositions();
+    if (condition === 'holding') client.getSandboxPositions.mockResolvedValue({ ...flat, securities: [{}] });
+    if (condition === 'blocked') client.getSandboxPositions.mockResolvedValue({ ...flat, blocked: [{ currency: 'rub', units: '1', nano: 0 }] });
+    if (condition === 'order') client.getSandboxOrders.mockResolvedValue({ orders: [{}] });
+    if (condition === 'stop') client.getSandboxStopOrders.mockResolvedValue({ stopOrders: [{ status: 'STOP_ORDER_STATUS_ACTIVE' }] });
+    if (condition === 'revision') client.getSandboxPositions.mockImplementation(async () => {
+      journal.setRuntimeState('execution.sandbox_ledger_revision', '999'); return flat;
+    });
+    await expect(service.submitScenario(candidate.id, '42', now)).rejects.toThrow();
+    expect(journal.getExecutionByScenario(candidate.id)?.status).toBe('pending');
+    expect(journal.getSandboxCashBaseline(candidate.id)).toBeNull();
+    expect(client.postLimitOrder).not.toHaveBeenCalled();
+  });
+
+  it('does not send an ordinary nonpilot entry when fresh cash covers gross but not exact entry costs', async () => {
+    const journal = createJournal(), now = new Date(), candidate = recordCandidate(journal, now.toISOString());
+    const client = orderClient(), config = createConfig({ T_INVEST_LIVE_PILOT_PREPARE: 'false', T_INVEST_SANDBOX_INITIAL_BALANCE_RUB: '1000' });
+    const service = new ExecutionService(config, marketClient(), client, journal);
+    service.queueScenario(candidate); await service.armSandbox();
+    client.getSandboxPositions.mockResolvedValue({ accountId: 'sandbox-account', limitsLoadingInProgress: false,
+      securities: [], futures: [], options: [], money: [{ currency: 'rub', units: '500', nano: 0 }], blocked: [] });
+    await expect(service.submitScenario(candidate.id, '42', now)).rejects.toThrow('including entry costs');
+    expect(client.postLimitOrder).not.toHaveBeenCalled();
+    expect(journal.getExecutionByScenario(candidate.id)?.status).toBe('pending');
+    expect(journal.getSandboxCashBaseline(candidate.id)).toBeNull();
   });
 
   it('does not send two requests for simultaneous confirmations of the same candidate', async () => {

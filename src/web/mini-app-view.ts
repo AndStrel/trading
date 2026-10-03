@@ -104,6 +104,8 @@ export function buildMiniAppView(config: AppConfig, scanner: ScannerView,
     sandboxResults: journal.listSandboxResults().map(result => ({
       scenarioId: result.scenarioId, soldLots: result.soldLots, remainingLots: result.remainingLots,
       netPnl: result.netPnlNano === null ? null : formatNanoRub(result.netPnlNano), complete: result.complete,
+      cashProven: result.complete && result.cashProven === true && result.cashReconciliation?.status === 'reconciled',
+      cashStatus: result.cashReconciliation?.status ?? 'incomplete',
       observedAt: result.observedAt, flatConfirmedAt: result.flatConfirmedAt,
     })),
     limits: { capitalRub: config.livePilot.capitalRub, tradeRiskRub: config.strategies.intraday.maxRiskRub,

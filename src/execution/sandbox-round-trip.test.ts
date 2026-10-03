@@ -31,6 +31,28 @@ describe('Sandbox child sell and exact round-trip result', () => {
     expect(result).toEqual({ soldLots: 5, remainingLots: 0, fullySold: true, netPnlNano: '47506172844', closedAt: exitAt });
     expect(formatNanoRub(result.netPnlNano!)).toBe('47,50 ₽');
   });
+  it('rejects an exit one nanosecond before the latest entry, even within the same millisecond', () => {
+    const bought = entry(); bought.stages[0]!.executedAt = '2026-10-01T07:10:00.123456790Z';
+    const sold = parseSandboxExitOrderState(payload({ stages: [{ ...payload().stages[0], executionTime: '2026-10-01T07:10:00.123456789Z' }] }), expected, now);
+    expect(() => analyzeSandboxRoundTrip(bought, sold, 10)).toThrow('precedes');
+  });
+  it('selects the exact latest entry among out-of-order same-millisecond stages', () => {
+    const bought = entry(), stage = bought.stages[0]!;
+    bought.stages = [{ ...stage, tradeId: 'entry-late', lots: 2, executedAt: '2026-10-01T07:10:00.123456790Z' },
+      { ...stage, tradeId: 'entry-early', lots: 3, executedAt: '2026-10-01T07:10:00.123456788Z' }];
+    const sold = parseSandboxExitOrderState(payload({ stages: [{ ...payload().stages[0], executionTime: '2026-10-01T07:10:00.123456789Z' }] }), expected, now);
+    expect(() => analyzeSandboxRoundTrip(bought, sold, 10)).toThrow('precedes');
+  });
+  it('retains the exact latest exit as closedAt without rounding or depending on stage order', () => {
+    const sold = parseSandboxExitOrderState(payload({ stages: [
+      { ...payload().stages[0], tradeId: 'sell-late', quantity: '2', executionTime: '2026-10-01T07:10:00.123456790Z' },
+      { ...payload().stages[0], tradeId: 'sell-early', quantity: '3', executionTime: '2026-10-01T07:10:00.123456789Z' },
+    ] }), expected, now);
+    expect(analyzeSandboxRoundTrip(entry(), sold, 10)).toMatchObject({ fullySold: true, netPnlNano: '47506172844',
+      closedAt: '2026-10-01T07:10:00.12345679Z' });
+    expect(analyzeSandboxRoundTrip(entry(), { ...sold, stages: [...sold.stages].reverse() }, 10).closedAt)
+      .toBe('2026-10-01T07:10:00.12345679Z');
+  });
   it('does not allocate unknown entry cost to a partial exit or declare a final PnL', () => {
     const exit = parseSandboxExitOrderState(payload({ executionReportStatus: 'EXECUTION_REPORT_STATUS_CANCELLED', lotsExecuted: '2',
       stages: [{ ...payload().stages[0], quantity: '2' }] }), expected, now);

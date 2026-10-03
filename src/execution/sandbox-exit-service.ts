@@ -6,10 +6,12 @@ import { analyzeSandboxRoundTrip } from './sandbox-round-trip.js';
 import { assertNoActiveSandboxStops, nativeStopKey, parseSandboxStop } from './sandbox-stop-state.js';
 import { sandboxCloseKey } from './sandbox-session-policy.js';
 import type { TInvestOrderClient } from './tinvest-order-client.js';
+import type { SandboxCashObservation } from './sandbox-cash-reconciliation.js';
 
 // This client surface cannot place, cancel, create or fund anything.
 type Client = Pick<TInvestOrderClient, 'getSandboxOrderState' | 'getSandboxChildOrderState'
-  | 'getSandboxStopOrders' | 'getSandboxPositions' | 'getSandboxOrders'>;
+  | 'getSandboxStopOrders' | 'getSandboxPositions' | 'getSandboxOrders'>
+  & Partial<Pick<TInvestOrderClient, 'getSandboxCashOperationsWindow'>>;
 
 // An archived failed target SELL is not a new order or the final exit. Refresh
 // only its exact durable request UUID, so late fees never disappear from loss.
@@ -47,6 +49,12 @@ export class SandboxExitService {
     if (this.config.execution.mode !== 'sandbox' || !this.config.execution.sandboxProtectionEnabled || !this.config.livePilot.prepare
       || !this.config.execution.token || this.config.execution.token === this.config.token) throw new Error('Isolated sandbox exit reconciliation is not enabled');
     try {
+      const started = performance.now();
+      const currentTime = () => {
+        const elapsed = performance.now() - started;
+        if (!Number.isFinite(elapsed) || elapsed < 0) throw new Error();
+        return new Date(now.getTime() + elapsed);
+      };
       const order = this.journal.getExecutionByScenario(scenarioId); const scenario = this.journal.getScenario(scenarioId);
       const native = this.journal.getNativeStop(scenarioId);
       if (!order || !scenario || order.mode !== 'sandbox' || order.status !== 'accepted' || !order.approvedByChatId
@@ -97,6 +105,32 @@ export class SandboxExitService {
         this.journal.observeNativeStop(scenarioId, confirmed, expectedNative);
         flatConfirmedAt = now.toISOString();
         recorded = this.journal.recordSandboxExitEvidence(scenarioId, exit, flatConfirmedAt, now, expectedNative, expectedClose);
+        const baseline = this.journal.getSandboxCashBaseline(scenarioId);
+        if (baseline) {
+          // Capture after the fill/flat writes, then atomically fence every
+          // awaited read against late fees, generation changes and other work.
+          const observedFrom = currentTime().toISOString();
+          const ledgerRevision = this.journal.getSandboxLedgerRevision();
+          const epoch = this.journal.getSandboxCashObservationEpoch();
+          const [cashPositions, cashOrders, cashStops] = await Promise.all([
+            this.client.getSandboxPositions(accountId), this.client.getSandboxOrders(accountId), this.client.getSandboxStopOrders(accountId),
+          ]);
+          const cashNano = sandboxFlatCashNano(cashPositions, accountId);
+          assertNoSandboxOrders(cashOrders); assertNoActiveSandboxStops(cashStops);
+          const cashStop = parseSandboxStop(cashStops, native.intent, currentTime());
+          if (cashStop.status !== stop.status || cashStop.childOrderId !== stop.childOrderId) throw new Error();
+          const observedAt = currentTime().toISOString();
+          let flowEvidence;
+          if (this.client.getSandboxCashOperationsWindow) {
+            try { flowEvidence = await this.client.getSandboxCashOperationsWindow(accountId, baseline.observedFrom, observedAt); }
+            catch { /* Missing or unavailable account-window evidence is never a proof. */ }
+          }
+          const observation: SandboxCashObservation = { version: 1, accountId, entryRequestId: order.orderRequestId,
+            cashNano: String(cashNano), observedFrom, observedAt, ledgerRevision, epoch, ...(flowEvidence ? { flowEvidence } : {}) };
+          this.journal.appendSandboxCashObservation(scenarioId, observation, expectedNative, expectedClose, currentTime());
+          const cashReconciliation = this.journal.getSandboxCashReconciliation(scenarioId);
+          recorded = { ...recorded, cashProven: cashReconciliation.cashProven, cashReconciliation };
+        }
       }
       // No automatic resume or reservation release: actual-loss/closing policy
       // and broker acceptance must still be implemented and proven first.

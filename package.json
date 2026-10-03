@@ -15,7 +15,7 @@
     "logs": "docker compose logs --tail=80 -f telegram-service",
     "status": "docker compose ps",
     "build": "tsc -p tsconfig.json && node dist/web/copy-assets.js",
-    "check": "npm run typecheck && npm test",
+    "check": "npm run typecheck && npm test && npm run test:ops-local",
     "dev": "node --env-file=.env --import tsx src/index.ts",
     "start": "node --env-file=.env dist/index.js",
     "smoke:candidate-card": "node dist/candidate-card-smoke.js",
@@ -38,6 +38,7 @@
     "service:telegram": "node --env-file=.env dist/telegram-service.js",
     "preflight:pilot": "node --env-file=.env dist/pilot-preflight.js",
     "test": "vitest run",
+    "test:ops-local": "node --test ops/test_*.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

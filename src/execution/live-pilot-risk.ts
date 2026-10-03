@@ -25,6 +25,24 @@ function cost(notional: bigint, rate: bigint): bigint {
   return ceilDivide(notional * rate, scale * kopek) * kopek;
 }
 
+function entryCashRequired(notional: bigint, commission: bigint, slippage: bigint): bigint {
+  return notional + cost(notional, commission) + cost(notional, slippage);
+}
+
+/** Same exact Investor entry-cost calculation as the pilot gate, not a new gate. */
+export function pilotEntryCashRequiredNano(input: {
+  entryPrice: number; lots: number; lotSize: number; commissionRate: number; slippageRate: number;
+}): string {
+  if (![input.lots, input.lotSize].every(value => Number.isSafeInteger(value) && value > 0 && value <= 1_000_000)) {
+    throw new Error('A positive bounded whole-lot quantity is required');
+  }
+  const entry = fixed(input.entryPrice), commission = fixed(input.commissionRate), slippage = fixed(input.slippageRate);
+  if (entry <= 0n || commission < fixed(0.003) || commission > fixed(0.1) || slippage > fixed(0.02)) {
+    throw new Error('Investor commission floor or bounded entry price and slippage is not satisfied');
+  }
+  return String(entryCashRequired(entry * BigInt(input.lots) * BigInt(input.lotSize), commission, slippage));
+}
+
 function rubles(value: bigint): number {
   return Number(value) / Number(scale);
 }
@@ -96,7 +114,7 @@ export function assessLivePilotRisk(policy: LivePilotConfig, input: LivePilotRis
   const entryCosts = cost(entryValue, commission) + cost(entryValue, slippage);
   const risk = entryValue - stopValue + entryCosts + cost(stopValue, commission) + cost(stopValue, slippage);
   const reward = targetValue - entryValue - entryCosts - cost(targetValue, commission) - cost(targetValue, slippage);
-  const cashRequired = entryValue + entryCosts;
+  const cashRequired = entryCashRequired(entryValue, commission, slippage);
   const reservedRisk = fixed(input.reservedDailyRiskRub);
   const actualLoss = fixed(input.realizedDailyLossRub) + fixed(input.markedOpenLossRub);
   const blockers: string[] = [];

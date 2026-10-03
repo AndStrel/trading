@@ -142,8 +142,12 @@ function render(data) {
     const card = node('article', '');
     card.append(node('h3', 'Песочница · сценарий #' + result.scenarioId),
       node('p', 'Продано: ' + result.soldLots + ' лот. · остаток: ' + result.remainingLots + ' лот.'),
-      node('strong', result.netPnl === null ? 'Результат не подтверждён' : result.netPnl),
+      node('strong', result.netPnl === null ? 'Результат не подтверждён'
+        : (result.cashProven === true ? 'Деньги сверены: ' : 'По исполнениям: ') + result.netPnl),
       node('p', result.complete ? 'Полное исполнение и пустой счёт подтверждены при сверке.' : 'Полный цикл ещё не подтверждён.'),
+      node('p', result.cashProven === true ? 'Баланс, операции и учтённые комиссии согласованы на момент проверки.'
+        : result.cashStatus === 'mismatch' ? 'Баланс не сходится с исполнениями и расходами. Денежный результат не подтверждён.'
+          : 'Денежная сверка ещё не завершена. Исполнения и пустая позиция сами по себе не подтверждают результат.'),
       node('p', 'Последняя сверка: ' + new Date(result.observedAt).toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' }) + ' МСК · резерв риска сохранён', 'muted'));
     elements['sandbox-results'].append(card);
   }
