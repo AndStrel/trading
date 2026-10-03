@@ -8,12 +8,16 @@ import {
 } from './backtest/catalog-parity-replay.js';
 import { priceToNano } from './domain/price-tick.js';
 import { loadReadOnlyReplaySource } from './history/read-only-replay-source.js';
+import { getStrategyDescriptor, isTradingStrategyId, TRADING_STRATEGY_IDS,
+  type TradingStrategyId } from './strategies/catalog.js';
 
 export type CatalogReplayCostScenario = 'investor' | 'public-trader' | 'conditional-003';
 export type CatalogReplayCliOptions = {
   databasePath: string | null;
   capitals: Array<500 | 1000>;
   costs: CatalogReplayCostScenario[];
+  /** Omission preserves the original programmatic trend-only default. */
+  strategies?: TradingStrategyId[];
   help: boolean;
 };
 
@@ -26,23 +30,28 @@ const costScenarios = {
 export const CATALOG_PARITY_CLI_USAGE = `Usage:
   npm run backtest:catalog -- --database /absolute/path/finalized-history.sqlite
   npm run backtest:catalog -- --database /absolute/path/finalized-history.sqlite --capital 500 --cost all
+  npm run backtest:catalog -- --database /absolute/path/finalized-history.sqlite --strategy all --cost all
 
 Frozen hypothesis: SBER / trend-momentum-v1, 2025-08-01 through 2026-09-26.
 Defaults: both 500 and 1000 RUB, Investor commission 0.003 per side.
 --capital: 500 | 1000 | both; --cost: investor | public-trader | conditional-003 | all.
+--strategy: ${TRADING_STRATEGY_IDS.join(' | ')} | all; default trend-momentum-v1.
+Nontrend selections use catalog-all-existing-v1: independent development-only scenarios,
+on a previously inspected period, with no new OOS evidence or winner ranking.
 Reads finalized archive-linked SQLite without migration, copying or sidecar writes.
 Prints development-only JSON; no .env, network, broker clients or orders.
 Nonempty WAL/SHM/journal is an error. A passing candle model NEVER admits trading.`;
 
 export function parseCatalogReplayArgs(args: readonly string[]): CatalogReplayCliOptions {
-  const options: CatalogReplayCliOptions = { databasePath: null, capitals: [500, 1000], costs: ['investor'], help: false };
+  const options: CatalogReplayCliOptions = { databasePath: null, capitals: [500, 1000], costs: ['investor'],
+    strategies: ['trend-momentum-v1'], help: false };
   const seen = new Set<string>();
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index]!;
     if (argument === '--help' || argument === '-h') { options.help = true; continue; }
     const separator = argument.indexOf('=');
     const flag = separator < 0 ? argument : argument.slice(0, separator);
-    if (!['--database', '--capital', '--cost'].includes(flag) || seen.has(flag)) {
+    if (!['--database', '--capital', '--cost', '--strategy'].includes(flag) || seen.has(flag)) {
       throw new Error('Unknown or repeated catalog replay option');
     }
     seen.add(flag);
@@ -54,6 +63,10 @@ export function parseCatalogReplayArgs(args: readonly string[]): CatalogReplayCl
     } else if (flag === '--capital') {
       if (!['500', '1000', 'both'].includes(value)) throw new Error('Capital must be 500, 1000 or both');
       options.capitals = value === 'both' ? [500, 1000] : [Number(value) as 500 | 1000];
+    } else if (flag === '--strategy') {
+      if (value === 'all') options.strategies = [...TRADING_STRATEGY_IDS];
+      else if (isTradingStrategyId(value)) options.strategies = [value];
+      else throw new Error('Unsupported existing catalog strategy');
     } else {
       if (value === 'all') options.costs = ['investor', 'public-trader', 'conditional-003'];
       else if (Object.hasOwn(costScenarios, value)) options.costs = [value as CatalogReplayCostScenario];
@@ -76,6 +89,15 @@ function decisionSummary(result: CatalogParityReplayResult) {
 
 export function runCatalogReplayCli(options: CatalogReplayCliOptions) {
   if (!options.databasePath) throw new Error('An explicit --database is required');
+  const requestedStrategies = options.strategies === undefined ? ['trend-momentum-v1'] : options.strategies;
+  if (!Array.isArray(requestedStrategies) || requestedStrategies.length === 0
+    || requestedStrategies.length > TRADING_STRATEGY_IDS.length
+    || new Set(requestedStrategies).size !== requestedStrategies.length
+    || Array.from(requestedStrategies).some(strategy => !isTradingStrategyId(strategy))) {
+    throw new Error('Invalid frozen replay strategies');
+  }
+  // Catalog order is deterministic and is not a result-dependent winner ranking.
+  const strategies = TRADING_STRATEGY_IDS.filter(strategy => requestedStrategies.includes(strategy));
   if (!isAbsolute(options.databasePath) || options.capitals.length === 0 || options.costs.length === 0
     || new Set(options.capitals).size !== options.capitals.length || new Set(options.costs).size !== options.costs.length
     || options.capitals.some(capital => capital !== 500 && capital !== 1000)
@@ -89,9 +111,9 @@ export function runCatalogReplayCli(options: CatalogReplayCliOptions) {
   if (source.candles.some(candle => [candle.open, candle.high, candle.low, candle.close]
     .some(price => priceToNano(price) % step !== 0n))) throw new Error('Candle price differs from the frozen SBER tick');
 
-  const scenarios = options.capitals.flatMap(capitalRub => options.costs.map(costScenario => {
+  const scenarios = strategies.flatMap(strategyId => options.capitals.flatMap(capitalRub => options.costs.map(costScenario => {
     const costs = costScenarios[costScenario];
-    const result = replayCatalogStrategy({ strategyId: 'trend-momentum-v1',
+    const result = replayCatalogStrategy({ strategyId,
       instrument: { instrumentId: source.archives[0]!.instrumentId, ticker: 'SBER', lotSize: 1, priceStep: 0.01 },
       minuteCandles: source.candles,
       policy: { ...DEFAULT_CATALOG_REPLAY_POLICY, capitalRub, commissionRate: costs.commissionRate, slippageRate: 0.0005 },
@@ -130,7 +152,8 @@ export function runCatalogReplayCli(options: CatalogReplayCliOptions) {
       zeroUnresolved: account.unresolvedTrades === 0,
       accountCashPathIncludesServiceFees: cashAndRiskPath.pathProven,
     };
-    return { costScenario, capitalRub, policy: result.policy, productionCompatible: result.productionCompatible,
+    return { strategyId, strategyVersion: getStrategyDescriptor(strategyId).version,
+      costScenario, capitalRub, policy: result.policy, productionCompatible: result.productionCompatible,
       coverage: result.coverage, decisions: decisionSummary(result), modeledTrades: result.modeledTrades,
       metrics: result.metrics, account, cashAndRiskPath,
       knownUnresolvedEntryCostsNano: result.modeledTrades.filter(trade => trade.status === 'unresolved')
@@ -142,8 +165,15 @@ export function runCatalogReplayCli(options: CatalogReplayCliOptions) {
       modelScreen: { checks, passes: Object.values(checks).every(Boolean),
         warning: 'Candle model only. Failed cash/risk paths invalidate modeled feasibility; actual billing and executable market evidence remain unproven.' },
       admission: { allowed: false as const, executableEvidence: false as const } };
-  }));
-  return { protocol: 'catalog-parity-replay-v1', hypothesis: 'SBER/trend-momentum-v1', researchStatus: 'development-only',
+  })));
+  const legacyStudy = strategies.length === 1 && strategies[0] === 'trend-momentum-v1';
+  return { protocol: 'catalog-parity-replay-v1',
+    hypothesis: legacyStudy ? 'SBER/trend-momentum-v1' : 'SBER/catalog-all-existing-v1',
+    ...(legacyStudy ? {} : { researchProtocol: 'catalog-all-existing-v1', study: {
+      strategyIds: strategies, comparison: 'independent-scenarios-not-portfolio',
+      previouslyInspectedPeriod: true, newOutOfSampleEvidence: false, winnerRanking: false,
+    } }),
+    researchStatus: 'development-only',
     historicalTickAssumption: '0.01 RUB; import metadata is not historical as-of proof',
     source: { readOnly: source.readOnly, provenanceEvidence: source.provenanceEvidence, contentSha256: source.contentSha256,
       archives: source.archives, coverage: source.coverage, warnings: source.warnings },
