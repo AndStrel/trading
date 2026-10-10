@@ -41,6 +41,14 @@ function formatRubles(value: number | null): string {
   return value === null ? '—' : `${formatNumber(value)} ₽`;
 }
 
+function formatTradePriceRubles(value: number | null): string {
+  if (value === null) return '—';
+  return `${new Intl.NumberFormat('ru-RU', {
+    minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
+    maximumFractionDigits: 9,
+  }).format(value)} ₽`;
+}
+
 function formatTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
@@ -127,11 +135,11 @@ export function buildCandidateCardSvg(record: JournalScenarioRecord, config: App
   <rect x="404" y="420" width="272" height="156" rx="22" fill="#201C30"/>
   <rect x="712" y="420" width="272" height="156" rx="22" fill="#132C2A"/>
   ${svgText(124, 462, 'ВХОД', { size: 22, weight: 700, fill: '#94A3B8' })}
-  ${svgText(124, 530, formatRubles(record.input.entryPrice), { size: 40, weight: 700, fill: '#F8FAFC' })}
+  ${svgText(124, 530, formatTradePriceRubles(record.input.entryPrice), { size: 40, weight: 700, fill: '#F8FAFC' })}
   ${svgText(432, 462, 'СТОП', { size: 22, weight: 700, fill: '#FDA4AF' })}
-  ${svgText(432, 530, formatRubles(record.input.stopPrice), { size: 40, weight: 700, fill: '#F8FAFC' })}
+  ${svgText(432, 530, formatTradePriceRubles(record.input.stopPrice), { size: 40, weight: 700, fill: '#F8FAFC' })}
   ${svgText(740, 462, 'ЦЕЛЬ', { size: 22, weight: 700, fill: '#6EE7B7' })}
-  ${svgText(740, 530, formatRubles(record.input.targetPrice), { size: 40, weight: 700, fill: '#F8FAFC' })}
+  ${svgText(740, 530, formatTradePriceRubles(record.input.targetPrice), { size: 40, weight: 700, fill: '#F8FAFC' })}
 
   <rect x="96" y="620" width="888" height="156" rx="22" fill="#0D1728" stroke="#263A53" stroke-width="2"/>
   ${svgText(126, 668, 'ОБЪЁМ', { size: 22, weight: 700, fill: '#94A3B8' })}
@@ -153,8 +161,8 @@ export function buildCandidateCardSvg(record: JournalScenarioRecord, config: App
   ${svgText(954, 1116, 'R/R', { size: 18, weight: 700, fill: '#94A3B8', anchor: 'end' })}
   ${svgText(954, 1162, formatNumber(rewardToRisk), { size: 32, weight: 700, fill: '#5EEAD4', anchor: 'end' })}
 
-  ${svgText(96, 1242, `РЫНОК: bid ${formatRubles(bestBid)} · ask ${formatRubles(bestAsk)} · спред ${spreadPct === null ? '—' : `${formatNumber(spreadPct)}%`}`, { size: 23, fill: '#CBD5E1' })}
-  ${svgText(96, 1282, `5М: ${trend} · объём ${formatNumber(relativeVolume)} · ATR ${formatRubles(atr)}`, { size: 23, fill: '#94A3B8' })}
+  ${svgText(96, 1242, `РЫНОК: bid ${formatTradePriceRubles(bestBid)} · ask ${formatTradePriceRubles(bestAsk)} · спред ${spreadPct === null ? '—' : `${formatNumber(spreadPct)}%`}`, { size: 23, fill: '#CBD5E1' })}
+  ${svgText(96, 1282, `5М: ${trend} · объём ${formatNumber(relativeVolume)} · ATR ${formatTradePriceRubles(atr)}`, { size: 23, fill: '#94A3B8' })}
   <rect x="758" y="1230" width="226" height="52" rx="26" fill="#1E293B"/>
   ${svgText(871, 1264, 'РУЧНАЯ ПРОВЕРКА', { size: 16, weight: 700, fill: '#CBD5E1', anchor: 'middle' })}
 </svg>`;

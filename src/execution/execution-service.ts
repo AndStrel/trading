@@ -6,9 +6,27 @@ import {
   type ExecutionOrderRecord,
   type JournalScenarioRecord,
   ScenarioJournal,
+  SandboxPreparationChangedError,
 } from '../journal/scenario-journal.js';
 import type { TInvestClient } from '../tbank/client.js';
 import { TInvestOrderClient, TInvestOrderError } from './tinvest-order-client.js';
+import { assessLivePilotRisk, pilotEntryCashRequiredNano } from './live-pilot-risk.js';
+import { parseSandboxOrderState } from './sandbox-order-state.js';
+import type { SandboxProtectionService } from './sandbox-protection-service.js';
+import type { SandboxExitService } from './sandbox-exit-service.js';
+import type { SandboxLossGuard } from './sandbox-loss-guard.js';
+import { sandboxBidValue, type SandboxLossProof } from './sandbox-loss-policy.js';
+import type { SandboxSessionClose } from './sandbox-session-close.js';
+import { sandboxSessionEntryAllowed } from './sandbox-session-policy.js';
+import { assertNoActiveSandboxStops, decimalPriceNano } from './sandbox-stop-state.js';
+import type { SandboxCashBaseline } from './sandbox-cash-reconciliation.js';
+import { assertSandboxInstrument } from './sandbox-instrument.js';
+import { assertNoSandboxOrders, sandboxFlatCashNano } from './sandbox-flat-account.js';
+import { readPreparedSandbox, sandboxAccountKey, sandboxBootstrapKey, sandboxEndpoint } from './sandbox-prepared-account.js';
+import { assertScenarioSelection } from '../strategies/selection.js';
+import { scenarioInstrument } from './scenario-instrument.js';
+import { getStrategyDescriptor, isTradingStrategyId } from '../strategies/catalog.js';
+import { strategyEntryWindow } from '../strategies/entry-window.js';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -16,12 +34,14 @@ type TradePlanSnapshot = {
   lots: number;
   positionRub: number;
   totalRiskRub: number;
+  cashRequiredNano?: string;
 };
 
 export type ExecutionSubmitResult = {
   order: ExecutionOrderRecord;
   executionStatus: string;
   lotsExecuted: number;
+  sandboxExit?: Awaited<ReturnType<SandboxExitService['reconcile']>>;
 };
 
 function asRecord(value: unknown): UnknownRecord | null {
@@ -81,15 +101,20 @@ function moscowDayRange(now: Date): { from: string; to: string } {
 
 export class ExecutionService {
   private accountId: string | undefined;
+  private readonly inFlight = new Set<number>();
 
   constructor(
     private readonly config: AppConfig,
-    private readonly marketClient: Pick<TInvestClient, 'getOrderBook' | 'getTradingStatus'>,
+    private readonly marketClient: Pick<TInvestClient, 'getOrderBook' | 'getTradingStatus'> & Partial<Pick<TInvestClient,'getInstrumentBy'>>,
     private readonly orderClient: Pick<
       TInvestOrderClient,
-      'postLimitOrder' | 'getSandboxAccounts' | 'openSandboxAccount' | 'sandboxPayIn'
+      'postLimitOrder' | 'getSandboxAccounts' | 'getSandboxPositions' | 'getSandboxOrders' | 'getSandboxStopOrders' | 'getSandboxOrderState'
     >,
     private readonly journal: ScenarioJournal,
+    private readonly protection?: Pick<SandboxProtectionService, 'protect' | 'preflightForEntry'>,
+    private readonly exitReconciler?: Pick<SandboxExitService, 'reconcile'>,
+    private readonly lossGuard?: Pick<SandboxLossGuard, 'assess'>,
+    private readonly sessionClose?: Pick<SandboxSessionClose, 'advance'>,
   ) {
     this.accountId =
       config.execution.accountId ?? journal.getRuntimeState('execution.sandbox_account_id') ?? undefined;
@@ -112,11 +137,35 @@ export class ExecutionService {
   }
 
   async armSandbox(): Promise<void> {
-    if (!this.isConfigured()) {
-      throw new Error('Sandbox execution requires T_INVEST_TRADING_TOKEN');
+    // Pin kill before any asynchronous read. A later safety kill must never be
+    // overwritten, even if it sets the same boolean in the same millisecond.
+    const generation = this.journal.beginSandboxArming();
+    try {
+      const start = Date.now();
+      const snapshot = this.preparedSnapshot();
+      if (this.journal.listRecoverableExecutionOrders(1).length) throw new Error('Sandbox recovery is required before arming');
+      const accounts = await this.orderClient.getSandboxAccounts();
+      if (accounts.length !== 1 || accounts[0]?.id !== snapshot.accountId
+        || (accounts[0].name !== null && accounts[0].name !== snapshot.name)) throw new Error('Sandbox account ownership is not confirmed');
+      const orders = await this.orderClient.getSandboxOrders(snapshot.accountId);
+      const stops = await this.orderClient.getSandboxStopOrders(snapshot.accountId);
+      const positions = await this.orderClient.getSandboxPositions(snapshot.accountId);
+      assertNoSandboxOrders(orders);
+      const stopOrders = asRecord(stops)?.stopOrders;
+      if (!Array.isArray(stopOrders) || stopOrders.length) throw new Error('Empty sandbox stop book is not confirmed');
+      // This is initial arming only. Never refill cash to erase previous losses.
+      if (sandboxFlatCashNano(positions, snapshot.accountId) !== BigInt(decimalPriceNano(this.config.execution.sandboxInitialBalanceRub))) {
+        throw new Error('Initial sandbox cash is not confirmed; automatic funding is disabled');
+      }
+      const elapsed = Date.now() - start;
+      if (elapsed < 0 || elapsed > 30_000) throw new Error('Sandbox arming reads are stale');
+      this.journal.finishSandboxArming(generation, snapshot);
+      this.accountId = snapshot.accountId;
+    } catch {
+      this.kill();
+      // Never forward broker payloads/account identifiers to Telegram or logs.
+      throw new Error('Sandbox arming is not confirmed; separate preparation or recovery is required and execution remains killed');
     }
-    await this.ensureSandboxAccount();
-    this.journal.setExecutionKilled(false);
   }
 
   kill(): void {
@@ -125,13 +174,15 @@ export class ExecutionService {
 
   queueScenario(scenario: JournalScenarioRecord): ExecutionOrderRecord | null {
     if (this.config.execution.mode === 'disabled') return null;
-    if (!this.isConfigured()) throw new Error('Sandbox execution is enabled but T_INVEST_TRADING_TOKEN is missing');
+    if (!this.isConfigured()) throw new Error('Sandbox execution is enabled but its isolated credential is missing');
     if (scenario.decision !== 'candidate' || scenario.strategy !== 'intraday') {
       throw new Error('Only recorded intraday candidates can be queued');
     }
     if (scenario.input.side !== 'long') throw new Error('Short execution is disabled');
+    assertScenarioSelection(this.journal,scenario);
+    this.assertSessionMetadata(scenario);
 
-    const plan = readTradePlan(scenario);
+    const plan = this.readValidatedPlan(scenario);
     const limits = this.config.strategies.intraday;
     if (plan.positionRub > limits.maxPositionRub) throw new Error('Scenario exceeds the position limit');
     if (plan.totalRiskRub > limits.maxRiskRub) throw new Error('Scenario exceeds the risk limit');
@@ -157,23 +208,59 @@ export class ExecutionService {
   }
 
   async submitScenario(scenarioId: number, chatId: string, now = new Date()): Promise<ExecutionSubmitResult> {
+    if (this.inFlight.has(scenarioId)) throw new Error('This scenario is already being submitted');
+    this.inFlight.add(scenarioId);
+    try {
+      return await this.submitGuarded(scenarioId, chatId, now);
+    } finally {
+      this.inFlight.delete(scenarioId);
+    }
+  }
+
+  private async submitGuarded(scenarioId: number, chatId: string, now: Date): Promise<ExecutionSubmitResult> {
+    const started = performance.now();
+    const currentTime = () => {
+      const elapsed = performance.now() - started;
+      if (!Number.isFinite(elapsed) || elapsed < 0) throw new Error('Execution preflight clock is not confirmed');
+      return new Date(now.getTime() + elapsed);
+    };
     if (!this.isReady()) throw new Error('Sandbox execution is disabled, unarmed or not fully configured');
+    // An earlier HTTP timeout is NOT permission to send again. Reading state
+    // remains possible after kill, restart or candidate expiry.
+    if (this.journal.getExecutionByScenario(scenarioId)?.status === 'submitting') {
+      return this.reconcileScenario(scenarioId, now);
+    }
     if (this.isKilled()) throw new Error('Execution kill switch is active');
+    const killGeneration = this.journal.getRuntimeState('execution.kill_generation');
+    let prepared;
+    try { prepared = this.preparedSnapshot(); }
+    catch { this.kill(); throw new Error('Separately prepared sandbox account is not confirmed; no new order was sent'); }
+    if (this.config.execution.sandboxSessionCloseEnabled && (!this.sessionClose || !this.config.execution.sandboxProtectionEnabled
+      || !this.config.execution.sandboxLossGuardEnabled || !sandboxSessionEntryAllowed(now))) {
+      throw new Error('Sandbox session entry window or closing protection is not confirmed');
+    }
 
     const scenario = this.journal.getScenario(scenarioId);
     if (!scenario || scenario.decision !== 'candidate' || scenario.strategy !== 'intraday') {
       throw new Error('A recorded intraday candidate was not found');
     }
     if (scenario.input.side !== 'long') throw new Error('Short execution is disabled');
+    const versionedScanner = this.assertScannerEntryWindow(scenario, currentTime());
 
     const ageMs = now.getTime() - new Date(scenario.observedAt).getTime();
     if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > this.config.execution.candidateMaxAgeMinutes * 60_000) {
       throw new Error(`Candidate is older than ${this.config.execution.candidateMaxAgeMinutes} minutes`);
     }
 
-    const plan = readTradePlan(scenario);
+    const selectionProof = assertScenarioSelection(this.journal,scenario);
+    const plan = this.readValidatedPlan(scenario);
+    this.assertStrategyLimits(plan);
+    this.assertSessionMetadata(scenario);
     const existing = this.journal.getExecutionByScenario(scenarioId) ?? this.queueScenario(scenario);
     if (!existing) throw new Error('Execution order was not queued');
+    if (existing.estimatedRiskRub < plan.totalRiskRub) {
+      throw new Error('Queued order has outdated expense assumptions; create a fresh candidate');
+    }
 
     const day = moscowDayRange(now);
     const usage = this.journal.getExecutionDailyUsage(day.from, day.to);
@@ -187,7 +274,68 @@ export class ExecutionService {
     }
 
     await this.validateCurrentMarket(scenario, plan.lots);
-    const claimed = this.journal.claimExecution(scenarioId, chatId);
+    if (this.config.execution.sandboxProtectionEnabled) {
+      if (!this.protection) throw new Error('Sandbox protective module is not connected; no entry was sent');
+      await this.protection.preflightForEntry(this.accountId!, scenario, plan.lots);
+    }
+    let lossProof: SandboxLossProof | undefined;
+    if (this.config.execution.sandboxLossGuardEnabled) {
+      if (!this.lossGuard) throw new Error('Sandbox loss guard is not connected; no entry was sent');
+      lossProof = await this.lossGuard.assess(this.accountId!);
+      if (lossProof.status !== 'ok') throw new Error('Sandbox loss allowance is not confirmed; no entry was sent');
+      await this.validateCurrentMarket(scenario, plan.lots);
+    }
+    // Cash evidence is captured last and pinned to the journal revision before
+    // these asynchronous reads. Only the winning atomic BUY claim can store it.
+    // Loss proofs use the actual confirmation day; a forward wall-clock move
+    // must not make an old proof or candidate fresh. Monotonic time is a floor.
+    const cashTime = () => lossProof ? new Date(Math.max(currentTime().getTime(), Date.now())) : currentTime();
+    if (this.config.execution.sandboxSessionCloseEnabled && !sandboxSessionEntryAllowed(cashTime())) {
+      throw new Error('Sandbox entry window ended during preflight');
+    }
+    this.assertScannerEntryWindow(scenario, cashTime());
+    const cashFrom = cashTime().toISOString();
+    const cashRevision = this.journal.getSandboxLedgerRevision();
+    const [cashPositions, cashOrders, cashStops] = await Promise.all([
+      this.orderClient.getSandboxPositions(this.accountId!), this.orderClient.getSandboxOrders(this.accountId!),
+      this.orderClient.getSandboxStopOrders(this.accountId!),
+    ]);
+    const cashNano = sandboxFlatCashNano(cashPositions, this.accountId!);
+    assertNoSandboxOrders(cashOrders);
+    assertNoActiveSandboxStops(cashStops);
+    const claimNow = cashTime();
+    if (claimNow.getTime() - Date.parse(cashFrom) > 30_000) throw new Error('Sandbox pre-BUY cash reads are stale');
+    if (!plan.cashRequiredNano || cashNano < BigInt(plan.cashRequiredNano)) {
+      throw new Error('Fresh sandbox cash including entry costs is insufficient');
+    }
+    const cashBaseline: SandboxCashBaseline = { version: 1, accountId: this.accountId!, entryRequestId: existing.orderRequestId,
+      cashNano: String(cashNano), observedFrom: cashFrom, observedAt: claimNow.toISOString(), ledgerRevision: cashRevision,
+      killGeneration: killGeneration!, preparedRaw: prepared.raw, ...(selectionProof ? { selection: selectionProof } : {}) };
+    if (lossProof || versionedScanner) {
+      const finalAge = claimNow.getTime() - Date.parse(scenario.observedAt);
+      if (finalAge < 0 || finalAge > this.config.execution.candidateMaxAgeMinutes * 60_000) throw new Error('Candidate expired during sandbox loss preflight');
+    }
+    if (this.isKilled()) throw new Error('Execution kill switch is active');
+    if (this.config.execution.sandboxSessionCloseEnabled && !sandboxSessionEntryAllowed(claimNow)) {
+      throw new Error('Sandbox entry window ended during preflight');
+    }
+    this.assertScannerEntryWindow(scenario, claimNow);
+    let claimed: ExecutionOrderRecord;
+    try {
+      claimed = this.journal.claimExecution(scenarioId, chatId, {
+        ...(lossProof ? moscowDayRange(claimNow) : day), now: claimNow.toISOString(), maxOrders: this.config.execution.maxOrdersPerDay,
+        maxRiskRub: this.config.execution.maxDailyRiskRub,
+        singlePosition: this.config.livePilot.prepare,
+        preparedSandbox: { ...prepared, generation: killGeneration },
+        cashBaseline,
+        ...(selectionProof ? {tradingSelection:selectionProof} : {}),
+        ...(lossProof ? { lossGuard: { proofId: lossProof.proofId, accountId: this.accountId!,
+          maxDailyLossRub: this.config.livePilot.maxDailyLossRub, maxTradeLossRub: this.config.livePilot.maxTradeRiskRub } } : {}),
+      });
+    } catch (error) {
+      if (error instanceof SandboxPreparationChangedError) this.kill();
+      throw error;
+    }
 
     let response;
     try {
@@ -201,20 +349,30 @@ export class ExecutionService {
         orderRequestId: claimed.orderRequestId,
       });
     } catch (error: unknown) {
-      if (error instanceof TInvestOrderError && error.outcomeUncertain) {
-        this.journal.recordExecutionUncertain(scenarioId, error.message);
+      if (error instanceof TInvestOrderError && !error.outcomeUncertain) {
+        this.journal.markExecutionFailed(scenarioId, 'Sandbox request failed before submission');
       } else {
-        const detail = error instanceof Error ? error.message : 'Unknown order submission error';
-        this.journal.markExecutionFailed(scenarioId, detail);
+        this.journal.recordExecutionUncertain(scenarioId, 'Sandbox submission did not confirm the outcome; risk remains reserved');
       }
-      throw error;
+      throw new Error('Sandbox submission did not confirm the outcome; use reconciliation before any retry');
     }
 
-    if (
+    const knownStatuses = ['EXECUTION_REPORT_STATUS_FILL', 'EXECUTION_REPORT_STATUS_PARTIALLYFILL',
+      'EXECUTION_REPORT_STATUS_NEW', 'EXECUTION_REPORT_STATUS_REJECTED', 'EXECUTION_REPORT_STATUS_CANCELLED'];
+    if (!knownStatuses.includes(response.executionStatus)
+      || !Number.isSafeInteger(response.lotsExecuted) || response.lotsExecuted < 0 || response.lotsExecuted > claimed.lots
+      || response.lotsRequested !== claimed.lots
+      || (response.executionStatus === 'EXECUTION_REPORT_STATUS_FILL' && response.lotsExecuted !== claimed.lots)
+      || (response.executionStatus === 'EXECUTION_REPORT_STATUS_NEW' && response.lotsExecuted !== 0)
+      || (response.executionStatus === 'EXECUTION_REPORT_STATUS_PARTIALLYFILL'
+        && (response.lotsExecuted === 0 || response.lotsExecuted === claimed.lots))) {
+      this.journal.recordExecutionUncertain(scenarioId, 'Unconfirmed broker execution status');
+      throw new TInvestOrderError('Unconfirmed broker execution status; risk remains reserved', true);
+    }
+    if (response.lotsExecuted === 0 && (
       response.executionStatus === 'EXECUTION_REPORT_STATUS_REJECTED' ||
-      response.executionStatus === 'EXECUTION_REPORT_STATUS_CANCELLED' ||
-      response.executionStatus === 'EXECUTION_REPORT_STATUS_UNSPECIFIED'
-    ) {
+      response.executionStatus === 'EXECUTION_REPORT_STATUS_CANCELLED'
+    )) {
       const failed = this.journal.markExecutionFailed(scenarioId, response.executionStatus);
       return { order: failed, executionStatus: response.executionStatus, lotsExecuted: response.lotsExecuted };
     }
@@ -223,33 +381,163 @@ export class ExecutionService {
       scenarioId,
       response.brokerOrderId,
       `${response.executionStatus}; lots ${response.lotsExecuted}/${response.lotsRequested}`,
+      response.lotsExecuted,
     );
+    if (this.config.execution.sandboxProtectionEnabled && response.lotsExecuted > 0) {
+      await this.protection!.protect(this.accountId!, scenarioId, now);
+    }
     return { order: accepted, executionStatus: response.executionStatus, lotsExecuted: response.lotsExecuted };
   }
 
-  private async ensureSandboxAccount(): Promise<void> {
-    if (!this.accountId) {
-      const accountName = 'AndStrel trading sandbox';
-      const accounts = await this.orderClient.getSandboxAccounts();
-      const existing = accounts.find((account) => account.name === accountName);
-      this.accountId = existing?.id ?? (await this.orderClient.openSandboxAccount(accountName));
-      this.journal.setRuntimeState('execution.sandbox_account_id', this.accountId);
+  async recoverOutstanding(limit = 20, now = new Date()) {
+    if (!this.isReady()) throw new Error('Sandbox execution is not configured');
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('Invalid reconciliation batch size');
+    const orders = this.journal.listRecoverableExecutionOrders(limit + 1);
+    let confirmed = 0;
+    let unconfirmed = 0;
+    for (const order of orders.slice(0, limit)) {
+      try { await this.reconcileScenario(order.scenarioId, now); confirmed++; }
+      catch { unconfirmed++; }
     }
+    return { attempted: confirmed + unconfirmed, confirmed, unconfirmed, morePending: orders.length > limit };
+  }
 
-    if (this.journal.getRuntimeState('execution.sandbox_funded_account_id') !== this.accountId) {
-      await this.orderClient.sandboxPayIn(
-        this.accountId,
-        this.config.execution.sandboxInitialBalanceRub,
-      );
-      this.journal.setRuntimeState('execution.sandbox_funded_account_id', this.accountId);
+  async protectOutstanding(now?: Date) {
+    if (!this.isReady() || !this.config.execution.sandboxProtectionEnabled || !this.protection) throw new Error('Sandbox protection is not configured');
+    const orders = this.journal.listRecoverableExecutionOrders(21);
+    const result = { active: 0, triggered: 0, closed: 0, unconfirmed: 0, morePending: orders.length > 20 };
+    for (const order of orders.slice(0, 20)) {
+      if (order.status !== 'accepted') { result.unconfirmed++; continue; }
+      try {
+        if (this.config.execution.sandboxSessionCloseEnabled && this.journal.getNativeStop(order.scenarioId)) {
+          if (!this.sessionClose) throw new Error('Sandbox session closing module is not connected');
+          const closed = await this.sessionClose.advance(this.accountId!, order.scenarioId, now);
+          if (closed) {
+            if (closed.kind === 'restored') { result.active++; continue; }
+            if (closed.kind === 'native') result.triggered++;
+            if (closed.complete) result.closed++; else result.unconfirmed++;
+            continue;
+          }
+        }
+        const observed = await this.protection.protect(this.accountId!, order.scenarioId, now);
+        if (observed.status === 'STOP_ORDER_STATUS_ACTIVE') result.active++;
+        else if (observed.status === 'STOP_ORDER_STATUS_EXECUTED') {
+          result.triggered++;
+          if (this.exitReconciler) {
+            const exit = await this.exitReconciler.reconcile(this.accountId!, order.scenarioId, now);
+            if (exit.complete) result.closed++;
+            else result.unconfirmed++;
+          }
+        }
+        else result.unconfirmed++;
+      } catch { result.unconfirmed++; }
+    }
+    return result;
+  }
+
+  async reconcileScenario(scenarioId: number, now = new Date()): Promise<ExecutionSubmitResult> {
+    if (!this.isReady()) throw new Error('Sandbox execution is not configured');
+    const order = this.journal.getExecutionByScenario(scenarioId);
+    const scenario = this.journal.getScenario(scenarioId);
+    if (!order || order.mode !== 'sandbox' || !scenario || !['submitting', 'accepted'].includes(order.status)) {
+      throw new Error('Only an unresolved or accepted sandbox order can be reconciled');
+    }
+    try {
+      const payload = await this.orderClient.getSandboxOrderState(this.accountId!, order.orderRequestId);
+      const snapshot = parseSandboxOrderState(payload, {
+        requestId: order.orderRequestId, instrumentId: order.instrumentId, lots: order.lots, lotSize: scenario.input.lotSize,
+      }, now);
+      const updated = this.journal.recordExecutionReconciliation(scenarioId, snapshot);
+      const native = this.journal.getNativeStop(scenarioId);
+      const sandboxExit = this.exitReconciler && this.config.execution.sandboxProtectionEnabled
+        && (native?.observation?.status === 'STOP_ORDER_STATUS_EXECUTED' || this.journal.getSandboxSessionExit(scenarioId)?.phase === 'submitted')
+        ? await this.exitReconciler.reconcile(this.accountId!, scenarioId, now) : undefined;
+      return { order: updated, executionStatus: snapshot.executionStatus, lotsExecuted: snapshot.lotsExecuted,
+        ...(sandboxExit ? { sandboxExit } : {}) };
+    } catch {
+      this.journal.recordExecutionUncertain(scenarioId, 'Sandbox reconciliation did not confirm the result; prior risk remains reserved');
+      throw new Error('Sandbox reconciliation is incomplete; no new order was sent and prior risk remains reserved');
     }
   }
 
+  private preparedSnapshot() {
+    if (!this.isConfigured() || this.config.execution.baseUrl !== sandboxEndpoint
+      || this.config.execution.token === this.config.token || this.config.execution.token === this.config.livePilot.token) {
+      throw new Error('Separately prepared sandbox configuration is not confirmed');
+    }
+    const raw = this.journal.getRuntimeState(sandboxBootstrapKey);
+    const prepared = readPreparedSandbox(raw, this.journal.getRuntimeState(sandboxAccountKey), this.config.execution.accountId);
+    if (this.accountId && this.accountId !== prepared.accountId) throw new Error('Separately prepared sandbox account changed');
+    return { raw: raw!, accountId: prepared.accountId, name: prepared.name };
+  }
+
+  private assertStrategyLimits(plan: TradePlanSnapshot): void {
+    const limits = this.config.strategies.intraday;
+    if (plan.positionRub > limits.maxPositionRub) throw new Error('Scenario exceeds the position limit');
+    if (plan.totalRiskRub > limits.maxRiskRub) throw new Error('Scenario exceeds the risk limit');
+  }
+
+  private assertScannerEntryWindow(scenario: JournalScenarioRecord, now: Date): boolean {
+    const snapshot = asRecord(scenario.snapshot);
+    if (snapshot?.source !== 'intraday-scanner' || snapshot.tradingStrategy === undefined) return false;
+    const strategy = asRecord(snapshot.tradingStrategy);
+    if (!isTradingStrategyId(strategy?.id) || strategy.version !== getStrategyDescriptor(strategy.id).version
+      || typeof strategy.referenceStartMinutes !== 'number') throw new Error('Original scanner strategy entry window is not confirmed');
+    const selection = asRecord(snapshot.tradingSelection);
+    if (snapshot.tradingSelection !== undefined && selection?.strategyId !== strategy.id) {
+      throw new Error('Original scanner strategy entry window does not match the recorded selection');
+    }
+    const original = strategyEntryWindow(strategy.id, strategy.referenceStartMinutes, new Date(scenario.observedAt));
+    const current = strategyEntryWindow(strategy.id, this.config.scanner.sessionStartMinutes, now);
+    // Both windows must allow entry: a configuration change or a new Moscow day
+    // can tighten the original candidate's deadline, never extend it.
+    if (!original || !current || now.getTime() < Math.max(original.entryStartMs, current.entryStartMs)
+      || now.getTime() >= Math.min(original.entryEndMs, current.entryEndMs)) {
+      throw new Error('Versioned scanner entry window is closed; regenerate the candidate');
+    }
+    return true;
+  }
+
+  private readValidatedPlan(scenario: JournalScenarioRecord): TradePlanSnapshot {
+    const rawPlan = readTradePlan(scenario);
+    const plan = { ...rawPlan, cashRequiredNano: pilotEntryCashRequiredNano({ entryPrice: scenario.input.entryPrice,
+      lots: rawPlan.lots, lotSize: scenario.input.lotSize, commissionRate: this.config.commissionRate,
+      slippageRate: Math.max(this.config.scanner.slippageRate, scenario.input.slippageRate) }) };
+    if (!this.config.livePilot.prepare) return plan;
+    const assessment = assessLivePilotRisk(this.config.livePilot, {
+      side: scenario.input.side,
+      entryPrice: scenario.input.entryPrice,
+      stopPrice: scenario.input.stopPrice,
+      targetPrice: scenario.input.targetPrice,
+      lots: plan.lots,
+      lotSize: scenario.input.lotSize,
+      commissionRate: this.config.commissionRate,
+      slippageRate: Math.max(this.config.scanner.slippageRate, scenario.input.slippageRate),
+      availableCashRub: this.config.livePilot.capitalRub,
+      reservedDailyRiskRub: 0,
+      realizedDailyLossRub: 0,
+      markedOpenLossRub: 0,
+    });
+    if (!assessment.allowed) throw new Error(assessment.blockers.join('; '));
+    // Never accept a cheaper historical snapshot as the monetary source of truth.
+    return { ...plan, positionRub: Math.max(plan.positionRub, assessment.positionRub), totalRiskRub: Math.max(plan.totalRiskRub, assessment.totalRiskRub),
+      cashRequiredNano: plan.cashRequiredNano };
+  }
+
   private async validateCurrentMarket(scenario: JournalScenarioRecord, lots: number): Promise<void> {
-    const [orderBookPayload, statusPayload] = await Promise.all([
+    const snapshot=asRecord(scenario.snapshot);
+    const versionedScanner=snapshot?.source==='intraday-scanner' && snapshot.tradingStrategy!==undefined;
+    const [orderBookPayload, statusPayload, instrumentPayload] = await Promise.all([
       this.marketClient.getOrderBook(scenario.instrumentId, 20),
       this.marketClient.getTradingStatus(scenario.instrumentId),
+      this.config.execution.sandboxSessionCloseEnabled || versionedScanner ? this.marketClient.getInstrumentBy?.(scenario.instrumentId) : undefined,
     ]);
+    if (this.config.execution.sandboxSessionCloseEnabled || versionedScanner) {
+      assertSandboxInstrument(instrumentPayload,scenarioInstrument(this.config,scenario),true);
+    }
+    if (this.config.execution.sandboxLossGuardEnabled || versionedScanner) {
+      sandboxBidValue(orderBookPayload, statusPayload, scenario.instrumentId, lots, scenario.input.lotSize, new Date());
+    }
     const bid = bestPrice(orderBookPayload, 'bids');
     const ask = bestPrice(orderBookPayload, 'asks');
     const status = asRecord(statusPayload);
@@ -271,6 +559,14 @@ export class ExecutionService {
     const entryDeviationPct = (Math.abs(scenario.input.entryPrice - ask.price) / ask.price) * 100;
     if (entryDeviationPct > this.config.strategies.intraday.maxEntryDeviationPct) {
       throw new Error('Current best ask moved too far from the planned entry');
+    }
+  }
+
+  private assertSessionMetadata(scenario: JournalScenarioRecord): void {
+    if (!this.config.execution.sandboxSessionCloseEnabled) return;
+    const item = scenarioInstrument(this.config,scenario);
+    if ([scenario.input.entryPrice, scenario.input.stopPrice].some(price => BigInt(decimalPriceNano(price)) % BigInt(decimalPriceNano(item.priceStep)) !== 0n)) {
+      throw new Error('Configured lot size and price tick for sandbox closing are not confirmed');
     }
   }
 }

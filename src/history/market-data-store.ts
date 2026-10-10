@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  researchCandleAvailableAt,
   researchVectorDistance,
   type ResearchOutcome,
   type ResearchSituationRecord,
@@ -670,6 +671,9 @@ export class MarketDataStore {
     limit: number;
     excludeSituationId?: string;
   }): SimilarResearchSituation[] {
+    const cutoffMs = Date.parse(input.before);
+    if (!Number.isFinite(cutoffMs)) throw new Error('Research similarity cutoff is invalid');
+    const cutoff = new Date(cutoffMs).toISOString();
     if (input.featureVector.length === 0) throw new Error('Research feature vector is empty');
     if (!Number.isInteger(input.limit) || input.limit < 1 || input.limit > 500) {
       throw new Error('Research similarity limit must be an integer from 1 through 500');
@@ -701,7 +705,7 @@ export class MarketDataStore {
       while (true) {
         const rows = selectBatch.all(
           input.datasetVersion,
-          input.before,
+          cutoff,
           input.excludeSituationId ?? null,
           input.excludeSituationId ?? null,
           lastFeatureAvailableAt,
@@ -725,9 +729,10 @@ export class MarketDataStore {
       const outcomes = this.readResearchOutcomes(database, nearestRows.map(({ row }) => row.situation_id));
       return nearestRows.map(({ situation, distance }) => ({
         ...situation,
-        // A past observation can still have an outcome that was unknown at the
-        // decision cutoff. Keep the historical neighbor, but never reveal it.
-        outcomes: (outcomes.get(situation.situationId) ?? []).filter((outcome) => outcome.terminalAt <= input.before),
+        // Rank by past features only. Forward labels may be returned only once
+        // their entire terminal candle has completed at the query's cutoff.
+        outcomes: (outcomes.get(situation.situationId) ?? [])
+          .filter((outcome) => Date.parse(outcome.outcomeAvailableAt) <= cutoffMs),
         distance,
       }));
     } finally {
@@ -769,6 +774,7 @@ export class MarketDataStore {
       list.push({
         horizonMinutes: Number(row.horizon_minutes),
         terminalAt: row.terminal_at,
+        outcomeAvailableAt: researchCandleAvailableAt(row.terminal_at),
         forwardReturnPct: row.forward_return_pct,
         maxFavorablePct: row.max_favorable_pct,
         maxAdversePct: row.max_adverse_pct,

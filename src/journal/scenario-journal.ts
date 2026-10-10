@@ -12,6 +12,34 @@ import {
   type LqdtSleeveState,
   type MoneyMarketSleeveTicker,
 } from '../domain/lqdt-cash-sleeve.js';
+import { riskBudgetFits } from '../execution/live-pilot-risk.js';
+import { assertSnapshotProgress, type SandboxOrderSnapshot } from '../execution/sandbox-order-state.js';
+import { decimalPriceNano, nativeStopKey, type NativeStopKey, type SandboxStopIntent, type SandboxStopObservation } from '../execution/sandbox-stop-state.js';
+import { analyzeSandboxRoundTrip } from '../execution/sandbox-round-trip.js';
+import { randomUUID } from 'node:crypto';
+import { moscowLossDay, type SandboxLossAssessment, type SandboxLossProof } from '../execution/sandbox-loss-policy.js';
+import { sandboxSessionCloseDue, sandboxCloseKey, type SandboxCloseKey, type SandboxProtectionRestoreProof, type SandboxSessionExitIntent } from '../execution/sandbox-session-policy.js';
+import { nanoQuotation } from '../execution/sandbox-stop-state.js';
+import { assertTechnicalScope } from '../execution/sandbox-technical-scope.js';
+import { hasTechnicalCashRestorationBaseline } from '../execution/sandbox-technical-cash-policy.js';
+import { assertSandboxTargetProof, type SandboxTargetProof } from '../execution/sandbox-target-policy.js';
+import { isTradingStrategyId, getStrategyDescriptor } from '../strategies/catalog.js';
+import { analyzeSandboxCashReconciliation, assertSandboxCashBaseline, assertSandboxCashObservation,
+  type SandboxCashBaseline, type SandboxCashObservation, type SandboxCashObservationEpoch } from '../execution/sandbox-cash-reconciliation.js';
+import { readPreparedSandbox, sandboxAccountKey, sandboxBootstrapKey } from '../execution/sandbox-prepared-account.js';
+import { tradingSelectionKey } from '../strategies/selection.js';
+
+export class SandboxPreparationChangedError extends Error {
+  constructor() { super('Sandbox arming or preparation changed during entry preflight'); }
+}
+
+export type NativeStopRecord = { intent: SandboxStopIntent; observation: SandboxStopObservation | null };
+export type SandboxCloseHistoryRecord = { intent: SandboxSessionExitIntent; native: NativeStopRecord;
+  sellSnapshot: SandboxOrderSnapshot | null; observedAt: string };
+export type SandboxExitEvidence = { snapshot: SandboxOrderSnapshot; flatConfirmedAt: string | null; observedAt: string };
+export type SandboxSafetyReason = 'protection-unconfirmed' | 'loss-incomplete' | 'loss-limit' | 'monitor-unavailable';
+export type SandboxSafetyNotice = { incidentId: string; attemptId: string; reason: SandboxSafetyReason; checkedAt: string };
+const safetyReasons: SandboxSafetyReason[] = ['protection-unconfirmed', 'loss-incomplete', 'loss-limit', 'monitor-unavailable'];
 
 export type JournalScenarioInput = {
   observedAt: string;
@@ -272,6 +300,41 @@ const schema = `
     updated_at TEXT NOT NULL
   ) STRICT;
 
+  -- Cover safety paths that write kill directly as well as the public setter.
+  -- A fresh generation detects repeated true writes with identical timestamps.
+  CREATE TRIGGER IF NOT EXISTS execution_kill_insert_generation
+  AFTER INSERT ON runtime_state WHEN NEW.key = 'execution.kill_switch'
+  BEGIN
+    INSERT INTO runtime_state (key,value,updated_at)
+    VALUES ('execution.kill_generation',lower(hex(randomblob(16))),NEW.updated_at)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at;
+  END;
+  CREATE TRIGGER IF NOT EXISTS execution_kill_update_generation
+  AFTER UPDATE ON runtime_state WHEN NEW.key = 'execution.kill_switch'
+  BEGIN
+    INSERT INTO runtime_state (key,value,updated_at)
+    VALUES ('execution.kill_generation',lower(hex(randomblob(16))),NEW.updated_at)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at;
+  END;
+
+  CREATE TABLE IF NOT EXISTS sandbox_safety_incidents (
+    id TEXT PRIMARY KEY,
+    reason TEXT NOT NULL CHECK(reason IN ('protection-unconfirmed','loss-incomplete','loss-limit','monitor-unavailable')),
+    checked_at TEXT NOT NULL,
+    resolved_at TEXT
+  ) STRICT;
+  CREATE UNIQUE INDEX IF NOT EXISTS sandbox_safety_one_active
+    ON sandbox_safety_incidents((1)) WHERE resolved_at IS NULL;
+  CREATE TABLE IF NOT EXISTS sandbox_safety_deliveries (
+    incident_id TEXT NOT NULL REFERENCES sandbox_safety_incidents(id),
+    chat_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    claimed_at TEXT NOT NULL,
+    lease_until INTEGER NOT NULL,
+    delivered_at TEXT,
+    PRIMARY KEY (incident_id,chat_id)
+  ) STRICT;
+
   CREATE TABLE IF NOT EXISTS execution_orders (
     id INTEGER PRIMARY KEY,
     scenario_id INTEGER NOT NULL UNIQUE REFERENCES scenario_journal(id),
@@ -325,6 +388,78 @@ const schema = `
     closed_at TEXT,
     close_note TEXT
   ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS execution_evidence (
+    execution_order_id INTEGER PRIMARY KEY REFERENCES execution_orders(id),
+    lots_executed INTEGER NOT NULL CHECK(lots_executed >= 0),
+    snapshot_json TEXT,
+    updated_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS native_stop_intents (
+    scenario_id INTEGER PRIMARY KEY REFERENCES scenario_journal(id),
+    request_id TEXT NOT NULL UNIQUE,
+    intent_json TEXT NOT NULL,
+    observation_json TEXT,
+    updated_at TEXT NOT NULL
+  ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS sandbox_exit_evidence (
+    scenario_id INTEGER PRIMARY KEY REFERENCES scenario_journal(id),
+    snapshot_json TEXT NOT NULL,
+    flat_confirmed_at TEXT,
+    observed_at TEXT NOT NULL
+  ) STRICT;
+
+  -- A baseline belongs to the winning BUY claim, never to a later recovery.
+  CREATE TABLE IF NOT EXISTS sandbox_cash_baselines (
+    execution_order_id INTEGER PRIMARY KEY REFERENCES execution_orders(id),
+    baseline_json TEXT NOT NULL,
+    recorded_at TEXT NOT NULL
+  ) STRICT;
+  -- Each read is retained; newer fees or contradictory cash invalidate proof.
+  CREATE TABLE IF NOT EXISTS sandbox_cash_observations (
+    id INTEGER PRIMARY KEY,
+    execution_order_id INTEGER NOT NULL REFERENCES execution_orders(id),
+    observation_json TEXT NOT NULL,
+    ledger_revision TEXT NOT NULL,
+    recorded_at TEXT NOT NULL
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS sandbox_cash_observations_order
+    ON sandbox_cash_observations(execution_order_id,id);
+
+  CREATE TABLE IF NOT EXISTS sandbox_session_exit_intents (
+    scenario_id INTEGER PRIMARY KEY REFERENCES scenario_journal(id),
+    request_id TEXT NOT NULL UNIQUE,
+    intent_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  ) STRICT;
+
+  -- Immutable identities survive pointer changes; later fee observations append.
+  CREATE TABLE IF NOT EXISTS native_stop_history (
+    scenario_id INTEGER NOT NULL REFERENCES scenario_journal(id),
+    generation INTEGER NOT NULL CHECK(generation >= 0),
+    request_id TEXT NOT NULL UNIQUE,
+    intent_json TEXT NOT NULL,
+    observation_json TEXT NOT NULL,
+    archived_at TEXT NOT NULL,
+    PRIMARY KEY (scenario_id,generation)
+  ) STRICT;
+  CREATE TABLE IF NOT EXISTS sandbox_close_history (
+    request_id TEXT PRIMARY KEY,
+    scenario_id INTEGER NOT NULL REFERENCES scenario_journal(id),
+    generation INTEGER NOT NULL CHECK(generation >= 0),
+    intent_json TEXT NOT NULL,
+    native_json TEXT NOT NULL,
+    archived_at TEXT NOT NULL
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS sandbox_close_history_scenario ON sandbox_close_history(scenario_id,generation);
+  CREATE TABLE IF NOT EXISTS sandbox_close_history_observations (
+    id INTEGER PRIMARY KEY,
+    request_id TEXT NOT NULL REFERENCES sandbox_close_history(request_id),
+    snapshot_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL
+  ) STRICT;
 `;
 
 function parseJson<T>(value: string, fallback: T): T {
@@ -339,6 +474,21 @@ function parseStringArray(value: string): string[] {
   const parsed = parseJson<unknown>(value, []);
   return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
 }
+
+function assertNativeKey(intent: SandboxStopIntent, expected?: NativeStopKey): void {
+  const key = nativeStopKey(intent);
+  if (!expected ? key.generation !== 0 : Object.entries(key).some(([name,value]) => expected[name as keyof NativeStopKey] !== value)) {
+    throw new Error('Native stop generation or identity changed');
+  }
+}
+function assertCloseKey(intent: SandboxSessionExitIntent, expected?: SandboxCloseKey): void {
+  const key = sandboxCloseKey(intent);
+  if (!expected ? key.generation !== 0 || intent.purpose === 'target' : Object.entries(key).some(([name,value]) => expected[name as keyof SandboxCloseKey] !== value)) {
+    throw new Error('Close attempt generation or identity changed');
+  }
+}
+const recordObject = (value: unknown): Record<string,unknown> | null => value !== null && typeof value === 'object' && !Array.isArray(value)
+  ? value as Record<string,unknown> : null;
 
 export class ScenarioJournal {
   private readonly databasePath: string;
@@ -432,6 +582,7 @@ export class ScenarioJournal {
     strategy: Strategy;
     instrumentId: string;
     since: string;
+    selectionRevision?: number;
   }): boolean {
     const database = this.open();
 
@@ -443,10 +594,11 @@ export class ScenarioJournal {
              AND instrument_id = ?
              AND decision = 'candidate'
              AND recorded_at >= ?
+             AND (? IS NULL OR json_extract(snapshot_json, '$.tradingSelection.revision') = ?)
            ORDER BY id DESC
            LIMIT 1`,
         )
-        .get(input.strategy, input.instrumentId, input.since) as { id: number | bigint } | undefined;
+        .get(input.strategy, input.instrumentId, input.since, input.selectionRevision ?? null, input.selectionRevision ?? null) as { id: number | bigint } | undefined;
       return Boolean(row);
     } finally {
       database.close();
@@ -480,6 +632,74 @@ export class ScenarioJournal {
     } finally {
       database.close();
     }
+  }
+
+  compareAndSetRuntimeState(key: string, expected: string | null, value: string): boolean {
+    const database = this.open();
+    try {
+      database.exec('BEGIN IMMEDIATE');
+      const current = database.prepare('SELECT value FROM runtime_state WHERE key=?').get(key) as {value:string}|undefined;
+      if ((current?.value ?? null) !== expected) { database.exec('ROLLBACK'); return false; }
+      database.prepare('INSERT INTO runtime_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at')
+        .run(key, value, new Date().toISOString());
+      database.exec('COMMIT');
+      return true;
+    } catch (error) { try { database.exec('ROLLBACK'); } catch {} throw error; }
+    finally { database.close(); }
+  }
+
+  // Alert state is private, durable and separate from broker execution intents.
+  // Successful monitoring resolves an incident but NEVER clears the kill switch.
+  recordSandboxSafetyCheck(reason: SandboxSafetyReason | null, now = new Date()): void {
+    if (!Number.isFinite(now.getTime()) || (reason !== null && !safetyReasons.includes(reason))) throw new Error('Invalid sandbox safety check');
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const current = db.prepare('SELECT id,checked_at FROM sandbox_safety_incidents WHERE resolved_at IS NULL').get() as {id:string;checked_at:string}|undefined;
+      const latest = db.prepare('SELECT checked_at,resolved_at FROM sandbox_safety_incidents ORDER BY checked_at DESC LIMIT 1').get() as {checked_at:string;resolved_at:string|null}|undefined;
+      if (latest && now.getTime() < Math.max(Date.parse(latest.checked_at), Date.parse(latest.resolved_at ?? latest.checked_at))) throw new Error('Sandbox safety clock regressed');
+      const at = now.toISOString();
+      if (reason === null && current) db.prepare('UPDATE sandbox_safety_incidents SET checked_at=?,resolved_at=? WHERE id=?').run(at,at,current.id);
+      if (reason !== null) {
+        if (current) db.prepare('UPDATE sandbox_safety_incidents SET reason=?,checked_at=? WHERE id=?').run(reason,at,current.id);
+        else db.prepare('INSERT INTO sandbox_safety_incidents (id,reason,checked_at) VALUES (?,?,?)').run(randomUUID(),reason,at);
+        db.prepare(`INSERT INTO runtime_state (key,value,updated_at) VALUES ('execution.kill_switch','true',?)
+          ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at`).run(at);
+      }
+      db.exec('COMMIT');
+    } catch(error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  claimSandboxSafetyNotice(chatId: string, now = new Date()): SandboxSafetyNotice | null {
+    if (!/^[1-9]\d{0,19}$/.test(chatId) || !Number.isFinite(now.getTime())) throw new Error('Invalid private sandbox alert recipient or clock');
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const incident = db.prepare('SELECT id,reason,checked_at FROM sandbox_safety_incidents WHERE resolved_at IS NULL').get() as
+        {id:string;reason:SandboxSafetyReason;checked_at:string}|undefined;
+      const age = incident ? now.getTime()-Date.parse(incident.checked_at) : NaN;
+      if (!incident || !Number.isFinite(age) || age<0 || age>60_000) { db.exec('COMMIT'); return null; }
+      const prior = db.prepare('SELECT delivered_at,lease_until FROM sandbox_safety_deliveries WHERE incident_id=? AND chat_id=?').get(incident.id,chatId) as
+        {delivered_at:string|null;lease_until:number}|undefined;
+      if (prior?.delivered_at || (prior && prior.lease_until>now.getTime())) { db.exec('COMMIT'); return null; }
+      const count = db.prepare('SELECT COUNT(*) AS n FROM sandbox_safety_deliveries WHERE incident_id=?').get(incident.id) as {n:number};
+      if (!prior && count.n>=50) throw new Error('Sandbox alert recipient limit reached');
+      const attemptId=randomUUID();
+      db.prepare(`INSERT INTO sandbox_safety_deliveries (incident_id,chat_id,attempt_id,claimed_at,lease_until) VALUES (?,?,?,?,?)
+        ON CONFLICT(incident_id,chat_id) DO UPDATE SET attempt_id=excluded.attempt_id,claimed_at=excluded.claimed_at,lease_until=excluded.lease_until`)
+        .run(incident.id,chatId,attemptId,now.toISOString(),now.getTime()+300_000);
+      db.exec('COMMIT'); return {incidentId:incident.id,attemptId,reason:incident.reason,checkedAt:incident.checked_at};
+    } catch(error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  acknowledgeSandboxSafetyNotice(chatId: string, notice: SandboxSafetyNotice, now = new Date()): boolean {
+    if (!/^[1-9]\d{0,19}$/.test(chatId) || !Number.isFinite(now.getTime())) throw new Error('Invalid sandbox alert acknowledgement');
+    const db=this.open();
+    try {
+      // A late sender cannot acknowledge a lease subsequently claimed by another actor.
+      return db.prepare(`UPDATE sandbox_safety_deliveries SET delivered_at=? WHERE incident_id=? AND chat_id=? AND attempt_id=?
+        AND delivered_at IS NULL AND claimed_at<=? AND lease_until>=?`).run(now.toISOString(),notice.incidentId,chatId,notice.attemptId,now.toISOString(),now.getTime()).changes===1;
+    } finally { db.close(); }
   }
 
   isScannerPaused(strategy: Strategy): boolean {
@@ -814,7 +1034,22 @@ export class ScenarioJournal {
     }
   }
 
-  claimExecution(scenarioId: number, chatId: string): ExecutionOrderRecord {
+  listRecoverableExecutionOrders(limit: number): ExecutionOrderRecord[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 51) throw new Error('Invalid reconciliation batch size');
+    const database = this.open();
+    try {
+      return (database.prepare("SELECT * FROM execution_orders WHERE mode = 'sandbox' AND status IN ('submitting', 'accepted') ORDER BY id ASC LIMIT ?")
+        .all(limit) as ExecutionOrderRow[]).map(row => this.toExecutionOrder(row));
+    } finally { database.close(); }
+  }
+
+  claimExecution(scenarioId: number, chatId: string, limits?: {
+    from: string; to: string; now: string; maxOrders: number; maxRiskRub: number; singlePosition?: boolean;
+    lossGuard?: { proofId: string; accountId: string; maxDailyLossRub: number; maxTradeLossRub: number };
+    preparedSandbox?: { raw: string; accountId: string; generation: string | null };
+    tradingSelection?: { key: string; raw: string };
+    cashBaseline?: SandboxCashBaseline;
+  }): ExecutionOrderRecord {
     const database = this.open();
     try {
       database.exec('BEGIN IMMEDIATE');
@@ -824,7 +1059,49 @@ export class ScenarioJournal {
       if (!row) throw new Error('Execution order was not found');
 
       if (row.status === 'pending') {
-        const now = new Date().toISOString();
+        if (limits) {
+          const killed = database.prepare('SELECT value FROM runtime_state WHERE key = ?')
+            .get('execution.kill_switch') as { value: string } | undefined;
+          if (killed?.value !== 'false') throw new Error('Execution kill switch is active');
+          if (limits.preparedSandbox) {
+            const state = (key: string) => (database.prepare('SELECT value FROM runtime_state WHERE key=?').get(key) as {value:string}|undefined)?.value;
+            const expected = limits.preparedSandbox;
+            if (!expected.generation || state('execution.kill_generation') !== expected.generation
+              || state('execution.sandbox_bootstrap_v1') !== expected.raw || state('execution.sandbox_account_id') !== expected.accountId) {
+              throw new SandboxPreparationChangedError();
+            }
+            if (!limits.cashBaseline) throw new Error('Fresh pre-BUY sandbox cash baseline is required');
+          }
+          if (limits.lossGuard) this.assertLossProof(database, row, limits.now, limits.lossGuard);
+          if (limits.tradingSelection) {
+            const current = database.prepare('SELECT value FROM runtime_state WHERE key=?').get(limits.tradingSelection.key) as {value:string}|undefined;
+            if (current?.value !== limits.tradingSelection.raw) throw new Error('Trading selection changed; regenerate the candidate');
+          }
+          if (limits.cashBaseline) {
+            const baseline = limits.cashBaseline;
+            assertSandboxCashBaseline(baseline);
+            const at = Date.parse(limits.now);
+            if (row.mode !== 'sandbox' || !limits.preparedSandbox || !limits.preparedSandbox.generation
+              || baseline.accountId !== limits.preparedSandbox.accountId || baseline.entryRequestId !== row.order_request_id
+              || baseline.preparedRaw !== limits.preparedSandbox.raw || baseline.killGeneration !== limits.preparedSandbox.generation
+              || baseline.ledgerRevision !== this.sandboxRevision(database)
+              || JSON.stringify(baseline.selection ?? null) !== JSON.stringify(limits.tradingSelection ?? null)
+              || !Number.isFinite(at) || at < Date.parse(baseline.observedAt) || at - Date.parse(baseline.observedFrom) > 30_000) {
+              throw new Error('Sandbox cash baseline changed or expired before entry claim');
+            }
+            database.prepare('INSERT INTO sandbox_cash_baselines (execution_order_id,baseline_json,recorded_at) VALUES (?,?,?)')
+              .run(row.id, JSON.stringify(baseline), limits.now);
+          }
+          if (limits.singlePosition && database.prepare(
+            "SELECT id FROM execution_orders WHERE status IN ('submitting', 'accepted') LIMIT 1",
+          ).get()) throw new Error('Pilot already has an unresolved order or open position');
+          const reservations = this.executionReservations(database, limits.from, limits.to);
+          if (reservations.length >= limits.maxOrders) throw new Error('Daily execution order limit has been reached');
+          if (!riskBudgetFits(reservations, row.estimated_risk_rub, limits.maxRiskRub)) {
+            throw new Error('Daily execution risk limit would be exceeded');
+          }
+        }
+        const now = limits?.now ?? new Date().toISOString();
         database
           .prepare(
             `UPDATE execution_orders
@@ -832,8 +1109,9 @@ export class ScenarioJournal {
              WHERE id = ? AND status = 'pending'`,
           )
           .run(chatId, now, row.id);
-        this.appendExecutionEvent(database, Number(row.id), 'approved', { chatId });
-      } else if (row.status !== 'submitting') {
+        this.appendExecutionEvent(database, Number(row.id), 'approved', { chatId }, now);
+        this.bumpSandboxRevision(database);
+      } else {
         throw new Error(`Execution order is already ${row.status}`);
       }
 
@@ -887,8 +1165,687 @@ export class ScenarioJournal {
     }
   }
 
-  markExecutionAccepted(scenarioId: number, brokerOrderId: string, detail: string): ExecutionOrderRecord {
-    return this.finishExecution(scenarioId, 'accepted', brokerOrderId, detail, 'broker_accepted');
+  markExecutionAccepted(scenarioId: number, brokerOrderId: string, detail: string, lotsExecuted = 0): ExecutionOrderRecord {
+    return this.finishExecution(scenarioId, 'accepted', brokerOrderId, detail, 'broker_accepted', lotsExecuted);
+  }
+
+  getExecutionSnapshot(scenarioId: number): SandboxOrderSnapshot | null {
+    const database = this.open();
+    try {
+      const row = database.prepare(`SELECT e.snapshot_json AS snapshot FROM execution_evidence e
+        JOIN execution_orders o ON o.id = e.execution_order_id WHERE o.scenario_id = ?`).get(scenarioId) as
+        { snapshot: string | null } | undefined;
+      return row?.snapshot ? JSON.parse(row.snapshot) as SandboxOrderSnapshot : null;
+    } finally { database.close(); }
+  }
+
+  getNativeStop(scenarioId: number): NativeStopRecord | null {
+    const db = this.open();
+    try {
+      const row = db.prepare('SELECT intent_json, observation_json FROM native_stop_intents WHERE scenario_id = ?').get(scenarioId) as
+        { intent_json: string; observation_json: string | null } | undefined;
+      return row ? { intent: JSON.parse(row.intent_json) as SandboxStopIntent,
+        observation: row.observation_json ? JSON.parse(row.observation_json) as SandboxStopObservation : null } : null;
+    } finally { db.close(); }
+  }
+
+  claimNativeStop(intent: SandboxStopIntent): { claimed: boolean; record: NativeStopRecord } {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      if (nativeStopKey(intent).generation !== 0) throw new Error('Initial stop generation must be zero');
+      const prior = db.prepare('SELECT intent_json, observation_json FROM native_stop_intents WHERE scenario_id = ?').get(intent.scenarioId) as
+        { intent_json: string; observation_json: string | null } | undefined;
+      if (prior) {
+        const persisted = JSON.parse(prior.intent_json) as SandboxStopIntent;
+        assertNativeKey(persisted);
+        if (persisted.accountId !== intent.accountId || persisted.instrumentId !== intent.instrumentId
+          || persisted.entryRequestId !== intent.entryRequestId || persisted.lots !== intent.lots
+          || persisted.stopNano !== intent.stopNano || persisted.limitNano !== intent.limitNano) throw new Error('Stop intent contradicts earlier evidence');
+        db.exec('COMMIT');
+        return { claimed: false, record: { intent: persisted,
+          observation: prior.observation_json ? JSON.parse(prior.observation_json) as SandboxStopObservation : null } };
+      }
+      const row = db.prepare(`SELECT o.*, s.stop_price AS planned_stop FROM execution_orders o
+        JOIN scenario_journal s ON s.id = o.scenario_id WHERE o.scenario_id = ?`).get(intent.scenarioId) as
+        (ExecutionOrderRow & { planned_stop: number }) | undefined;
+      const evidence = db.prepare(`SELECT e.snapshot_json FROM execution_evidence e
+        JOIN execution_orders o ON o.id = e.execution_order_id WHERE o.scenario_id = ?`).get(intent.scenarioId) as
+        { snapshot_json: string | null } | undefined;
+      const snapshot = evidence?.snapshot_json ? JSON.parse(evidence.snapshot_json) as SandboxOrderSnapshot : null;
+      if (!row || row.mode !== 'sandbox' || row.side !== 'long' || row.status !== 'accepted' || !row.approved_by_chat_id
+        || !snapshot?.terminal || snapshot.lotsExecuted <= 0 || snapshot.lotsExecuted !== intent.lots
+        || row.instrument_id !== intent.instrumentId || row.order_request_id !== intent.entryRequestId
+        || intent.brokerStopId !== null || intent.stopNano !== decimalPriceNano(row.planned_stop)
+        || intent.limitNano !== intent.stopNano) throw new Error('Stop requires confirmed terminal fills for an approved sandbox entry');
+      db.prepare('INSERT INTO native_stop_intents (scenario_id, request_id, intent_json, updated_at) VALUES (?, ?, ?, ?)')
+        .run(intent.scenarioId, intent.requestId, JSON.stringify(intent), intent.createdAt);
+      this.appendExecutionEvent(db, Number(row.id), 'native_stop_claimed', { requestId: intent.requestId, lots: intent.lots }, intent.createdAt);
+      this.bumpSandboxRevision(db);
+      db.exec('COMMIT'); return { claimed: true, record: { intent, observation: null } };
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+    finally { db.close(); }
+  }
+
+  acknowledgeNativeStop(scenarioId: number, requestId: string, brokerStopId: string, expected?: NativeStopKey): void {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const row = db.prepare('SELECT intent_json FROM native_stop_intents WHERE scenario_id = ?').get(scenarioId) as { intent_json: string } | undefined;
+      if (!row) throw new Error('Stop intent was not found');
+      const intent = JSON.parse(row.intent_json) as SandboxStopIntent;
+      assertNativeKey(intent, expected);
+      if (intent.requestId !== requestId || intent.brokerStopId !== null || !brokerStopId || brokerStopId.length > 256
+        || /[\u0000-\u001f\u007f]/.test(brokerStopId)) throw new Error('Stop acknowledgement contradicts earlier evidence');
+      intent.brokerStopId = brokerStopId;
+      db.prepare('UPDATE native_stop_intents SET intent_json = ?, updated_at = ? WHERE scenario_id = ?')
+        .run(JSON.stringify(intent), new Date().toISOString(), scenarioId);
+      const entry = db.prepare('SELECT id FROM execution_orders WHERE scenario_id = ?').get(scenarioId) as { id: number };
+      this.appendExecutionEvent(db, entry.id, 'native_stop_acknowledged', { requestId, brokerStopId });
+      this.bumpSandboxRevision(db);
+      db.exec('COMMIT');
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+    finally { db.close(); }
+  }
+
+  observeNativeStop(scenarioId: number, observation: SandboxStopObservation, expected?: NativeStopKey, expectedLedgerRevision?: string): string {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      if (expectedLedgerRevision !== undefined && expectedLedgerRevision !== this.sandboxRevision(db)) {
+        throw new Error('Native stop observation raced newer sandbox evidence');
+      }
+      const row = db.prepare('SELECT intent_json, observation_json FROM native_stop_intents WHERE scenario_id = ?').get(scenarioId) as
+        { intent_json: string; observation_json: string | null } | undefined;
+      if (!row || !(JSON.parse(row.intent_json) as SandboxStopIntent).brokerStopId) throw new Error('Stop acknowledgement is missing');
+      assertNativeKey(JSON.parse(row.intent_json) as SandboxStopIntent, expected);
+      const prior = row.observation_json ? JSON.parse(row.observation_json) as SandboxStopObservation : null;
+      if (prior && ((prior.status !== 'STOP_ORDER_STATUS_ACTIVE' && observation.status !== prior.status)
+        || (prior.childOrderId && prior.childOrderId !== observation.childOrderId))) throw new Error('Stop observation contradicts earlier evidence');
+      db.prepare('UPDATE native_stop_intents SET observation_json = ?, updated_at = ? WHERE scenario_id = ?')
+        .run(JSON.stringify(observation), new Date().toISOString(), scenarioId);
+      const entry = db.prepare('SELECT id FROM execution_orders WHERE scenario_id = ?').get(scenarioId) as { id: number };
+      this.appendExecutionEvent(db, entry.id, 'native_stop_observed', observation);
+      if (!prior || JSON.stringify(prior) !== JSON.stringify(observation)) this.bumpSandboxRevision(db);
+      const revision=this.sandboxRevision(db);
+      db.exec('COMMIT'); return revision;
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+    finally { db.close(); }
+  }
+
+  getSandboxExitEvidence(scenarioId: number): SandboxExitEvidence | null {
+    const db = this.open();
+    try {
+      const row = db.prepare('SELECT snapshot_json, flat_confirmed_at, observed_at FROM sandbox_exit_evidence WHERE scenario_id = ?').get(scenarioId) as
+        { snapshot_json: string; flat_confirmed_at: string | null; observed_at: string } | undefined;
+      return row ? { snapshot: JSON.parse(row.snapshot_json) as SandboxOrderSnapshot,
+        flatConfirmedAt: row.flat_confirmed_at, observedAt: row.observed_at } : null;
+    } finally { db.close(); }
+  }
+
+  getSandboxSessionExit(scenarioId: number): SandboxSessionExitIntent | null {
+    const db = this.open();
+    try {
+      const row = db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(scenarioId) as { intent_json: string } | undefined;
+      return row ? JSON.parse(row.intent_json) as SandboxSessionExitIntent : null;
+    } finally { db.close(); }
+  }
+
+  claimSandboxSessionExit(input: { scenarioId: number; accountId: string; entryRequestId: string; instrumentId: string; lots: number; stopId: string; generation?: number }, now = new Date(), purpose: 'session' | 'technical-acceptance' | 'target' = 'session', targetProof?: SandboxTargetProof) {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      if (purpose === 'technical-acceptance') {
+        const scenario = db.prepare('SELECT * FROM scenario_journal WHERE id=?').get(input.scenarioId) as JournalRow | undefined;
+        if (!scenario) throw new Error('Technical scenario is absent');
+        assertTechnicalScope(this.toRecord(scenario), input.lots);
+      }
+      const prior = db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(input.scenarioId) as { intent_json: string } | undefined;
+      let targetConsumed = false;
+      if (prior) {
+        const intent = JSON.parse(prior.intent_json) as SandboxSessionExitIntent;
+        targetConsumed = intent.targetConsumed === true || intent.purpose === 'target';
+        if (intent.phase !== 'restored') {
+          if (Object.entries(input).some(([key,value]) => (key === 'generation' ? sandboxCloseKey(intent).generation : intent[key as keyof SandboxSessionExitIntent]) !== value)
+            || (input.generation ?? 0) !== sandboxCloseKey(intent).generation) throw new Error('Session exit identity changed');
+          db.exec('COMMIT'); return { claimed: false, intent };
+        }
+        if (purpose !== 'session' || intent.purpose === 'session' || input.generation !== intent.restoreGeneration
+          || this.closeHistory(db,input.scenarioId).some(item=>item.intent.purpose==='session')) throw new Error('Only one new session close may follow target restoration');
+      }
+      const row = db.prepare(`SELECT o.*,e.snapshot_json,n.intent_json,n.observation_json FROM execution_orders o
+        JOIN execution_evidence e ON e.execution_order_id=o.id JOIN native_stop_intents n ON n.scenario_id=o.scenario_id
+        WHERE o.scenario_id=?`).get(input.scenarioId) as (ExecutionOrderRow & { snapshot_json: string | null; intent_json: string; observation_json: string | null }) | undefined;
+      const entry = row?.snapshot_json ? JSON.parse(row.snapshot_json) as SandboxOrderSnapshot : null;
+      const native = row ? JSON.parse(row.intent_json) as SandboxStopIntent : null;
+      const observed = row?.observation_json ? JSON.parse(row.observation_json) as SandboxStopObservation : null;
+      if (!row || row.mode !== 'sandbox' || row.side !== 'long' || row.status !== 'accepted' || !row.approved_by_chat_id
+        || !entry?.terminal || entry.lotsExecuted <= 0 || entry.commissionNano === null || entry.lotsExecuted !== input.lots
+        || row.instrument_id !== input.instrumentId || row.order_request_id !== input.entryRequestId
+        || native?.accountId !== input.accountId || native.brokerStopId !== input.stopId || native.lots !== input.lots
+        || nativeStopKey(native).generation !== (input.generation ?? 0)
+        || native.entryRequestId !== input.entryRequestId || native.instrumentId !== input.instrumentId
+        || observed?.status !== 'STOP_ORDER_STATUS_ACTIVE' || observed.childOrderId !== null || !Number.isFinite(now.getTime())
+        || (purpose === 'session' && !sandboxSessionCloseDue(new Date(Math.max(...entry.stages.map(stage => Date.parse(stage.executedAt)))).toISOString(), now))
+        || db.prepare('SELECT scenario_id FROM sandbox_exit_evidence WHERE scenario_id=?').get(input.scenarioId)
+        || db.prepare("SELECT id FROM execution_orders WHERE status IN ('accepted','submitting') AND scenario_id<>? LIMIT 1").get(input.scenarioId)) throw new Error('Session close requires an exclusive approved protected position');
+      if (purpose === 'target') {
+        if (targetConsumed) throw new Error('Target close has already been attempted');
+        this.validateTargetProof(db, input.scenarioId, entry, targetProof);
+        targetConsumed = true;
+      }
+      const intent: SandboxSessionExitIntent = { ...input, requestId: randomUUID(), phase: 'cancel-claimed', createdAt: now.toISOString(),
+        submitClaimedAt: null, limitNano: null, brokerOrderId: null, generation: input.generation ?? 0, purpose, targetConsumed,
+        ...(purpose === 'target' ? { targetProof: targetProof! } : {}) };
+      db.prepare(`INSERT INTO sandbox_session_exit_intents (scenario_id,request_id,intent_json,updated_at) VALUES (?,?,?,?)
+        ON CONFLICT(scenario_id) DO UPDATE SET request_id=excluded.request_id,intent_json=excluded.intent_json,updated_at=excluded.updated_at`)
+        .run(input.scenarioId,intent.requestId,JSON.stringify(intent),intent.createdAt);
+      this.appendExecutionEvent(db,Number(row.id),'sandbox_session_cancel_claimed',{requestId:intent.requestId,purpose},intent.createdAt);
+      this.bumpSandboxRevision(db);
+      db.prepare(`INSERT INTO runtime_state (key,value,updated_at) VALUES ('execution.kill_switch','true',?)
+        ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at`).run(intent.createdAt);
+      db.exec('COMMIT'); return { claimed: true, intent };
+    } catch(error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  claimSandboxSessionSubmission(scenarioId: number, revision: string, limitNano: string, now = new Date(), expected?: SandboxCloseKey, targetProof?: SandboxTargetProof) {
+    nanoQuotation(limitNano);
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const raw = db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(scenarioId) as { intent_json: string } | undefined;
+      if (!raw) throw new Error('Session exit is not claimed');
+      const intent = JSON.parse(raw.intent_json) as SandboxSessionExitIntent;
+      assertCloseKey(intent, expected);
+      if (intent.phase === 'submitted') { db.exec('COMMIT'); return { claimed: false, intent }; }
+      if (intent.phase !== 'cancel-claimed') throw new Error('Close attempt no longer permits a SELL');
+      const row = db.prepare(`SELECT o.id,o.status,o.order_request_id,e.snapshot_json,n.intent_json,n.observation_json FROM execution_orders o
+        JOIN execution_evidence e ON e.execution_order_id=o.id JOIN native_stop_intents n ON n.scenario_id=o.scenario_id WHERE o.scenario_id=?`).get(scenarioId) as
+        { id:number; status:string; order_request_id:string; snapshot_json:string|null; intent_json:string; observation_json:string|null };
+      const entry = row?.snapshot_json ? JSON.parse(row.snapshot_json) as SandboxOrderSnapshot : null;
+      const stop = row?.observation_json ? JSON.parse(row.observation_json) as SandboxStopObservation : null;
+      const native = row ? JSON.parse(row.intent_json) as SandboxStopIntent : null;
+      if (revision !== this.sandboxRevision(db) || row?.status !== 'accepted' || row.order_request_id !== intent.entryRequestId
+        || !entry?.terminal || entry.lotsExecuted !== intent.lots || entry.commissionNano === null
+        || stop?.status !== 'STOP_ORDER_STATUS_CANCELED' || stop.childOrderId !== null || native?.brokerStopId !== intent.stopId
+        || nativeStopKey(native).generation !== sandboxCloseKey(intent).generation
+        || !Number.isFinite(now.getTime()) || now.getTime() < Date.parse(intent.createdAt)
+        || db.prepare('SELECT scenario_id FROM sandbox_exit_evidence WHERE scenario_id=?').get(scenarioId)) throw new Error('Canceled stop and current session exit evidence are not confirmed');
+      if (intent.purpose === 'target') {
+        this.validateTargetProof(db, scenarioId, entry, targetProof, intent.targetProof);
+        if (limitNano !== targetProof!.targetNano) throw new Error('Target SELL must preserve its exact price floor');
+        intent.targetProof = targetProof!;
+      }
+      intent.phase='submitted'; intent.limitNano=limitNano; intent.submitClaimedAt=now.toISOString();
+      db.prepare('UPDATE sandbox_session_exit_intents SET intent_json=?,updated_at=? WHERE scenario_id=?').run(JSON.stringify(intent),intent.submitClaimedAt,scenarioId);
+      this.appendExecutionEvent(db,row.id,'sandbox_session_sell_claimed',{requestId:intent.requestId,lots:intent.lots},intent.submitClaimedAt);
+      this.bumpSandboxRevision(db); db.exec('COMMIT'); return { claimed:true,intent };
+    } catch(error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  acknowledgeSandboxSessionExit(scenarioId:number,requestId:string,brokerOrderId:string,expected?:SandboxCloseKey):void {
+    const db=this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const raw=db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(scenarioId) as {intent_json:string}|undefined;
+      if(!raw) throw new Error('Session exit intent is missing'); const intent=JSON.parse(raw.intent_json) as SandboxSessionExitIntent;
+      assertCloseKey(intent,expected);
+      if(intent.phase!=='submitted'||intent.requestId!==requestId||!brokerOrderId||brokerOrderId.length>256||/[\u0000-\u001f\u007f]/.test(brokerOrderId)
+        || (intent.brokerOrderId!==null&&intent.brokerOrderId!==brokerOrderId)) throw new Error('Session exit acknowledgement changed identity');
+      if(intent.brokerOrderId===null) {
+        intent.brokerOrderId=brokerOrderId; const at=new Date().toISOString();
+        db.prepare('UPDATE sandbox_session_exit_intents SET intent_json=?,updated_at=? WHERE scenario_id=?').run(JSON.stringify(intent),at,scenarioId);
+        const row=db.prepare('SELECT id FROM execution_orders WHERE scenario_id=?').get(scenarioId) as {id:number};
+        this.appendExecutionEvent(db,row.id,'sandbox_session_sell_acknowledged',{requestId,brokerOrderId},at); this.bumpSandboxRevision(db);
+      }
+      db.exec('COMMIT');
+    } catch(error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  private validateTargetProof(db: DatabaseSync, scenarioId: number, entry: SandboxOrderSnapshot, proof: SandboxTargetProof | undefined, original?: SandboxTargetProof): void {
+    const row = db.prepare('SELECT * FROM scenario_journal WHERE id=?').get(scenarioId) as JournalRow | undefined;
+    const snapshot = row ? recordObject(JSON.parse(row.snapshot_json) as unknown) : null;
+    const strategy = recordObject(snapshot?.tradingStrategy), instrument = recordObject(snapshot?.instrument), policy = recordObject(snapshot?.sandboxTargetExitPolicy);
+    if (!row || row.strategy !== 'intraday' || snapshot?.source !== 'intraday-scanner' || !isTradingStrategyId(strategy?.id)
+      || strategy.version !== '1' || getStrategyDescriptor(strategy.id).version !== '1'
+      || instrument?.instrumentId !== row.instrument_id || instrument.lotSize !== row.lot_size || typeof instrument.priceStep !== 'number'
+      || policy?.version !== '1' || policy.enabled !== true || typeof policy.commissionRateNano !== 'string' || typeof policy.slippageRateNano !== 'string'
+      || !/^(0|[1-9]\d{0,9})$/.test(policy.commissionRateNano) || !/^(0|[1-9]\d{0,9})$/.test(policy.slippageRateNano)) throw new Error('Original sandbox target policy is not confirmed');
+    const core = { lotSize: row.lot_size, targetNano: decimalPriceNano(row.target_price), stopNano: decimalPriceNano(row.stop_price),
+      tickNano: decimalPriceNano(instrument.priceStep) };
+    assertSandboxTargetProof(proof, entry, core);
+    if (!proof || proof.lots !== entry.lotsExecuted || BigInt(proof.commissionRateNano) < 3_000_000n
+      || BigInt(proof.commissionRateNano) < BigInt(policy.commissionRateNano)
+      || BigInt(proof.slippageRateNano) < BigInt(policy.slippageRateNano)
+      || BigInt(proof.slippageRateNano) < BigInt(row.slippage_rate === 0 ? '0' : decimalPriceNano(row.slippage_rate))) throw new Error('Target expenses do not preserve the original policy');
+    if (original && (['lotSize','lots','targetNano','stopNano','tickNano','commissionRateNano','slippageRateNano'] as const)
+      .some(key => original[key] !== proof[key])) throw new Error('Immutable target parameters changed');
+  }
+
+  recordCloseSellObservation(key: SandboxCloseKey, snapshot: SandboxOrderSnapshot, now = new Date()): void {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const raw = db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(key.scenarioId) as {intent_json:string}|undefined;
+      if (!raw) throw new Error('Close attempt is absent');
+      const intent = JSON.parse(raw.intent_json) as SandboxSessionExitIntent; assertCloseKey(intent,key);
+      const row = db.prepare(`SELECT o.id,e.snapshot_json,s.lot_size FROM execution_orders o JOIN execution_evidence e ON e.execution_order_id=o.id
+        JOIN scenario_journal s ON s.id=o.scenario_id WHERE o.scenario_id=?`).get(key.scenarioId) as {id:number;snapshot_json:string;lot_size:number}|undefined;
+      if (!row || intent.phase !== 'submitted' || !intent.submitClaimedAt || !Number.isFinite(now.getTime())
+        || now.getTime() < Date.parse(intent.submitClaimedAt) || (intent.brokerOrderId !== null && intent.brokerOrderId !== snapshot.brokerOrderId)
+        || snapshot.stages.some(stage => Date.parse(stage.executedAt) < Date.parse(intent.submitClaimedAt!))) throw new Error('Close SELL identity or phase is not confirmed');
+      analyzeSandboxRoundTrip(JSON.parse(row.snapshot_json) as SandboxOrderSnapshot,snapshot,row.lot_size);
+      if (intent.sellSnapshot) assertSnapshotProgress(intent.sellSnapshot,snapshot);
+      const changed = JSON.stringify(intent.sellSnapshot) !== JSON.stringify(snapshot) || intent.brokerOrderId === null;
+      intent.brokerOrderId = snapshot.brokerOrderId; intent.sellSnapshot = snapshot; intent.sellObservedAt = now.toISOString();
+      db.prepare('UPDATE sandbox_session_exit_intents SET intent_json=?,updated_at=? WHERE scenario_id=?').run(JSON.stringify(intent),now.toISOString(),key.scenarioId);
+      if (changed) { this.appendExecutionEvent(db,row.id,'sandbox_close_sell_observed',{requestId:key.requestId,snapshot},now.toISOString()); this.bumpSandboxRevision(db); }
+      db.exec('COMMIT');
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  claimProtectionRestore(key: SandboxCloseKey, revision: string, proof: SandboxProtectionRestoreProof, now = new Date()) {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const raw = db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(key.scenarioId) as {intent_json:string}|undefined;
+      const n = db.prepare('SELECT intent_json,observation_json FROM native_stop_intents WHERE scenario_id=?').get(key.scenarioId) as {intent_json:string;observation_json:string|null}|undefined;
+      if (!raw || !n) throw new Error('Protection restoration is not claimed');
+      const intent = JSON.parse(raw.intent_json) as SandboxSessionExitIntent; assertCloseKey(intent,key);
+      const native = JSON.parse(n.intent_json) as SandboxStopIntent;
+      const observed = n.observation_json ? JSON.parse(n.observation_json) as SandboxStopObservation : null;
+      const technical = this.technicalCashRestorationEnabled(db,key.scenarioId,intent);
+      if (intent.purpose === 'technical-acceptance' && !technical) throw new Error('Technical restoration requires the original opted-in cash baseline');
+      if (intent.phase === 'restore-claimed' || intent.phase === 'restored') {
+        if (intent.restoreGeneration !== nativeStopKey(native).generation || native.accountId !== intent.accountId) throw new Error('Restoration generation changed');
+        db.exec('COMMIT'); return { claimed:false, record:{intent:native,observation:observed}, intent };
+      }
+      const row = db.prepare(`SELECT o.*,e.snapshot_json,s.lot_size FROM execution_orders o JOIN execution_evidence e ON e.execution_order_id=o.id
+        JOIN scenario_journal s ON s.id=o.scenario_id WHERE o.scenario_id=?`).get(key.scenarioId) as (ExecutionOrderRow & {snapshot_json:string;lot_size:number})|undefined;
+      const entry = row?.snapshot_json ? JSON.parse(row.snapshot_json) as SandboxOrderSnapshot : null;
+      const age = now.getTime() - Date.parse(proof.checkedAt);
+      if ((!(['target','session'].includes(intent.purpose??'') && intent.targetConsumed === true) && !technical) || revision !== this.sandboxRevision(db)
+        || nativeStopKey(native).generation !== key.generation || key.generation >= 1_000_000
+        || native.brokerStopId !== intent.stopId || native.accountId !== intent.accountId || native.entryRequestId !== intent.entryRequestId
+        || native.instrumentId !== intent.instrumentId
+        || observed?.status !== 'STOP_ORDER_STATUS_CANCELED' || observed.childOrderId !== null
+        || proof.stop.status !== 'STOP_ORDER_STATUS_CANCELED' || proof.stop.childOrderId !== null
+        || !Number.isFinite(age) || age < 0 || age > 15_000 || proof.noActiveOrders !== true || proof.noOtherActiveStops !== true
+        || !row || row.mode !== 'sandbox' || row.status !== 'accepted' || row.side !== 'long' || !row.approved_by_chat_id
+        || !entry?.terminal || entry.lotsExecuted !== intent.lots || native.lots !== intent.lots
+        || row.instrument_id !== intent.instrumentId || row.order_request_id !== intent.entryRequestId
+        || proof.accountId !== intent.accountId || proof.instrumentId !== intent.instrumentId || proof.lots !== intent.lots || proof.lotSize !== row.lot_size
+        || !/^\d{1,16}$/.test(proof.positionUnits) || BigInt(proof.positionUnits) !== BigInt(intent.lots) * BigInt(row.lot_size)
+        || db.prepare('SELECT scenario_id FROM sandbox_exit_evidence WHERE scenario_id=?').get(key.scenarioId)
+        || db.prepare("SELECT id FROM execution_orders WHERE status IN ('accepted','submitting') AND scenario_id<>? LIMIT 1").get(key.scenarioId)) throw new Error('Fresh exclusive restoration evidence is not confirmed');
+      if (intent.phase === 'submitted') {
+        const sell = intent.sellSnapshot;
+        if (!sell || !sell.terminal || !['EXECUTION_REPORT_STATUS_REJECTED','EXECUTION_REPORT_STATUS_CANCELLED'].includes(sell.executionStatus)
+          || sell.lotsExecuted !== 0 || sell.stages.length !== 0 || sell.grossNano !== '0' || !intent.brokerOrderId
+          || sell.brokerOrderId !== intent.brokerOrderId) throw new Error('Unknown or nonzero SELL forbids a new stop');
+        analyzeSandboxRoundTrip(entry,sell,row.lot_size);
+      } else if (intent.phase !== 'cancel-claimed' || intent.submitClaimedAt !== null || intent.brokerOrderId !== null || intent.sellSnapshot) {
+        throw new Error('Close attempt cannot be aborted safely');
+      }
+      if (!intent.sellSnapshot) analyzeSandboxRoundTrip(entry,{brokerOrderId:randomUUID(),executionStatus:'EXECUTION_REPORT_STATUS_NEW',
+        lotsExecuted:0,terminal:false,grossNano:'0',commissionNano:'0',stages:[]},row.lot_size);
+      const at = now.toISOString();
+      db.prepare('INSERT INTO native_stop_history (scenario_id,generation,request_id,intent_json,observation_json,archived_at) VALUES (?,?,?,?,?,?)')
+        .run(key.scenarioId,key.generation,native.requestId,n.intent_json,n.observation_json!,at);
+      db.prepare('INSERT INTO sandbox_close_history (request_id,scenario_id,generation,intent_json,native_json,archived_at) VALUES (?,?,?,?,?,?)')
+        .run(key.requestId,key.scenarioId,key.generation,raw.intent_json,JSON.stringify({intent:native,observation:observed}),at);
+      const restored: SandboxStopIntent = { ...native, generation:key.generation+1, requestId:randomUUID(), createdAt:at, brokerStopId:null };
+      intent.phase='restore-claimed'; intent.restoreGeneration=key.generation+1;
+      db.prepare('UPDATE native_stop_intents SET request_id=?,intent_json=?,observation_json=NULL,updated_at=? WHERE scenario_id=?')
+        .run(restored.requestId,JSON.stringify(restored),at,key.scenarioId);
+      db.prepare('UPDATE sandbox_session_exit_intents SET intent_json=?,updated_at=? WHERE scenario_id=?').run(JSON.stringify(intent),at,key.scenarioId);
+      this.appendExecutionEvent(db,Number(row.id),'sandbox_protection_restore_claimed',{closeRequestId:key.requestId,generation:restored.generation,requestId:restored.requestId},at);
+      this.bumpSandboxRevision(db);
+      db.prepare(`INSERT INTO runtime_state (key,value,updated_at) VALUES ('execution.kill_switch','true',?)
+        ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at`).run(at);
+      db.exec('COMMIT'); return {claimed:true,record:{intent:restored,observation:null},intent};
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  private technicalCashRestorationEnabled(db: DatabaseSync,scenarioId:number,intent:SandboxSessionExitIntent):boolean {
+    if (!['technical-acceptance','session'].includes(intent.purpose??'')) return false;
+    const scenario=db.prepare('SELECT * FROM scenario_journal WHERE id=?').get(scenarioId) as JournalRow|undefined;
+    const row=db.prepare(`SELECT o.lots,o.order_request_id,b.baseline_json FROM execution_orders o
+      JOIN sandbox_cash_baselines b ON b.execution_order_id=o.id WHERE o.scenario_id=?`).get(scenarioId) as
+      {lots:number;order_request_id:string;baseline_json:string}|undefined;
+    if (!scenario || !row || row.order_request_id!==intent.entryRequestId) return false;
+    try {
+      const baseline:unknown=JSON.parse(row.baseline_json);
+      assertSandboxCashBaseline(baseline);
+      const state=(key:string)=>(db.prepare('SELECT value FROM runtime_state WHERE key=?').get(key) as {value:string}|undefined)?.value;
+      return baseline.preparedRaw===state(sandboxBootstrapKey) && baseline.accountId===state(sandboxAccountKey)
+        && hasTechnicalCashRestorationBaseline(this.toRecord(scenario),row.lots,baseline,
+          {accountId:intent.accountId,entryRequestId:intent.entryRequestId});
+    } catch { return false; }
+  }
+
+  markProtectionRestored(key: SandboxCloseKey, expected: NativeStopKey, now = new Date()): void {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const row=db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(key.scenarioId) as {intent_json:string}|undefined;
+      const raw=db.prepare('SELECT intent_json,observation_json FROM native_stop_intents WHERE scenario_id=?').get(key.scenarioId) as {intent_json:string;observation_json:string|null}|undefined;
+      if (!row || !raw) throw new Error('Restoration is absent');
+      const intent=JSON.parse(row.intent_json) as SandboxSessionExitIntent; assertCloseKey(intent,key);
+      const native=JSON.parse(raw.intent_json) as SandboxStopIntent; assertNativeKey(native,expected);
+      const observed=raw.observation_json ? JSON.parse(raw.observation_json) as SandboxStopObservation : null;
+      if (!['restore-claimed','restored'].includes(intent.phase) || intent.restoreGeneration !== expected.generation
+        || observed?.status !== 'STOP_ORDER_STATUS_ACTIVE' || observed.childOrderId !== null || !native.brokerStopId || !Number.isFinite(now.getTime())
+        || now.getTime()<Date.parse(native.createdAt)) throw new Error('Restored ACTIVE protection is not confirmed');
+      if (intent.phase !== 'restored') {
+        intent.phase='restored'; db.prepare('UPDATE sandbox_session_exit_intents SET intent_json=?,updated_at=? WHERE scenario_id=?').run(JSON.stringify(intent),now.toISOString(),key.scenarioId);
+        const order=db.prepare('SELECT id FROM execution_orders WHERE scenario_id=?').get(key.scenarioId) as {id:number};
+        this.appendExecutionEvent(db,order.id,'sandbox_protection_restored',{generation:expected.generation},now.toISOString()); this.bumpSandboxRevision(db);
+      }
+      db.exec('COMMIT');
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  private closeHistory(db: DatabaseSync, scenarioId: number): SandboxCloseHistoryRecord[] {
+    const rows=db.prepare(`SELECT h.intent_json,h.native_json,h.archived_at,
+      (SELECT snapshot_json FROM sandbox_close_history_observations v WHERE v.request_id=h.request_id ORDER BY v.id DESC LIMIT 1) AS snapshot_json,
+      (SELECT observed_at FROM sandbox_close_history_observations v WHERE v.request_id=h.request_id ORDER BY v.id DESC LIMIT 1) AS observed_at
+      FROM sandbox_close_history h WHERE scenario_id=? ORDER BY generation`).all(scenarioId) as Array<{intent_json:string;native_json:string;archived_at:string;snapshot_json:string|null;observed_at:string|null}>;
+    return rows.map(row=>{ const intent=JSON.parse(row.intent_json) as SandboxSessionExitIntent;
+      return {intent,native:JSON.parse(row.native_json) as NativeStopRecord,
+        sellSnapshot:row.snapshot_json ? JSON.parse(row.snapshot_json) as SandboxOrderSnapshot : intent.sellSnapshot??null,
+        observedAt:row.observed_at??intent.sellObservedAt??row.archived_at}; });
+  }
+
+  getSandboxCloseHistory(scenarioId: number): SandboxCloseHistoryRecord[] {
+    const db=this.open(); try { return this.closeHistory(db,scenarioId); } finally { db.close(); }
+  }
+
+  refreshArchivedCloseObservation(key: SandboxCloseKey, snapshot: SandboxOrderSnapshot, now = new Date()): void {
+    const db=this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const history=this.closeHistory(db,key.scenarioId).find(item=>item.intent.requestId===key.requestId);
+      if (!history) throw new Error('Archived close attempt is absent'); assertCloseKey(history.intent,key);
+      const row=db.prepare(`SELECT o.id,e.snapshot_json,s.lot_size FROM execution_orders o JOIN execution_evidence e ON e.execution_order_id=o.id
+        JOIN scenario_journal s ON s.id=o.scenario_id WHERE o.scenario_id=?`).get(key.scenarioId) as {id:number;snapshot_json:string;lot_size:number};
+      if (!history.intent.submitClaimedAt || !history.sellSnapshot || snapshot.brokerOrderId!==history.sellSnapshot.brokerOrderId
+        || !snapshot.terminal || snapshot.lotsExecuted!==0 || snapshot.stages.length!==0 || snapshot.grossNano!=='0' || !Number.isFinite(now.getTime())
+        || now.getTime()<Date.parse(history.observedAt)) throw new Error('Archived zero-fill SELL identity changed');
+      analyzeSandboxRoundTrip(JSON.parse(row.snapshot_json) as SandboxOrderSnapshot,snapshot,row.lot_size);
+      assertSnapshotProgress(history.sellSnapshot,snapshot);
+      if (JSON.stringify(history.sellSnapshot)!==JSON.stringify(snapshot)) {
+        db.prepare('INSERT INTO sandbox_close_history_observations (request_id,snapshot_json,observed_at) VALUES (?,?,?)').run(key.requestId,JSON.stringify(snapshot),now.toISOString());
+        this.appendExecutionEvent(db,row.id,'sandbox_archived_close_observed',{requestId:key.requestId,snapshot},now.toISOString()); this.bumpSandboxRevision(db);
+      }
+      db.exec('COMMIT');
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  private failedCloseCosts(db: DatabaseSync, scenarioId: number) {
+    const history=this.closeHistory(db,scenarioId); let fees=0n; let complete=true;
+    for (const item of history) {
+      if (!item.intent.submitClaimedAt) continue;
+      if (item.sellSnapshot?.commissionNano===null || item.sellSnapshot?.commissionNano===undefined) complete=false;
+      else fees+=BigInt(item.sellSnapshot.commissionNano);
+    }
+    return {commissionNano:complete?String(fees):null,attempts:history.length};
+  }
+
+  getSandboxFailedCloseCosts(scenarioId: number) {
+    const db=this.open(); try { return this.failedCloseCosts(db,scenarioId); } finally { db.close(); }
+  }
+
+  getSandboxLedgerRevision(): string {
+    const db = this.open();
+    try { return this.sandboxRevision(db); } finally { db.close(); }
+  }
+
+  getSandboxCashObservationEpoch(): SandboxCashObservationEpoch {
+    const db = this.open();
+    try {
+      const rows = db.prepare(`SELECT key,value FROM runtime_state WHERE key IN (?,?,?)`)
+        .all('execution.kill_generation', sandboxBootstrapKey, tradingSelectionKey) as Array<{ key: string; value: string }>;
+      const value = (key: string) => rows.find(row => row.key === key)?.value ?? null;
+      const killGeneration = value('execution.kill_generation'), preparedRaw = value(sandboxBootstrapKey);
+      if (!killGeneration || !preparedRaw) throw new Error('Current sandbox cash epoch is not confirmed');
+      return { killGeneration, preparedRaw, selection: { key: tradingSelectionKey, raw: value(tradingSelectionKey) } };
+    } finally { db.close(); }
+  }
+
+  getSandboxCashBaseline(scenarioId: number): SandboxCashBaseline | null {
+    const db = this.open();
+    try {
+      const row = db.prepare(`SELECT b.baseline_json FROM sandbox_cash_baselines b
+        JOIN execution_orders o ON o.id=b.execution_order_id WHERE o.scenario_id=?`).get(scenarioId) as
+        { baseline_json: string } | undefined;
+      if (!row) return null;
+      const baseline: unknown = JSON.parse(row.baseline_json);
+      assertSandboxCashBaseline(baseline);
+      return baseline;
+    } finally { db.close(); }
+  }
+
+  getSandboxCashObservations(scenarioId: number, limit = 20): SandboxCashObservation[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('Invalid sandbox cash-history bound');
+    const db = this.open();
+    try {
+      const rows = db.prepare(`SELECT x.observation_json FROM sandbox_cash_observations x
+        JOIN execution_orders o ON o.id=x.execution_order_id WHERE o.scenario_id=? ORDER BY x.id DESC LIMIT ?`)
+        .all(scenarioId, limit) as Array<{ observation_json: string }>;
+      return rows.reverse().map(row => {
+        const observation: unknown = JSON.parse(row.observation_json);
+        assertSandboxCashObservation(observation);
+        return observation;
+      });
+    } finally { db.close(); }
+  }
+
+  appendSandboxCashObservation(scenarioId: number, observation: SandboxCashObservation,
+    expected?: NativeStopKey, expectedClose?: SandboxCloseKey, now = new Date()): void {
+    assertSandboxCashObservation(observation);
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const row = db.prepare(`SELECT o.id,o.order_request_id,o.status,o.mode,b.baseline_json,x.flat_confirmed_at,
+        n.intent_json,t.intent_json AS close_json FROM execution_orders o
+        JOIN sandbox_cash_baselines b ON b.execution_order_id=o.id
+        JOIN sandbox_exit_evidence x ON x.scenario_id=o.scenario_id
+        JOIN native_stop_intents n ON n.scenario_id=o.scenario_id
+        LEFT JOIN sandbox_session_exit_intents t ON t.scenario_id=o.scenario_id WHERE o.scenario_id=?`).get(scenarioId) as
+        { id: number; order_request_id: string; status: string; mode: string; baseline_json: string;
+          flat_confirmed_at: string | null; intent_json: string; close_json: string | null } | undefined;
+      if (!row || row.mode !== 'sandbox' || row.status !== 'accepted' || !row.flat_confirmed_at
+        || observation.ledgerRevision !== this.sandboxRevision(db)
+        || Date.parse(observation.observedFrom) < Date.parse(row.flat_confirmed_at)
+        || !Number.isFinite(now.getTime()) || now.getTime() < Date.parse(observation.observedAt)
+        || now.getTime() - Date.parse(observation.observedFrom) > 30_000) throw new Error();
+      const baseline: unknown = JSON.parse(row.baseline_json);
+      assertSandboxCashBaseline(baseline);
+      const state = (key: string) => (db.prepare('SELECT value FROM runtime_state WHERE key=?').get(key) as { value: string } | undefined)?.value ?? null;
+      const epoch = observation.epoch;
+      if (epoch.killGeneration !== state('execution.kill_generation') || epoch.preparedRaw !== state(sandboxBootstrapKey)
+        || epoch.selection.key !== tradingSelectionKey || epoch.selection.raw !== state(tradingSelectionKey)) throw new Error();
+      const prepared = readPreparedSandbox(epoch.preparedRaw, state(sandboxAccountKey));
+      if (prepared.accountId !== observation.accountId) throw new Error();
+      const native = JSON.parse(row.intent_json) as SandboxStopIntent;
+      assertNativeKey(native, expected);
+      const close = row.close_json ? JSON.parse(row.close_json) as SandboxSessionExitIntent : null;
+      if (close) assertCloseKey(close, expectedClose);
+      if (baseline.accountId !== observation.accountId || baseline.entryRequestId !== observation.entryRequestId
+        || observation.entryRequestId !== row.order_request_id || native.accountId !== observation.accountId) throw new Error();
+      const prior = db.prepare(`SELECT observation_json FROM sandbox_cash_observations
+        WHERE execution_order_id=? ORDER BY id DESC LIMIT 1`).get(row.id) as { observation_json: string } | undefined;
+      if (prior && Date.parse(observation.observedAt) < Date.parse((JSON.parse(prior.observation_json) as SandboxCashObservation).observedAt)) throw new Error();
+      this.bumpSandboxRevision(db);
+      db.prepare(`INSERT INTO sandbox_cash_observations (execution_order_id,observation_json,ledger_revision,recorded_at)
+        VALUES (?,?,?,?)`).run(row.id, JSON.stringify(observation), this.sandboxRevision(db), observation.observedAt);
+      this.appendExecutionEvent(db, row.id, 'sandbox_cash_observed', { cashNano: observation.cashNano }, observation.observedAt);
+      db.exec('COMMIT');
+    } catch {
+      try { db.exec('ROLLBACK'); } catch {}
+      throw new Error('Sandbox cash observation changed or contradicts closing evidence');
+    } finally { db.close(); }
+  }
+
+  private cashReconciliation(db: DatabaseSync, scenarioId: number, expectedNetNano: string | null,
+    closedAt: string | null, flatConfirmedAt: string | null) {
+    const baselineRow = db.prepare(`SELECT b.baseline_json FROM sandbox_cash_baselines b
+      JOIN execution_orders o ON o.id=b.execution_order_id WHERE o.scenario_id=?`).get(scenarioId) as
+      { baseline_json: string } | undefined;
+    const observationRow = db.prepare(`SELECT x.observation_json,x.ledger_revision FROM sandbox_cash_observations x
+      JOIN execution_orders o ON o.id=x.execution_order_id WHERE o.scenario_id=? ORDER BY x.id DESC LIMIT 1`)
+      .get(scenarioId) as { observation_json: string; ledger_revision: string } | undefined;
+    const ownershipRow = db.prepare(`SELECT o.instrument_id,e.snapshot_json AS entry_json,x.snapshot_json AS exit_json,s.lot_size
+      FROM execution_orders o JOIN scenario_journal s ON s.id=o.scenario_id
+      JOIN execution_evidence e ON e.execution_order_id=o.id JOIN sandbox_exit_evidence x ON x.scenario_id=o.scenario_id
+      WHERE o.scenario_id=?`).get(scenarioId) as
+      { instrument_id: string; entry_json: string | null; exit_json: string; lot_size: number } | undefined;
+    const result = analyzeSandboxCashReconciliation({
+      baseline: baselineRow ? JSON.parse(baselineRow.baseline_json) as SandboxCashBaseline : null,
+      observation: observationRow ? JSON.parse(observationRow.observation_json) as SandboxCashObservation : null,
+      expectedNetNano, closedAt, flatConfirmedAt,
+      ...(ownershipRow?.entry_json ? { ownership: { instrumentId: ownershipRow.instrument_id,
+        entry: JSON.parse(ownershipRow.entry_json) as SandboxOrderSnapshot, exit: JSON.parse(ownershipRow.exit_json) as SandboxOrderSnapshot,
+        lotSize: ownershipRow.lot_size, failedCloseFeesNano: this.failedCloseCosts(db, scenarioId).commissionNano } } : {}),
+    });
+    if (observationRow && observationRow.ledger_revision !== this.sandboxRevision(db)) {
+      return { ...result, cashProven: false as const, status: 'incomplete' as const,
+        reasons: [...result.reasons, 'ledger-changed-since-cash-read'] };
+    }
+    return result;
+  }
+
+  getSandboxCashReconciliation(scenarioId: number) {
+    const db = this.open();
+    try {
+      const row = db.prepare(`SELECT e.snapshot_json AS entry_json,x.snapshot_json AS exit_json,x.flat_confirmed_at,s.lot_size
+        FROM execution_orders o JOIN scenario_journal s ON s.id=o.scenario_id
+        LEFT JOIN execution_evidence e ON e.execution_order_id=o.id
+        LEFT JOIN sandbox_exit_evidence x ON x.scenario_id=o.scenario_id WHERE o.scenario_id=?`).get(scenarioId) as
+        { entry_json: string | null; exit_json: string | null; flat_confirmed_at: string | null; lot_size: number } | undefined;
+      const roundTrip = row?.entry_json && row.exit_json
+        ? analyzeSandboxRoundTrip(JSON.parse(row.entry_json) as SandboxOrderSnapshot, JSON.parse(row.exit_json) as SandboxOrderSnapshot, row.lot_size)
+        : null;
+      const fees = this.failedCloseCosts(db, scenarioId);
+      const expectedNetNano = roundTrip?.netPnlNano !== null && roundTrip?.netPnlNano !== undefined && fees.commissionNano !== null
+        ? String(BigInt(roundTrip.netPnlNano) - BigInt(fees.commissionNano)) : null;
+      return this.cashReconciliation(db, scenarioId, expectedNetNano, roundTrip?.closedAt ?? null, row?.flat_confirmed_at ?? null);
+    } finally { db.close(); }
+  }
+
+  recordSandboxExitEvidence(scenarioId: number, exit: SandboxOrderSnapshot, flatConfirmedAt: string | null, now = new Date(), expected?: NativeStopKey, expectedClose?: SandboxCloseKey) {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const row = db.prepare(`SELECT o.id, o.mode, o.status, o.approved_by_chat_id, s.lot_size, e.snapshot_json AS entry_json,
+        n.intent_json, n.observation_json FROM execution_orders o
+        JOIN scenario_journal s ON s.id = o.scenario_id JOIN execution_evidence e ON e.execution_order_id = o.id
+        JOIN native_stop_intents n ON n.scenario_id = o.scenario_id WHERE o.scenario_id = ?`).get(scenarioId) as
+        { id: number; mode: string; status: string; approved_by_chat_id: string | null; lot_size: number; entry_json: string | null;
+          intent_json: string; observation_json: string | null } | undefined;
+      if (!row || row.mode !== 'sandbox' || row.status !== 'accepted' || !row.approved_by_chat_id || !row.entry_json || !row.observation_json) throw new Error();
+      const entry = JSON.parse(row.entry_json) as SandboxOrderSnapshot;
+      const intent = JSON.parse(row.intent_json) as SandboxStopIntent;
+      assertNativeKey(intent,expected);
+      const stop = JSON.parse(row.observation_json) as SandboxStopObservation;
+      const sessionRaw = db.prepare('SELECT intent_json FROM sandbox_session_exit_intents WHERE scenario_id=?').get(scenarioId) as {intent_json:string}|undefined;
+      const session = sessionRaw ? JSON.parse(sessionRaw.intent_json) as SandboxSessionExitIntent : null;
+      const nativeExit = stop.status === 'STOP_ORDER_STATUS_EXECUTED' && stop.childOrderId === exit.brokerOrderId && session?.phase !== 'submitted';
+      const sessionExit = stop.status === 'STOP_ORDER_STATUS_CANCELED' && stop.childOrderId === null && session?.phase === 'submitted'
+        && session.stopId === intent.brokerStopId && session.accountId === intent.accountId && session.entryRequestId === intent.entryRequestId
+        && session.lots === entry.lotsExecuted && session.brokerOrderId === exit.brokerOrderId;
+      if (sessionExit || (session?.purpose==='target' && sandboxCloseKey(session).generation===nativeStopKey(intent).generation)) assertCloseKey(session!,expectedClose);
+      if (sessionExit && sandboxCloseKey(session!).generation!==nativeStopKey(intent).generation) throw new Error('Close stop generation changed');
+      if (!intent.brokerStopId || (!nativeExit && !sessionExit) || intent.lots !== entry.lotsExecuted || !Number.isFinite(now.getTime())) throw new Error();
+      if (sessionExit && (!session.submitClaimedAt || !Number.isFinite(Date.parse(session.submitClaimedAt))
+        || exit.stages.some(stage => Date.parse(stage.executedAt) < Date.parse(session.submitClaimedAt!)))) throw new Error();
+      const result = analyzeSandboxRoundTrip(entry, exit, row.lot_size);
+      if (flatConfirmedAt !== null && (!result.fullySold || !Number.isFinite(Date.parse(flatConfirmedAt))
+        || Date.parse(flatConfirmedAt) < Date.parse(result.closedAt!) || Date.parse(flatConfirmedAt) > now.getTime() + 60_000)) throw new Error();
+      const prior = db.prepare('SELECT snapshot_json, flat_confirmed_at FROM sandbox_exit_evidence WHERE scenario_id = ?').get(scenarioId) as
+        { snapshot_json: string; flat_confirmed_at: string | null } | undefined;
+      if (prior) assertSnapshotProgress(JSON.parse(prior.snapshot_json) as SandboxOrderSnapshot, exit);
+      const serialized = JSON.stringify(exit);
+      db.prepare(`INSERT INTO sandbox_exit_evidence (scenario_id, snapshot_json, flat_confirmed_at, observed_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(scenario_id) DO UPDATE SET snapshot_json=excluded.snapshot_json, flat_confirmed_at=excluded.flat_confirmed_at,
+        observed_at=excluded.observed_at`).run(scenarioId, serialized, flatConfirmedAt, now.toISOString());
+      if (!prior || prior.snapshot_json !== serialized) this.appendExecutionEvent(db, row.id, 'sandbox_exit_reconciled', {
+        executionStatus: exit.executionStatus, lotsExecuted: exit.lotsExecuted, grossNano: exit.grossNano, commissionNano: exit.commissionNano,
+      }, now.toISOString());
+      if (!prior || prior.snapshot_json !== serialized || (prior.flat_confirmed_at === null) !== (flatConfirmedAt === null)) this.bumpSandboxRevision(db);
+      const historicalCosts=this.failedCloseCosts(db,scenarioId);
+      const netPnlNano=result.netPnlNano===null || historicalCosts.commissionNano===null ? null
+        : String(BigInt(result.netPnlNano)-BigInt(historicalCosts.commissionNano));
+      const cashReconciliation = this.cashReconciliation(db, scenarioId, netPnlNano, result.closedAt, flatConfirmedAt);
+      db.exec('COMMIT');
+      return { ...result, netPnlNano, failedCloseFeesNano:historicalCosts.commissionNano, failedCloseAttempts:historicalCosts.attempts,
+        cashProven: cashReconciliation.cashProven, cashReconciliation,
+        flatConfirmedAt, observedAt: now.toISOString(), complete: result.fullySold && netPnlNano !== null && flatConfirmedAt !== null };
+    } catch { try { db.exec('ROLLBACK'); } catch {} throw new Error('Sandbox exit contradicts the approved stop or earlier evidence'); }
+    finally { db.close(); }
+  }
+
+  listSandboxResults(limit = 5) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new Error('Invalid sandbox result limit');
+    const db = this.open();
+    try {
+      const rows = db.prepare(`SELECT x.scenario_id, x.snapshot_json AS exit_json, x.flat_confirmed_at, x.observed_at,
+        e.snapshot_json AS entry_json, s.lot_size FROM sandbox_exit_evidence x
+        JOIN execution_orders o ON o.scenario_id=x.scenario_id JOIN execution_evidence e ON e.execution_order_id=o.id
+        JOIN scenario_journal s ON s.id=x.scenario_id WHERE o.mode='sandbox' ORDER BY x.observed_at DESC LIMIT ?`).all(limit) as
+        Array<{ scenario_id: number; exit_json: string; entry_json: string; lot_size: number; flat_confirmed_at: string | null; observed_at: string }>;
+      return rows.map(row => {
+        const result = analyzeSandboxRoundTrip(JSON.parse(row.entry_json) as SandboxOrderSnapshot, JSON.parse(row.exit_json) as SandboxOrderSnapshot, row.lot_size);
+        const costs=this.failedCloseCosts(db,row.scenario_id);
+        const netPnlNano=result.netPnlNano===null || costs.commissionNano===null ? null : String(BigInt(result.netPnlNano)-BigInt(costs.commissionNano));
+        const cashReconciliation = this.cashReconciliation(db, row.scenario_id, netPnlNano, result.closedAt, row.flat_confirmed_at);
+        return { scenarioId: row.scenario_id, ...result, netPnlNano, failedCloseFeesNano:costs.commissionNano, failedCloseAttempts:costs.attempts,
+          cashProven: cashReconciliation.cashProven, cashReconciliation,
+          flatConfirmedAt: row.flat_confirmed_at, observedAt: row.observed_at,
+          complete: result.fullySold && netPnlNano !== null && row.flat_confirmed_at !== null };
+      });
+    } finally { db.close(); }
+  }
+
+  recordExecutionReconciliation(scenarioId: number, snapshot: SandboxOrderSnapshot): ExecutionOrderRecord {
+    const database = this.open();
+    try {
+      database.exec('BEGIN IMMEDIATE');
+      const row = database.prepare('SELECT * FROM execution_orders WHERE scenario_id = ?').get(scenarioId) as ExecutionOrderRow | undefined;
+      if (!row || !['submitting', 'accepted'].includes(row.status)) throw new Error('Only an unresolved or accepted order can be reconciled');
+      const evidence = database.prepare('SELECT lots_executed, snapshot_json FROM execution_evidence WHERE execution_order_id = ?')
+        .get(row.id) as { lots_executed: number; snapshot_json: string | null } | undefined;
+      // Legacy accepted rows did not persist a fill count. A zero-fill reply
+      // cannot erase a possible position merely because that evidence is absent.
+      if (row.status === 'accepted' && !evidence && snapshot.lotsExecuted === 0) {
+        throw new Error('Legacy accepted order requires independent position evidence');
+      }
+      if (snapshot.lotsExecuted > row.lots || snapshot.lotsExecuted < (evidence?.lots_executed ?? 0)
+        || (row.broker_order_id && row.broker_order_id !== snapshot.brokerOrderId)) {
+        throw new Error('Sandbox reconciliation contradicts earlier execution evidence');
+      }
+      if (evidence?.snapshot_json) assertSnapshotProgress(JSON.parse(evidence.snapshot_json) as SandboxOrderSnapshot, snapshot);
+      const status = snapshot.terminal && snapshot.lotsExecuted === 0 ? 'failed' : 'accepted';
+      const now = new Date().toISOString();
+      const detail = `${snapshot.executionStatus}; reconciled lots ${snapshot.lotsExecuted}/${row.lots}`;
+      database.prepare('UPDATE execution_orders SET status = ?, broker_order_id = ?, detail = ?, updated_at = ? WHERE id = ?')
+        .run(status, snapshot.brokerOrderId, detail, now, row.id);
+      database.prepare(`INSERT INTO execution_evidence (execution_order_id, lots_executed, snapshot_json, updated_at)
+        VALUES (?, ?, ?, ?) ON CONFLICT(execution_order_id) DO UPDATE SET
+        lots_executed = excluded.lots_executed, snapshot_json = excluded.snapshot_json, updated_at = excluded.updated_at`)
+        .run(row.id, snapshot.lotsExecuted, JSON.stringify(snapshot), now);
+      this.appendExecutionEvent(database, Number(row.id), 'broker_reconciled', {
+        executionStatus: snapshot.executionStatus, lotsExecuted: snapshot.lotsExecuted,
+        grossNano: snapshot.grossNano, commissionNano: snapshot.commissionNano,
+      }, now);
+      if (!evidence || evidence.snapshot_json !== JSON.stringify(snapshot) || row.status !== status) this.bumpSandboxRevision(database);
+      database.exec('COMMIT');
+      return this.toExecutionOrder(database.prepare('SELECT * FROM execution_orders WHERE id = ?').get(row.id) as ExecutionOrderRow);
+    } catch (error: unknown) {
+      try { database.exec('ROLLBACK'); } catch { /* Keep all prior evidence on failure. */ }
+      throw error;
+    } finally { database.close(); }
   }
 
   markExecutionFailed(scenarioId: number, detail: string): ExecutionOrderRecord {
@@ -898,6 +1855,7 @@ export class ScenarioJournal {
   recordExecutionUncertain(scenarioId: number, detail: string): void {
     const database = this.open();
     try {
+      database.exec('BEGIN IMMEDIATE');
       const row = database
         .prepare('SELECT id FROM execution_orders WHERE scenario_id = ?')
         .get(scenarioId) as { id: number | bigint } | undefined;
@@ -905,6 +1863,11 @@ export class ScenarioJournal {
       this.appendExecutionEvent(database, Number(row.id), 'submission_uncertain', {
         detail: detail.slice(0, 500),
       });
+      this.bumpSandboxRevision(database);
+      database.exec('COMMIT');
+    } catch (error) {
+      try { database.exec('ROLLBACK'); } catch {}
+      throw error;
     } finally {
       database.close();
     }
@@ -913,18 +1876,114 @@ export class ScenarioJournal {
   getExecutionDailyUsage(from: string, to: string): { orderCount: number; riskRub: number } {
     const database = this.open();
     try {
-      const row = database
-        .prepare(
-          `SELECT COUNT(*) AS order_count, COALESCE(SUM(estimated_risk_rub), 0) AS risk_rub
-           FROM execution_orders
-           WHERE updated_at >= ? AND updated_at < ?
-             AND status IN ('submitting', 'accepted')`,
-        )
-        .get(from, to) as { order_count: number | bigint; risk_rub: number };
-      return { orderCount: Number(row.order_count), riskRub: row.risk_rub };
+      const reservations = this.executionReservations(database, from, to);
+      return { orderCount: reservations.length, riskRub: reservations.reduce((sum, risk) => sum + risk, 0) };
     } finally {
       database.close();
     }
+  }
+
+  private executionReservations(database: DatabaseSync, from: string, to: string): number[] {
+    // Approval time is immutable: a broker reply/retry after midnight must not
+    // move already consumed risk into a different Moscow calendar day.
+    const rows = database.prepare(`SELECT o.estimated_risk_rub AS risk
+      FROM execution_orders o JOIN (
+        SELECT execution_order_id, MIN(created_at) AS approved_at FROM execution_events
+        WHERE event_type = 'approved' GROUP BY execution_order_id
+      ) e ON e.execution_order_id = o.id
+      WHERE e.approved_at >= ? AND e.approved_at < ? AND o.status IN ('submitting', 'accepted')`)
+      .all(from, to) as Array<{ risk: number }>;
+    return rows.map(row => row.risk);
+  }
+
+  private bumpSandboxRevision(db: DatabaseSync): void {
+    db.prepare(`INSERT INTO runtime_state (key, value, updated_at) VALUES ('execution.sandbox_ledger_revision', '1', ?)
+      ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT), updated_at=excluded.updated_at`).run(new Date().toISOString());
+  }
+
+  private sandboxRevision(db: DatabaseSync): string {
+    const row = db.prepare("SELECT value FROM runtime_state WHERE key='execution.sandbox_ledger_revision'").get() as { value: string } | undefined;
+    return row?.value ?? '0';
+  }
+
+  getSandboxLossLedger(limit = 50) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('Invalid sandbox loss-ledger bound');
+    const db = this.open();
+    try {
+      db.exec('BEGIN'); const revision = this.sandboxRevision(db);
+      const rows = db.prepare(`SELECT o.scenario_id, o.status, o.side, o.approved_by_chat_id, o.order_request_id, o.instrument_id, o.lots,
+        s.lot_size, s.slippage_rate, e.snapshot_json AS entry_json, x.snapshot_json AS exit_json, x.flat_confirmed_at, x.observed_at,
+        n.intent_json, n.observation_json, t.intent_json AS session_json FROM execution_orders o JOIN scenario_journal s ON s.id=o.scenario_id
+        LEFT JOIN execution_evidence e ON e.execution_order_id=o.id LEFT JOIN sandbox_exit_evidence x ON x.scenario_id=o.scenario_id
+        LEFT JOIN native_stop_intents n ON n.scenario_id=o.scenario_id
+        LEFT JOIN sandbox_session_exit_intents t ON t.scenario_id=o.scenario_id
+        WHERE o.mode='sandbox' AND o.status IN ('accepted','submitting') ORDER BY o.id LIMIT ?`).all(limit + 1) as
+        Array<{ scenario_id: number; status: 'accepted' | 'submitting'; side: 'long' | 'short'; approved_by_chat_id: string | null;
+          order_request_id: string; instrument_id: string; lots: number; lot_size: number; slippage_rate: number;
+          entry_json: string | null; exit_json: string | null; flat_confirmed_at: string | null; observed_at: string | null;
+          intent_json: string | null; observation_json: string | null; session_json: string | null }>;
+      const orders = rows.slice(0, limit).map(row => { const costs=this.failedCloseCosts(db,row.scenario_id); return ({ scenarioId: row.scenario_id, status: row.status, side: row.side,
+        approved: Boolean(row.approved_by_chat_id), requestId: row.order_request_id, instrumentId: row.instrument_id,
+        lots: row.lots, lotSize: row.lot_size, slippageRate: row.slippage_rate, failedCloseFeesNano:costs.commissionNano, failedCloseAttempts:costs.attempts,
+        entry: row.entry_json ? JSON.parse(row.entry_json) as SandboxOrderSnapshot : null,
+        exit: row.exit_json ? { snapshot: JSON.parse(row.exit_json) as SandboxOrderSnapshot, flatConfirmedAt: row.flat_confirmed_at,
+          observedAt: row.observed_at! } : null,
+        session: row.session_json ? JSON.parse(row.session_json) as SandboxSessionExitIntent : null,
+        native: row.intent_json ? { intent: JSON.parse(row.intent_json) as SandboxStopIntent,
+          observation: row.observation_json ? JSON.parse(row.observation_json) as SandboxStopObservation : null } : null }); });
+      db.exec('COMMIT'); return { revision, orders, morePending: rows.length > limit };
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  getSandboxLossProof(): SandboxLossProof | null {
+    try {
+      const raw = this.getRuntimeState('execution.sandbox_loss_guard'); return raw ? JSON.parse(raw) as SandboxLossProof : null;
+    } catch { return null; }
+  }
+
+  getSandboxLossProofState(): { proof: SandboxLossProof | null; current: boolean } {
+    const db = this.open();
+    try {
+      // One SQL read snapshot: a stale proof cannot look current after a newer
+      // fill or fee invalidated its ledger revision.
+      const rows = db.prepare("SELECT key,value FROM runtime_state WHERE key IN ('execution.sandbox_loss_guard','execution.sandbox_ledger_revision')")
+        .all() as Array<{ key: string; value: string }>;
+      const raw = rows.find(row => row.key === 'execution.sandbox_loss_guard')?.value;
+      const proof = raw ? JSON.parse(raw) as SandboxLossProof : null;
+      return { proof, current: Boolean(proof && proof.ledgerRevision === (rows.find(row => row.key === 'execution.sandbox_ledger_revision')?.value ?? '0')) };
+    } catch { return { proof: null, current: false }; } finally { db.close(); }
+  }
+
+  recordSandboxLossAssessment(accountId: string, revision: string, assessment: SandboxLossAssessment): SandboxLossProof {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      if (revision !== this.sandboxRevision(db)) throw new Error('Sandbox loss assessment raced newer execution evidence');
+      const proof: SandboxLossProof = { ...assessment, accountId, ledgerRevision: revision, proofId: randomUUID() };
+      db.prepare(`INSERT INTO runtime_state (key, value, updated_at) VALUES ('execution.sandbox_loss_guard', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).run(JSON.stringify(proof), assessment.checkedAt);
+      if (proof.status !== 'ok') db.prepare(`INSERT INTO runtime_state (key,value,updated_at) VALUES ('execution.kill_switch','true',?)
+        ON CONFLICT(key) DO UPDATE SET value='true',updated_at=excluded.updated_at`).run(assessment.checkedAt);
+      db.exec('COMMIT'); return proof;
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; } finally { db.close(); }
+  }
+
+  private assertLossProof(db: DatabaseSync, order: ExecutionOrderRow, now: string,
+    expected: { proofId: string; accountId: string; maxDailyLossRub: number; maxTradeLossRub: number }): void {
+    try {
+      const row = db.prepare("SELECT value FROM runtime_state WHERE key='execution.sandbox_loss_guard'").get() as { value: string } | undefined;
+      const proof = row ? JSON.parse(row.value) as SandboxLossProof : null;
+      const date = new Date(now); const age = date.getTime() - Date.parse(proof?.checkedAt ?? '');
+      if (order.mode !== 'sandbox' || !proof || proof.status !== 'ok' || proof.proofId !== expected.proofId || proof.accountId !== expected.accountId
+        || proof.ledgerRevision !== this.sandboxRevision(db) || proof.day !== moscowLossDay(date) || !Number.isFinite(age) || age < 0 || age > 30_000
+        || proof.day !== moscowLossDay(new Date(proof.checkedAt))
+        || !proof.closedLossNano || !proof.openLossNano || !proof.maxTradeLossNano
+        || [proof.closedLossNano, proof.openLossNano, proof.maxTradeLossNano].some(amount => !/^\d{1,40}$/.test(amount))
+        || expected.maxDailyLossRub <= 0 || expected.maxDailyLossRub > 60 || expected.maxTradeLossRub <= 0 || expected.maxTradeLossRub > 20) throw new Error();
+      const loss = BigInt(proof.closedLossNano) + BigInt(proof.openLossNano);
+      if (loss >= BigInt(decimalPriceNano(expected.maxDailyLossRub)) || BigInt(proof.maxTradeLossNano) >= BigInt(decimalPriceNano(expected.maxTradeLossRub))
+        || loss + BigInt(decimalPriceNano(order.estimated_risk_rub)) > BigInt(decimalPriceNano(expected.maxDailyLossRub))) throw new Error();
+    } catch { throw new Error('Fresh sandbox loss proof or remaining daily loss allowance is not confirmed'); }
   }
 
   isExecutionKilled(): boolean {
@@ -935,12 +1994,41 @@ export class ScenarioJournal {
     this.setRuntimeState('execution.kill_switch', killed ? 'true' : 'false');
   }
 
+  beginSandboxArming(): string {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      db.prepare(`INSERT INTO runtime_state (key,value,updated_at) VALUES ('execution.kill_switch','true',?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`).run(new Date().toISOString());
+      const row = db.prepare("SELECT value FROM runtime_state WHERE key='execution.kill_generation'").get() as {value:string};
+      db.exec('COMMIT'); return row.value;
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+    finally { db.close(); }
+  }
+
+  finishSandboxArming(generation: string, expected: { raw: string; accountId: string }): void {
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const state = (key: string) => (db.prepare('SELECT value FROM runtime_state WHERE key=?').get(key) as {value:string}|undefined)?.value;
+      if (!generation || state('execution.kill_switch') !== 'true' || state('execution.kill_generation') !== generation
+        || state('execution.sandbox_bootstrap_v1') !== expected.raw || state('execution.sandbox_account_id') !== expected.accountId
+        || db.prepare("SELECT id FROM execution_orders WHERE mode='sandbox' AND status IN ('submitting','accepted') LIMIT 1").get()) {
+        throw new Error('Sandbox arming was superseded or requires recovery; execution remains killed');
+      }
+      db.prepare("UPDATE runtime_state SET value='false',updated_at=? WHERE key='execution.kill_switch'").run(new Date().toISOString());
+      db.exec('COMMIT');
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+    finally { db.close(); }
+  }
+
   private finishExecution(
     scenarioId: number,
     status: 'accepted' | 'failed',
     brokerOrderId: string | null,
     detail: string,
     eventType: string,
+    lotsExecuted = 0,
   ): ExecutionOrderRecord {
     const database = this.open();
     try {
@@ -950,6 +2038,7 @@ export class ScenarioJournal {
         .get(scenarioId) as ExecutionOrderRow | undefined;
       if (!row) throw new Error('Execution order was not found');
       if (row.status !== 'submitting') throw new Error(`Execution order is already ${row.status}`);
+      if (!Number.isSafeInteger(lotsExecuted) || lotsExecuted < 0 || lotsExecuted > row.lots) throw new Error('Invalid executed lot quantity');
 
       const now = new Date().toISOString();
       database
@@ -959,10 +2048,14 @@ export class ScenarioJournal {
            WHERE id = ?`,
         )
         .run(status, brokerOrderId, detail.slice(0, 500), now, row.id);
+      if (status === 'accepted') database.prepare(`INSERT INTO execution_evidence (execution_order_id, lots_executed, updated_at)
+        VALUES (?, ?, ?) ON CONFLICT(execution_order_id) DO UPDATE SET lots_executed = MAX(lots_executed, excluded.lots_executed),
+        updated_at = excluded.updated_at`).run(row.id, lotsExecuted, now);
       this.appendExecutionEvent(database, Number(row.id), eventType, {
         brokerOrderId,
         detail: detail.slice(0, 500),
       });
+      this.bumpSandboxRevision(database);
       database.exec('COMMIT');
 
       const finished = database.prepare('SELECT * FROM execution_orders WHERE id = ?').get(row.id) as ExecutionOrderRow;
@@ -984,13 +2077,14 @@ export class ScenarioJournal {
     executionOrderId: number,
     eventType: string,
     detail: unknown,
+    createdAt = new Date().toISOString(),
   ): void {
     database
       .prepare(
         `INSERT INTO execution_events (execution_order_id, event_type, created_at, detail_json)
          VALUES (?, ?, ?, ?)`,
       )
-      .run(executionOrderId, eventType, new Date().toISOString(), JSON.stringify(detail));
+      .run(executionOrderId, eventType, createdAt, JSON.stringify(detail));
   }
 
   private open(): DatabaseSync {

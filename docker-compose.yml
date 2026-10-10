@@ -15,6 +15,9 @@ services:
     volumes:
       - trading-journal:/app/data
       - ./.trading:/app/.trading:ro
+      - ${T_INVEST_LOCAL_RELAY_DIR:-./.trading/relay}:/run/relay:ro
+    ports:
+      - "127.0.0.1:8088:8080"
     restart: unless-stopped
     init: true
     read_only: true

@@ -85,6 +85,11 @@ async function main(): Promise<void> {
         executionStatus: 'EXECUTION_REPORT_STATUS_FILL',
         lotsExecuted: 1,
       }),
+      reconcileScenario: async () => ({
+        order: sampleOrder,
+        executionStatus: 'EXECUTION_REPORT_STATUS_FILL',
+        lotsExecuted: 1,
+      }),
     };
     const bot = new TelegramTradingBot(
       config,

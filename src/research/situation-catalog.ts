@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 
 import type { HistoricalMinuteCandle } from '../history/market-data-store.js';
 
-// v2 fixes candle availability: timestamps identify the START of a minute.
 export const RESEARCH_DATASET_VERSION = 'situation-v2';
 export const RESEARCH_OUTCOME_HORIZONS_MINUTES = [15, 30, 60] as const;
 
@@ -26,6 +25,8 @@ export type ResearchFeatureSet = Record<ResearchFeatureName, number>;
 export type ResearchOutcome = {
   horizonMinutes: number;
   terminalAt: string;
+  /** Terminal candle timestamps mark the open; its OHLC is known one minute later. */
+  outcomeAvailableAt: string;
   forwardReturnPct: number;
   maxFavorablePct: number;
   maxAdversePct: number;
@@ -89,6 +90,12 @@ function dateKey(value: string): string {
 
 function minuteDelta(left: string, right: string): number {
   return (Date.parse(right) - Date.parse(left)) / 60_000;
+}
+
+export function researchCandleAvailableAt(candleTime: string): string {
+  const timestamp = Date.parse(candleTime);
+  if (!Number.isFinite(timestamp)) throw new Error('Research candle timestamp is invalid');
+  return new Date(timestamp + 60_000).toISOString();
 }
 
 function percentageChange(current: number, previous: number): number {
@@ -167,7 +174,8 @@ function buildOutcome(
 
   return {
     horizonMinutes,
-    terminalAt: new Date(Date.parse(candles[terminalIndex]!.time) + 60_000).toISOString(),
+    terminalAt: candles[terminalIndex]!.time,
+    outcomeAvailableAt: researchCandleAvailableAt(candles[terminalIndex]!.time),
     forwardReturnPct: percentageChange(candles[terminalIndex]!.close, entryClose),
     maxFavorablePct: percentageChange(Math.max(...futureWindow.map((candle) => candle.high)), entryClose),
     maxAdversePct: percentageChange(Math.min(...futureWindow.map((candle) => candle.low)), entryClose),
@@ -201,7 +209,7 @@ function buildSegmentSituations(
       ticker: metadata.ticker,
       sessionDate: dateKey(observedAt),
       observedAt,
-      featureAvailableAt: new Date(Date.parse(observedAt) + 60_000).toISOString(),
+      featureAvailableAt: researchCandleAvailableAt(observedAt),
       sourceYear: metadata.sourceYear,
       sourceArchiveSha256: metadata.sourceArchiveSha256,
       features,

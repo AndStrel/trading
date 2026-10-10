@@ -64,6 +64,13 @@ function completeInput() {
 }
 
 describe('assessTradeScenario', () => {
+  it('accepts a confirmed short-history signal without requiring the unrelated SMA50 trend',()=>{
+    const input=completeInput();input.candleAnalysis={...upwardCandles,status:'insufficient_data',trend:'insufficient_data'};
+    expect(assessTradeScenario({...input,signalConfirmed:true}).decision).toBe('candidate');
+    expect(assessTradeScenario(input).decision).toBe('review');
+    const blocked={...input,signalConfirmed:true,tradePlan:{...plan,allowed:false,reasons:['Expenses block the plan']}};
+    expect(assessTradeScenario(blocked).decision).toBe('blocked');
+  });
   it('marks a liquid, allowed and trend-aligned setup as a candidate', () => {
     const assessment = assessTradeScenario(completeInput());
 

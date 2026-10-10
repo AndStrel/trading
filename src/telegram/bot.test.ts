@@ -9,6 +9,8 @@ import { ScenarioJournal } from '../journal/scenario-journal.js';
 import type { IntradayScanEvent } from '../scanner/intraday-scanner.js';
 import type { TelegramClient, TelegramUpdate } from './client.js';
 import { TelegramTradingBot } from './bot.js';
+import type { TradingSelection } from '../strategies/selection.js';
+import type { AssetRecommendation } from '../scanner/intraday-scanner.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -25,6 +27,215 @@ afterEach(() => {
 });
 
 describe('TelegramTradingBot', () => {
+  it('shows strategy buttons only for authorized chats and includes the current revision', async () => {
+    const client: TelegramClient = { getUpdates: async () => [
+      { update_id: 1, message: { chat: { id: 7 }, text: '/strategies' } },
+      { update_id: 2, message: { chat: { id: 42 }, text: '🧭 Стратегии' } },
+    ], sendMessage: vi.fn(), sendPhoto: vi.fn() };
+    const scanner = { isPaused: () => false, pause: vi.fn(), resume: vi.fn(),
+      getTradingSelection: () => ({ strategyId: 'trend-momentum-v1' as const, revision: 3, tickers: ['VTBR'] }),
+      selectTradingStrategy: vi.fn() };
+    await new TelegramTradingBot(loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42' }), client, scanner, createJournal(), () => undefined).pollOnce();
+    expect(client.sendMessage).toHaveBeenCalledOnce();
+    expect(client.sendMessage).toHaveBeenCalledWith('42', expect.stringContaining('Выберите торговый подход'), {
+      replyMarkup: { inline_keyboard: expect.arrayContaining([
+        [{ text: '✓ Тренд и объём', callback_data: 'strategy:trend-momentum-v1:3' }],
+        [{ text: 'Возврат выше VWAP', callback_data: 'strategy:vwap-reclaim-v1:3' }],
+      ]) },
+    });
+    expect(scanner.selectTradingStrategy).not.toHaveBeenCalled();
+  });
+
+  it('authorizes strategy callbacks and prevents stale buttons or malformed revisions from changing selection', async () => {
+    let selection: TradingSelection = { strategyId: 'trend-momentum-v1', revision: 3, tickers: ['VTBR'] };
+    const scanner = { isPaused: () => false, pause: vi.fn(), resume: vi.fn(), getTradingSelection: () => selection,
+      selectTradingStrategy: vi.fn((id: TradingSelection['strategyId'], revision: number) => {
+        if (revision !== selection.revision) throw new Error('private-error-marker');
+        selection = { ...selection, strategyId: id, revision: revision + 1 };
+      }) };
+    const updates: TelegramUpdate[] = [
+      { update_id: 1, callback_query: { id: 'denied', data: 'strategy:vwap-reclaim-v1:3', message: { chat: { id: 7 } } } },
+      { update_id: 2, callback_query: { id: 'valid', data: 'strategy:vwap-reclaim-v1:3', message: { chat: { id: 42 } } } },
+      { update_id: 3, callback_query: { id: 'stale', data: 'strategy:opening-range-breakout-v1:3', message: { chat: { id: 42 } } } },
+      ...['strategy:unknown:4', 'strategy:trend-momentum-v1:0', 'strategy:trend-momentum-v1:03', 'strategy:trend-momentum-v1:9007199254740992', 'strategy:trend-momentum-v1:4:extra'].map((data, index) => ({
+        update_id: index + 4, callback_query: { id: `malformed-${index}`, data, message: { chat: { id: 42 } } },
+      })),
+    ];
+    const client: TelegramClient = { getUpdates: async () => updates, sendMessage: vi.fn(), sendPhoto: vi.fn(), answerCallbackQuery: vi.fn() };
+    await new TelegramTradingBot(loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42' }), client, scanner, createJournal(), () => undefined).pollOnce();
+    expect(selection).toEqual({ strategyId: 'vwap-reclaim-v1', revision: 4, tickers: ['VTBR'] });
+    expect(scanner.selectTradingStrategy).toHaveBeenCalledTimes(2);
+    expect(client.answerCallbackQuery).toHaveBeenCalledWith('denied', 'Нет доступа');
+    expect(client.sendMessage).toHaveBeenLastCalledWith('42', expect.stringContaining('настройки уже изменились'));
+    expect(JSON.stringify(vi.mocked(client.sendMessage).mock.calls)).not.toContain('private-error-marker');
+  });
+
+  it('accepts exact strategy and assets commands for allowed chats without order operations', async () => {
+    const scanner = { isPaused: () => false, pause: vi.fn(), resume: vi.fn(),
+      getTradingSelection: () => ({ strategyId: 'trend-momentum-v1' as const, revision: 5, tickers: ['VTBR'] }),
+      selectTradingStrategy: vi.fn(), selectTradingAssets: vi.fn() };
+    const client: TelegramClient = { getUpdates: async () => [
+      { update_id: 1, message: { chat: { id: 7 }, text: '/assets IRAO' } },
+      { update_id: 2, message: { chat: { id: 42 }, text: '/strategy vwap-reclaim-v1' } },
+      { update_id: 3, message: { chat: { id: 42 }, text: '/assets vtbr,irao' } },
+      { update_id: 4, message: { chat: { id: 42 }, text: '/assets VTBR,VTBR' } },
+      { update_id: 5, message: { chat: { id: 42 }, text: '/assets VTBR IRAO' } },
+    ], sendMessage: vi.fn(), sendPhoto: vi.fn() };
+    const execution = { mode: () => 'sandbox', isConfigured: () => true, isReady: () => true, isKilled: () => true,
+      armSandbox: vi.fn(), kill: vi.fn(), queueScenario: vi.fn(), rejectScenario: vi.fn(), listRecent: () => [], submitScenario: vi.fn(), reconcileScenario: vi.fn() };
+    await new TelegramTradingBot(loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42' }), client, scanner, createJournal(), () => undefined, undefined, execution).pollOnce();
+    expect(scanner.selectTradingStrategy).toHaveBeenCalledExactlyOnceWith('vwap-reclaim-v1', 5);
+    expect(scanner.selectTradingAssets).toHaveBeenCalledExactlyOnceWith(['VTBR', 'IRAO'], 5);
+    expect(execution.submitScenario).not.toHaveBeenCalled();
+    expect(execution.armSandbox).not.toHaveBeenCalled();
+    expect(execution.queueScenario).not.toHaveBeenCalled();
+  });
+
+  it('offers the Mini App asset picker only in an allowed private chat', async () => {
+    const client: TelegramClient = { getUpdates: async () => [
+      { update_id: 1, message: { chat: { id: 42, type: 'private' }, text: '🎯 Активы' } },
+      { update_id: 2, message: { chat: { id: -9, type: 'group' }, text: '/assets' } },
+    ], sendMessage: vi.fn(), sendPhoto: vi.fn() };
+    const scanner = { isPaused: () => false, pause: vi.fn(), resume: vi.fn(),
+      getTradingSelection: () => ({ strategyId: 'trend-momentum-v1' as const, revision: 1, tickers: ['VTBR'] }), getAvailableTickers: () => ['VTBR', 'IRAO'] };
+    const config = loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42,-9', TELEGRAM_BOT_TOKEN: 'test',
+      TELEGRAM_MINI_APP_ENABLED: 'true', TELEGRAM_MINI_APP_URL: 'https://bot.brewnote.net' });
+    await new TelegramTradingBot(config, client, scanner, createJournal(), () => undefined).pollOnce();
+    expect(client.sendMessage).toHaveBeenNthCalledWith(1, '42', expect.stringContaining('Текущие активы: VTBR'), {
+      replyMarkup: { inline_keyboard: [[{ text: 'Выбрать активы в панели', web_app: { url: 'https://bot.brewnote.net' } }]] },
+    });
+    expect(client.sendMessage).toHaveBeenNthCalledWith(2, '-9', expect.any(String), { replyMarkup: expect.objectContaining({ is_persistent: true }) });
+  });
+
+  it('explains recommendation states and costs and hides a report after selection changes', async () => {
+    let revision = 2;
+    const recommendations: AssetRecommendation[] = (['signal', 'wait', 'blocked', 'error'] as const).map((status, index) => ({
+      ticker: ['VTBR', 'IRAO', 'SBER', 'GAZP'][index]!, instrumentId: 'hidden-instrument', status, score: 80 - index,
+      reasons: ['Проверяемая причина'], lotCostRub: 52, roundTripCostsRub: 0.37, totalRiskRub: 3, netRewardRub: 7,
+      entryPrice: 52, stopPrice: 51, targetPrice: 55,
+    }));
+    const scanner = { isPaused: () => false, pause: vi.fn(), resume: vi.fn(),
+      getTradingSelection: () => ({ strategyId: 'trend-momentum-v1' as const, revision, tickers: ['VTBR', 'IRAO'] }),
+      getLatestReport: () => ({ strategyId: 'trend-momentum-v1' as const, selectionRevision: 2, recommendations,
+        observedAt: '2026-10-03T07:00:00Z', universe: { source: 'moex-liquid' as const, refreshedAt: '2026-10-03T07:00:00Z', requested: 2, active: 2, missingTickers: [] },
+        scanned: 2, liquid: 2, trendUp: 1, volumeConfirmed: 1, readyForMarketCheck: 1, marketCandidates: 1, recordedCandidates: 1, errors: 0, topRanked: [] }) };
+    const client: TelegramClient = { getUpdates: async () => [{ update_id: revision, message: { chat: { id: 42 }, text: '/recommendations' } }], sendMessage: vi.fn(), sendPhoto: vi.fn() };
+    const bot = new TelegramTradingBot(loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42' }), client, scanner, createJournal(), () => undefined);
+    await bot.pollOnce();
+    const first = vi.mocked(client.sendMessage).mock.calls[0]![1];
+    expect(first).toContain('Тренд и объём');
+    expect(first).toContain('сигнал для проверки'); expect(first).toContain('наблюдать');
+    expect(first).toContain('пропустить'); expect(first).toContain('ошибка данных');
+    expect(first).toContain('затраты круга: 0.37 ₽'); expect(first).toContain('Расчётный риск: 3 ₽');
+    expect(first).not.toContain('hidden-instrument');
+    revision = 3;
+    await bot.pollOnce();
+    expect(client.sendMessage).toHaveBeenLastCalledWith('42', expect.stringContaining('Дождитесь нового прохода рынка'));
+  });
+
+  it('includes selected strategy and assets in the market overview before the first scan', async () => {
+    const client: TelegramClient = { getUpdates: async () => [{ update_id: 1, message: { chat: { id: 42 }, text: '/market' } }], sendMessage: vi.fn(), sendPhoto: vi.fn() };
+    const scanner = { isPaused: () => false, pause: vi.fn(), resume: vi.fn(), getLatestReport: () => null,
+      getTradingSelection: () => ({ strategyId: 'vwap-reclaim-v1' as const, revision: 6, tickers: ['VTBR'] }) };
+    await new TelegramTradingBot(loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42' }), client, scanner, createJournal(), () => undefined).pollOnce();
+    expect(client.sendMessage).toHaveBeenCalledWith('42', expect.stringContaining('Стратегия: Возврат выше VWAP · ревизия 6'));
+    expect(client.sendMessage).toHaveBeenCalledWith('42', expect.stringContaining('Активы: VTBR'));
+  });
+  it.each([['-9000000000', '−9,00 ₽'], [null, 'не подтверждён']])('shows scoped sandbox sale result without arming or submitting: %s', async (netPnlNano, displayed) => {
+    const client: TelegramClient = { getUpdates: async () => [
+      { update_id: 1, message: { chat: { id: 42 }, text: '/reconcile 17' } },
+    ], sendMessage: vi.fn(), sendPhoto: vi.fn() };
+    const execution = { mode: () => 'sandbox', isConfigured: () => true, isReady: () => true, isKilled: () => true,
+      armSandbox: vi.fn(), kill: vi.fn(), queueScenario: vi.fn(), rejectScenario: vi.fn(), listRecent: () => [], submitScenario: vi.fn(),
+      reconcileScenario: vi.fn().mockResolvedValue({ executionStatus: 'EXECUTION_REPORT_STATUS_FILL', lotsExecuted: 5, order: { lots: 5, status: 'accepted' },
+        sandboxExit: { soldLots: netPnlNano === null ? 2 : 5, remainingLots: netPnlNano === null ? 3 : 0,
+          netPnlNano, flatConfirmedAt: netPnlNano === null ? null : '2026-10-01T08:00:00Z' } }) };
+    const bot = new TelegramTradingBot(loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42' }), client,
+      { isPaused: () => false, pause: vi.fn(), resume: vi.fn() }, createJournal(), () => undefined, undefined, execution);
+    await bot.pollOnce();
+    expect(client.sendMessage).toHaveBeenLastCalledWith('42', expect.stringContaining(String(displayed)));
+    expect(client.sendMessage).toHaveBeenLastCalledWith('42', expect.stringContaining('не реальная доходность'));
+    expect(client.sendMessage).toHaveBeenLastCalledWith('42', expect.stringContaining('Резерв риска сохранён'));
+    expect(execution.submitScenario).not.toHaveBeenCalled(); expect(execution.armSandbox).not.toHaveBeenCalled();
+  });
+  it('reconciles only allowlisted exact requests and never submits on that command', async () => {
+    const client: TelegramClient = { getUpdates: async () => [
+      { update_id: 1, message: { chat: { id: 7 }, text: '/reconcile 17' } },
+      { update_id: 2, message: { chat: { id: 42 }, text: '/reconcile invalid' } },
+      { update_id: 3, message: { chat: { id: 42 }, text: '/reconcile 17 extra' } },
+      { update_id: 4, message: { chat: { id: 42 }, text: '/reconcile 17' } },
+    ], sendMessage: vi.fn(), sendPhoto: vi.fn() };
+    const execution = { mode: () => 'sandbox', isConfigured: () => true, isReady: () => true, isKilled: () => true,
+      armSandbox: vi.fn(), kill: vi.fn(), queueScenario: vi.fn(), rejectScenario: vi.fn(), listRecent: () => [], submitScenario: vi.fn(),
+      reconcileScenario: vi.fn().mockResolvedValue({ executionStatus: 'EXECUTION_REPORT_STATUS_FILL', lotsExecuted: 5, order: { lots: 5 } }) };
+    const scanner = { isPaused: () => false, pause: vi.fn(), resume: vi.fn() };
+    const bot = new TelegramTradingBot(loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42' }), client, scanner, createJournal(), () => undefined, undefined, execution);
+    await bot.pollOnce();
+    expect(execution.reconcileScenario).toHaveBeenCalledOnce();
+    expect(execution.reconcileScenario).toHaveBeenCalledWith(17);
+    expect(execution.submitScenario).not.toHaveBeenCalled();
+    expect(client.sendMessage).toHaveBeenLastCalledWith('42', expect.stringContaining('Новая заявка не отправлялась'));
+  });
+  it('announces each menu phase once to private IDs and retries a failed menu update', async () => {
+    const journal = createJournal();
+    const base = { TELEGRAM_BOT_TOKEN: 'test', TELEGRAM_ALLOWED_CHAT_IDS: '42,-9' };
+    const client: TelegramClient = { getUpdates: async () => [], sendMessage: vi.fn(), sendPhoto: vi.fn(),
+      setChatMenuButton: vi.fn().mockRejectedValueOnce(new Error('not available')).mockResolvedValue(undefined) };
+    const scanner = { isPaused: () => false, pause: vi.fn(), resume: vi.fn() };
+    const buttons = new TelegramTradingBot(loadConfig(base), client, scanner, journal, () => undefined);
+    await buttons.announceMenu(); await buttons.announceMenu();
+    expect(client.sendMessage).toHaveBeenCalledTimes(1);
+    const app = new TelegramTradingBot(loadConfig({ ...base, TELEGRAM_MINI_APP_ENABLED: 'true',
+      TELEGRAM_MINI_APP_URL: 'https://bot.brewnote.net' }), client, scanner, journal, () => undefined);
+    await app.announceMenu();
+    expect(journal.getRuntimeState('telegram.menu.v2.miniapp.42')).toBeNull();
+    await app.announceMenu(); await app.announceMenu();
+    expect(client.sendMessage).toHaveBeenCalledTimes(3);
+    expect(client.setChatMenuButton).toHaveBeenCalledTimes(2);
+    expect(client.setChatMenuButton).toHaveBeenLastCalledWith('42', 'https://bot.brewnote.net');
+    expect(journal.getRuntimeState('telegram.menu.v2.miniapp.-9')).toBeNull();
+  });
+  it('shows buttons and launches the Mini App only for an allowed private chat', async () => {
+    const config = loadConfig({ TELEGRAM_BOT_TOKEN: 'test', TELEGRAM_ALLOWED_CHAT_IDS: '42,-9',
+      TELEGRAM_MINI_APP_ENABLED: 'true', TELEGRAM_MINI_APP_URL: 'https://bot.brewnote.net' });
+    const client: TelegramClient = { getUpdates: async () => [
+      { update_id: 1, message: { chat: { id: 7, type: 'private' }, text: '📱 Мини-приложение' } },
+      { update_id: 2, message: { chat: { id: 42, type: 'private' }, text: '/menu' } },
+      { update_id: 3, message: { chat: { id: 42, type: 'private' }, text: '📱 Мини-приложение' } },
+      { update_id: 4, message: { chat: { id: -9, type: 'group' }, text: '📱 Мини-приложение' } },
+      { update_id: 5, message: { chat: { id: 42, type: 'private' }, text: '⏸ Пауза' } },
+    ], sendMessage: vi.fn(), sendPhoto: vi.fn() };
+    const scanner = { isPaused: () => false, pause: vi.fn(), resume: vi.fn() };
+    const bot = new TelegramTradingBot(config, client, scanner, createJournal(), () => undefined);
+    await bot.pollOnce();
+    expect(client.sendMessage).toHaveBeenCalledTimes(4);
+    expect(client.sendMessage).toHaveBeenNthCalledWith(1, '42', expect.any(String), expect.objectContaining({ replyMarkup: expect.objectContaining({ is_persistent: true }) }));
+    expect(client.sendMessage).toHaveBeenNthCalledWith(2, '42', expect.any(String), { replyMarkup: { inline_keyboard: [[{ text: 'Открыть Mini App', web_app: { url: 'https://bot.brewnote.net' } }]] } });
+    expect(client.sendMessage).toHaveBeenNthCalledWith(3, '-9', expect.stringContaining('личного чата'));
+    expect(scanner.pause).toHaveBeenCalledTimes(1);
+  });
+  it('shows approved limits but checks the live account only for an allowed chat', async () => {
+    const journal = createJournal();
+    const config = loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42' });
+    const sent: string[] = [];
+    const client: TelegramClient = {
+      getUpdates: async () => [
+        { update_id: 1, message: { chat: { id: 7 }, text: '/pilot_check' } },
+        { update_id: 2, message: { chat: { id: 42 }, text: '/pilot' } },
+        { update_id: 3, message: { chat: { id: 42 }, text: '/pilot_check' } },
+      ],
+      sendMessage: async (_chatId, text) => { sent.push(text); }, sendPhoto: async () => undefined,
+    };
+    const pilot = { check: vi.fn().mockResolvedValue({ liveSubmissionAllowed: false, accountChecksPassed: false, availableCashRub: null, blockers: ['Не задан отдельный live-токен.'] }) };
+    const scanner = { isPaused: () => false, pause: () => undefined, resume: () => undefined };
+    const bot = new TelegramTradingBot(config, client, scanner, journal, () => undefined, undefined, undefined, pilot);
+    await bot.pollOnce();
+    expect(pilot.check).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toContain('20 ₽/сделка; 60 ₽/день');
+    expect(sent[0]).toContain('Реальные заявки недоступны');
+    expect(sent[1]).toContain('не пройдена');
+  });
   it('accepts only allowlisted commands and persists the update offset', async () => {
     const journal = createJournal();
     const config = loadConfig({
@@ -364,6 +575,7 @@ describe('TelegramTradingBot', () => {
       rejectScenario: vi.fn(),
       listRecent: () => [],
       submitScenario: vi.fn(),
+      reconcileScenario: vi.fn(),
     };
     const photos: Array<{ caption: string; callbackData?: string }> = [];
     const client: TelegramClient = {
@@ -405,7 +617,7 @@ describe('TelegramTradingBot', () => {
     ]);
   });
 
-  it('falls back to text when card rendering fails', async () => {
+  it('falls back to precise fractional trading prices when card rendering fails', async () => {
     const journal = createJournal();
     const config = loadConfig({
       TELEGRAM_BOT_TOKEN: 'test-token',
@@ -413,18 +625,18 @@ describe('TelegramTradingBot', () => {
       T_INVEST_EXECUTION_MODE: 'sandbox',
       T_INVEST_TRADING_TOKEN: 'trade-token',
       T_INVEST_INTRADAY_WATCHLIST:
-        '[{"instrumentId":"sber","label":"SBER","lotSize":1,"priceStep":0.01}]',
+        '[{"instrumentId":"irao","label":"IRAO","lotSize":100,"priceStep":0.0005}]',
     });
     const scenario = journal.record({
       observedAt: '2026-09-14T13:00:00.000Z',
       strategy: 'intraday',
-      instrumentId: 'sber',
+      instrumentId: 'irao',
       input: {
         side: 'long',
-        entryPrice: 100,
-        stopPrice: 99,
-        targetPrice: 102.5,
-        lotSize: 1,
+        entryPrice: 4.1235,
+        stopPrice: 4.10,
+        targetPrice: 4.2345,
+        lotSize: 100,
         slippageRate: 0.0005,
       },
       decision: 'candidate',
@@ -452,6 +664,7 @@ describe('TelegramTradingBot', () => {
       rejectScenario: vi.fn(),
       listRecent: () => [],
       submitScenario: vi.fn(),
+      reconcileScenario: vi.fn(),
     };
     const bot = new TelegramTradingBot(
       config,
@@ -466,7 +679,7 @@ describe('TelegramTradingBot', () => {
     );
 
     await bot.notifyScannerEvent({
-      instrumentId: 'sber',
+      instrumentId: 'irao',
       observedAt: scenario.observedAt,
       status: 'candidate-recorded',
       scenarioId: scenario.id,
@@ -475,6 +688,7 @@ describe('TelegramTradingBot', () => {
 
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain('Карточка не сформировалась');
+    expect(sent[0]).toContain('Вход: 4.1235 ₽ · стоп: 4.10 ₽ · цель: 4.2345 ₽');
     expect(sent[0]).toContain(`/approve ${scenario.id} CONFIRM или /reject ${scenario.id}`);
   });
 
@@ -554,6 +768,7 @@ describe('TelegramTradingBot', () => {
       rejectScenario: vi.fn(),
       listRecent: () => [],
       submitScenario,
+      reconcileScenario: vi.fn(),
     };
     const bot = new TelegramTradingBot(
       config,
@@ -617,6 +832,7 @@ describe('TelegramTradingBot', () => {
       rejectScenario: vi.fn(),
       listRecent: () => [],
       submitScenario,
+      reconcileScenario: vi.fn(),
     };
     const bot = new TelegramTradingBot(
       config,
@@ -701,6 +917,7 @@ describe('TelegramTradingBot', () => {
         },
       ],
       submitScenario: vi.fn(),
+      reconcileScenario: vi.fn(),
     };
     const bot = new TelegramTradingBot(
       config,

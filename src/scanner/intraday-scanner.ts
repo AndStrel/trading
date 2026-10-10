@@ -1,8 +1,15 @@
 import type { AppConfig } from '../config.js';
 import { analyzeCandles, type CandleAnalysis } from '../domain/candle-analysis.js';
-import { proposeIntradayLong } from '../domain/intraday-proposal.js';
+import type { IntradayLongProposal } from '../domain/intraday-proposal.js';
+import { evaluateTradingSignal, type TradingSignalInput } from '../strategies/signal-engine.js';
+import { TradingSelectionController, type TradingSelection } from '../strategies/selection.js';
+import type { TradingStrategyId } from '../strategies/catalog.js';
+import { sandboxBidValue } from '../execution/sandbox-loss-policy.js';
+import { decimalPriceNano } from '../execution/sandbox-stop-state.js';
+import { quotationToNumber, type Quotation } from '../domain/money.js';
 import { assessTradeScenario } from '../domain/trade-scenario.js';
 import { calculateTradePlan } from '../domain/trade-plan.js';
+import { assessLivePilotRisk } from '../execution/live-pilot-risk.js';
 import { ScenarioJournal } from '../journal/scenario-journal.js';
 import { TInvestClient } from '../tbank/client.js';
 import {
@@ -32,6 +39,9 @@ export type IntradayMarketRanking = {
 };
 
 export type IntradayScanReport = {
+  strategyId: TradingStrategyId;
+  selectionRevision: number;
+  recommendations: AssetRecommendation[];
   observedAt: string;
   universe: {
     source: IntradayUniverseSnapshot['source'];
@@ -53,16 +63,27 @@ export type IntradayScanReport = {
 
 export type IntradayScanEventListener = (event: IntradayScanEvent) => void | Promise<void>;
 
+export type AssetRecommendation = {
+  ticker: string; instrumentId: string; status: 'signal' | 'wait' | 'blocked' | 'error';
+  score: number; reasons: string[]; lotCostRub: number | null; roundTripCostsRub: number | null;
+  totalRiskRub: number | null; netRewardRub: number | null;
+  entryPrice: number | null; stopPrice: number | null; targetPrice: number | null;
+};
+
 type CandidateEvaluation = {
   instrument: ResolvedIntradayInstrument;
   ranking: IntradayMarketRanking;
   candleAnalysis: CandleAnalysis;
-  proposal: NonNullable<ReturnType<typeof proposeIntradayLong>>;
+  proposal: IntradayLongProposal;
   tradePlan: ReturnType<typeof calculateTradePlan>;
   assessment: ReturnType<typeof assessTradeScenario>;
+  signalInput: Omit<TradingSignalInput, 'now'>;
+  lastPricesPayload: unknown;
+  tradingStatusPayload: unknown;
 };
 
 type InstrumentScanResult = {
+  recommendation: AssetRecommendation;
   ranking: IntradayMarketRanking;
   liquid: boolean;
   trendUp: boolean;
@@ -98,70 +119,6 @@ function averageCandleTurnoverRub(
   return candleAnalysis.averageVolume20 * candleAnalysis.latestClose * instrument.lotSize;
 }
 
-function scoreScreening(input: {
-  candleAnalysis: CandleAnalysis;
-  averageTurnoverRub: number | null;
-  minTurnoverRub: number;
-}): number {
-  const { candleAnalysis, averageTurnoverRub, minTurnoverRub } = input;
-  if (candleAnalysis.status !== 'ok') return 0;
-
-  const trendScore =
-    candleAnalysis.trend === 'up' ? 40 : candleAnalysis.trend === 'flat' ? 15 : 0;
-  const relativeVolume = candleAnalysis.relativeVolume ?? 0;
-  const volumeScore = Math.min(30, Math.max(0, (relativeVolume - 0.5) * 30));
-  const turnoverScore =
-    averageTurnoverRub !== null && averageTurnoverRub >= minTurnoverRub
-      ? Math.min(20, 10 + Math.log10(averageTurnoverRub / minTurnoverRub) * 10)
-      : 0;
-  const volatility = candleAnalysis.volatilityPct ?? 0;
-  const volatilityScore = volatility >= 0.03 && volatility <= 2 ? 10 : 0;
-
-  return Math.round(Math.min(100, trendScore + volumeScore + turnoverScore + volatilityScore));
-}
-
-function screeningReasons(input: {
-  candleAnalysis: CandleAnalysis;
-  averageTurnoverRub: number | null;
-  minTurnoverRub: number;
-}): string[] {
-  const { candleAnalysis, averageTurnoverRub, minTurnoverRub } = input;
-  const reasons: string[] = [];
-  if (candleAnalysis.status !== 'ok') reasons.push('Недостаточно полных 5-минутных свечей');
-  reasons.push(`Тренд 5м: ${candleAnalysis.trend}`);
-  reasons.push(
-    `Относительный объём: ${
-      candleAnalysis.relativeVolume === null ? '—' : `${round(candleAnalysis.relativeVolume)}x`
-    }`,
-  );
-  reasons.push(`Средний оборот 5м: ${formatRub(averageTurnoverRub)}`);
-  if (averageTurnoverRub === null || averageTurnoverRub < minTurnoverRub) {
-    reasons.push(`Оборот ниже порога ${formatRub(minTurnoverRub)}`);
-  }
-  return reasons;
-}
-
-function readinessReasons(input: {
-  candleAnalysis: CandleAnalysis;
-  averageTurnoverRub: number | null;
-  minTurnoverRub: number;
-}): string[] {
-  const { candleAnalysis, averageTurnoverRub, minTurnoverRub } = input;
-  const reasons: string[] = [];
-  if (candleAnalysis.status !== 'ok') reasons.push('Недостаточно данных для 5-минутного тренда');
-  if (averageTurnoverRub === null || averageTurnoverRub < minTurnoverRub) {
-    reasons.push(`Средний оборот 5м ниже ${formatRub(minTurnoverRub)}`);
-  }
-  if (candleAnalysis.trend !== 'up') reasons.push('Пятиминутный тренд не восходящий');
-  if (candleAnalysis.relativeVolume === null || candleAnalysis.relativeVolume < 1) {
-    reasons.push('Относительный объём ниже 1.0');
-  }
-  if (candleAnalysis.averageTrueRange14 === null || candleAnalysis.averageTrueRange14 <= 0) {
-    reasons.push('ATR недоступен');
-  }
-  return reasons;
-}
-
 async function mapWithConcurrency<T, R>(
   values: readonly T[],
   concurrency: number,
@@ -185,6 +142,8 @@ export class IntradayScanner {
   private readonly listeners: IntradayScanEventListener[] = [];
   private readonly universe: IntradayUniverseProvider;
   private latestReport: IntradayScanReport | null = null;
+  private readonly selection: TradingSelectionController;
+  private scanning = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -193,8 +152,10 @@ export class IntradayScanner {
     private readonly log: (event: IntradayScanEvent) => void = (event) =>
       process.stdout.write(JSON.stringify(event) + '\n'),
     universe?: IntradayUniverseProvider,
+    private readonly acquireSourceLease?: () => () => void,
   ) {
     this.universe = universe ?? new TInvestIntradayUniverseProvider(config, client);
+    this.selection = new TradingSelectionController(config, journal);
   }
 
   addEventListener(listener: IntradayScanEventListener): void {
@@ -214,10 +175,31 @@ export class IntradayScanner {
   }
 
   getLatestReport(): IntradayScanReport | null {
+    if (this.latestReport && this.latestReport.selectionRevision !== this.selection.get().revision) this.latestReport = null;
     return this.latestReport;
   }
 
+  getTradingSelection(): TradingSelection { return this.selection.get(); }
+  getAvailableTickers(): string[] { return this.selection.availableTickers(); }
+  selectTradingStrategy(id: string, expectedRevision: number): void { this.selection.selectStrategy(id, expectedRevision); this.latestReport = null; }
+  selectTradingAssets(tickers: string[], expectedRevision: number): void { this.selection.selectAssets(tickers, expectedRevision); this.latestReport = null; }
+
+  invalidateSourceReport(): void { this.latestReport = null; }
+
   async scanOnce(now = new Date()): Promise<IntradayScanEvent[]> {
+    if (this.scanning) return [];
+    this.scanning = true;
+    const started = performance.now();
+    let release: (() => void) | undefined;
+    try { release = this.acquireSourceLease?.(); return await this.scanWithSource(now,started); }
+    catch {
+      this.latestReport = null;
+      const event:IntradayScanEvent = {instrumentId:'scanner',observedAt:now.toISOString(),status:'error',reasons:['Сканирование недоступно; проверь настройки и источник данных']};
+      await this.emit(event); return [event];
+    } finally { release?.(); this.scanning = false; }
+  }
+
+  private async scanWithSource(now: Date, started:number): Promise<IntradayScanEvent[]> {
     if (this.isPaused()) {
       const event: IntradayScanEvent = {
         instrumentId: 'scanner',
@@ -229,15 +211,18 @@ export class IntradayScanner {
       return [event];
     }
 
+    const selection = this.selection.get();
     let snapshot: IntradayUniverseSnapshot;
     try {
-      snapshot = await this.universe.getSnapshot(now);
+      snapshot = await this.universe.getSnapshot(now, selection.tickers);
+      snapshot = {...snapshot, instruments:snapshot.instruments.filter(instrument => selection.tickers.includes(instrument.ticker.toUpperCase()))};
     } catch (error: unknown) {
+      this.latestReport = null;
       const event: IntradayScanEvent = {
         instrumentId: 'universe',
         observedAt: now.toISOString(),
         status: 'error',
-        reasons: [error instanceof Error ? error.message : 'Unable to refresh intraday universe'],
+        reasons: ['Каталог инструментов недоступен. Проверь соединение и read-only доступ брокера'],
       };
       await this.emit(event);
       return [event];
@@ -251,6 +236,8 @@ export class IntradayScanner {
         reasons: ['Intraday universe contains no eligible instruments'],
       };
       this.latestReport = {
+        strategyId:selection.strategyId, selectionRevision:selection.revision,
+        recommendations:selection.tickers.map(ticker => this.emptyRecommendation(ticker,'','blocked',['Инструмент не разрешён брокером или недоступен в выбранном каталоге'])),
         observedAt: now.toISOString(),
         universe: {
           source: snapshot.source,
@@ -278,7 +265,7 @@ export class IntradayScanner {
       this.config.scanner.maxConcurrentRequests,
       async (instrument) => {
         try {
-          return await this.scanInstrument(instrument, now);
+          return await this.scanInstrument(instrument, new Date(now.getTime()+performance.now()-started), selection);
         } catch (error: unknown) {
           const ranking: IntradayMarketRanking = {
             ticker: instrument.ticker,
@@ -288,9 +275,10 @@ export class IntradayScanner {
             relativeVolume: null,
             averageCandleTurnoverRub: null,
             candidateReady: false,
-            reasons: [error instanceof Error ? error.message : 'Unknown scanner error'],
+            reasons: ['Данные инструмента недоступны или не прошли проверку'],
           };
           return {
+            recommendation: this.emptyRecommendation(instrument.ticker, instrument.instrumentId, 'error', ranking.reasons),
             ranking,
             liquid: false,
             trendUp: false,
@@ -307,6 +295,10 @@ export class IntradayScanner {
       },
     );
 
+    // A choice made while requests were pending must not publish/queue the old signal.
+    if (!this.selection.isCurrent(selection) || this.isPaused()) { this.latestReport = null; return []; }
+    // A fast worker's signal/quotes can expire while another instrument is awaited.
+    for (const result of results) this.refreshCandidate(result, new Date(now.getTime()+performance.now()-started));
     const candidates = results
       .flatMap((result) => (result.candidate ? [result.candidate] : []))
       .sort((left, right) => right.ranking.score - left.ranking.score);
@@ -333,11 +325,19 @@ export class IntradayScanner {
         });
         continue;
       }
-      events.push(this.recordCandidate(candidate, now));
+      if (!this.selection.isCurrent(selection) || this.isPaused()) { this.latestReport = null; return []; }
+      const publicationNow = new Date(now.getTime()+performance.now()-started);
+      if (!this.refreshCandidate(result,publicationNow)) { events.push(result.event!); continue; }
+      events.push(this.recordCandidate(candidate, publicationNow, selection));
     }
 
     this.latestReport = {
-      observedAt: now.toISOString(),
+      strategyId: selection.strategyId,
+      selectionRevision: selection.revision,
+      recommendations: [...results.map(result => result.recommendation), ...selection.tickers
+        .filter(ticker => !snapshot.instruments.some(instrument => instrument.ticker.toUpperCase() === ticker))
+        .map(ticker => this.emptyRecommendation(ticker, '', 'blocked', ['Инструмент не разрешён брокером или недоступен в выбранном каталоге']))],
+      observedAt: new Date(now.getTime()+performance.now()-started).toISOString(),
       universe: {
         source: snapshot.source,
         refreshedAt: snapshot.refreshedAt,
@@ -350,7 +350,7 @@ export class IntradayScanner {
       trendUp: results.filter((result) => result.trendUp).length,
       volumeConfirmed: results.filter((result) => result.volumeConfirmed).length,
       readyForMarketCheck: results.filter((result) => result.readyForMarketCheck).length,
-      marketCandidates: candidates.length,
+      marketCandidates: results.filter(result=>result.candidate).length,
       recordedCandidates: events.filter((event) => event.status === 'candidate-recorded').length,
       errors: results.filter((result) => result.event?.status === 'error').length,
       topRanked: results
@@ -400,9 +400,15 @@ export class IntradayScanner {
   private async scanInstrument(
     instrument: ResolvedIntradayInstrument,
     now: Date,
+    selection: TradingSelection,
   ): Promise<InstrumentScanResult> {
+    const started = performance.now();
+    const currentTime = () => new Date(now.getTime()+performance.now()-started);
     const observedAt = now.toISOString();
-    const from = new Date(now.getTime() - this.config.scanner.lookbackMinutes * 60_000).toISOString();
+    const msk = new Date(now.getTime()+3*60*60_000);
+    const reference = Date.UTC(msk.getUTCFullYear(),msk.getUTCMonth(),msk.getUTCDate())-3*60*60_000+this.config.scanner.sessionStartMinutes*60_000;
+    const from = new Date(Math.min(now.getTime() - this.config.scanner.lookbackMinutes * 60_000,
+      selection.strategyId === 'trend-momentum-v1' ? now.getTime() : reference-250*60_000)).toISOString();
     const candles = await this.client.getCandles({
       instrumentId: instrument.instrumentId,
       from,
@@ -411,28 +417,15 @@ export class IntradayScanner {
     });
     const candleAnalysis = analyzeCandles(candles);
     const averageTurnoverRub = averageCandleTurnoverRub(candleAnalysis, instrument);
-    const readiness = readinessReasons({
-      candleAnalysis,
-      averageTurnoverRub,
-      minTurnoverRub: this.config.scanner.minAverageCandleTurnoverRub,
-    });
     const ranking: IntradayMarketRanking = {
       ticker: instrument.ticker,
       instrumentId: instrument.instrumentId,
-      score: scoreScreening({
-        candleAnalysis,
-        averageTurnoverRub,
-        minTurnoverRub: this.config.scanner.minAverageCandleTurnoverRub,
-      }),
+      score: 0,
       trend: candleAnalysis.trend,
       relativeVolume: candleAnalysis.relativeVolume,
       averageCandleTurnoverRub: averageTurnoverRub === null ? null : round(averageTurnoverRub),
-      candidateReady: readiness.length === 0,
-      reasons: screeningReasons({
-        candleAnalysis,
-        averageTurnoverRub,
-        minTurnoverRub: this.config.scanner.minAverageCandleTurnoverRub,
-      }),
+      candidateReady: false,
+      reasons: [],
     };
     const liquid =
       averageTurnoverRub !== null &&
@@ -440,52 +433,51 @@ export class IntradayScanner {
     const trendUp = candleAnalysis.trend === 'up';
     const volumeConfirmed =
       candleAnalysis.relativeVolume !== null && candleAnalysis.relativeVolume >= 1;
-
-    if (readiness.length > 0) {
+    const recommendation = this.emptyRecommendation(instrument.ticker,instrument.instrumentId,'wait',[]);
+    recommendation.score = ranking.score;
+    recommendation.lotCostRub = candleAnalysis.latestClose === null ? null : round(candleAnalysis.latestClose*instrument.lotSize);
+    recommendation.roundTripCostsRub = recommendation.lotCostRub === null ? null : round(recommendation.lotCostRub*2*(this.config.commissionRate+this.config.scanner.slippageRate));
+    const finish = (status:AssetRecommendation['status'], reasons:string[], readyForMarketCheck:boolean, candidate?:CandidateEvaluation):InstrumentScanResult => {
+      recommendation.status=status; recommendation.reasons=[...reasons];
+      ranking.candidateReady=Boolean(candidate); ranking.reasons=[...reasons];
       return {
-        ranking,
-        liquid,
-        trendUp,
-        volumeConfirmed,
-        readyForMarketCheck: false,
-        event: {
-          instrumentId: instrument.instrumentId,
-          observedAt,
-          status: 'skipped',
-          reasons: readiness,
-        },
+        ranking, recommendation, liquid, trendUp, volumeConfirmed, readyForMarketCheck,
+        ...(candidate ? {candidate} : {event:{instrumentId:instrument.instrumentId,observedAt,status:'skipped' as const,reasons}}),
       };
-    }
+    };
+    if (!liquid) return finish('blocked',[`Оборот ниже порога ${formatRub(this.config.scanner.minAverageCandleTurnoverRub)}`],false);
 
     const orderBook = await this.client.getOrderBook(instrument.instrumentId, 20);
-    const proposal = proposeIntradayLong({
+    const signalInput: Omit<TradingSignalInput,'now'> = {
+      strategyId:selection.strategyId,
+      candlesPayload:candles,
       candleAnalysis,
       orderBookPayload: orderBook,
       priceStep: instrument.priceStep,
       commissionRate: this.config.commissionRate,
       slippageRate: this.config.scanner.slippageRate,
-    });
-    if (!proposal) {
-      return {
-        ranking,
-        liquid,
-        trendUp,
-        volumeConfirmed,
-        readyForMarketCheck: true,
-        event: {
-          instrumentId: instrument.instrumentId,
-          observedAt,
-          status: 'skipped',
-          reasons: ['Не удалось построить план входа по текущему стакану'],
-        },
-      };
-    }
+      sessionStartMinutes:this.config.scanner.sessionStartMinutes,
+    };
+    let evaluation = evaluateTradingSignal({...signalInput,now:currentTime()});
+    let proposal = evaluation.proposal;
+    // This describes deterministic condition coverage, never a win probability.
+    ranking.score = (evaluation.dataValid?30:0) + (liquid?20:0) + (evaluation.signal?30:0) + (volumeConfirmed?20:0);
+    recommendation.score = ranking.score;
+    if (!proposal) return finish(!evaluation.dataValid || evaluation.reasons.some(reason=>/расход|стакан|отношение/.test(reason)) ? 'blocked' : 'wait',evaluation.reasons,false);
 
     const [lastPrices, tradingStatus] = await Promise.all([
       this.client.getLastPrices([instrument.instrumentId]),
       this.client.getTradingStatus(instrument.instrumentId),
     ]);
+    evaluation = evaluateTradingSignal({...signalInput,now:currentTime()});
+    proposal = evaluation.proposal;
+    ranking.score = (evaluation.dataValid?30:0) + (liquid?20:0) + (evaluation.signal?30:0) + (volumeConfirmed?20:0);
+    recommendation.score = ranking.score;
+    if (!proposal) return finish('blocked',evaluation.reasons,false);
     const limits = this.config.strategies.intraday;
+    try {
+      this.assertFreshQuotes(instrument,orderBook,tradingStatus,lastPrices,currentTime());
+    } catch { return finish('blocked',['Свежесть, принадлежность инструменту или доступный объём котировок не подтверждены'],true); }
     const tradePlan = calculateTradePlan({
       side: 'long',
       entryPrice: proposal.entryPrice,
@@ -497,6 +489,20 @@ export class IntradayScanner {
       maxRiskRub: limits.maxRiskRub,
       maxPositionRub: limits.maxPositionRub,
     });
+    if (this.config.livePilot.prepare && tradePlan.lots > 0) {
+      const pilotRisk = assessLivePilotRisk(this.config.livePilot, {
+        side: 'long', entryPrice: proposal.entryPrice, stopPrice: proposal.stopPrice,
+        targetPrice: proposal.targetPrice, lotSize: instrument.lotSize, lots: tradePlan.lots,
+        commissionRate: this.config.commissionRate, slippageRate: this.config.scanner.slippageRate,
+        availableCashRub: this.config.livePilot.capitalRub,
+        reservedDailyRiskRub: 0, realizedDailyLossRub: 0, markedOpenLossRub: 0,
+      });
+      tradePlan.allowed = tradePlan.allowed && pilotRisk.allowed;
+      tradePlan.reasons.push(...pilotRisk.blockers);
+      tradePlan.totalRiskRub = Math.max(tradePlan.totalRiskRub, pilotRisk.totalRiskRub);
+      tradePlan.netRewardRub = Math.min(tradePlan.netRewardRub, pilotRisk.netRewardRub);
+      tradePlan.rewardToRisk = tradePlan.netRewardRub / tradePlan.totalRiskRub;
+    }
     const assessment = assessTradeScenario({
       side: 'long',
       entryPrice: proposal.entryPrice,
@@ -508,35 +514,60 @@ export class IntradayScanner {
       lastPricesPayload: lastPrices,
       orderBookPayload: orderBook,
       tradingStatusPayload: tradingStatus,
+      signalConfirmed: true,
     });
-
-    if (assessment.decision !== 'candidate') {
-      return {
-        ranking,
-        liquid,
-        trendUp,
-        volumeConfirmed,
-        readyForMarketCheck: true,
-        event: {
-          instrumentId: instrument.instrumentId,
-          observedAt,
-          status: 'skipped',
-          reasons: [...proposal.reasons, ...assessment.blockers, ...assessment.warnings],
-        },
-      };
+    recommendation.lotCostRub=round(proposal.entryPrice*instrument.lotSize);
+    recommendation.roundTripCostsRub=round(tradePlan.estimatedCommissionRub+tradePlan.estimatedSlippageRub);
+    recommendation.totalRiskRub=tradePlan.totalRiskRub;
+    recommendation.netRewardRub=tradePlan.netRewardRub;
+    recommendation.entryPrice=proposal.entryPrice; recommendation.stopPrice=proposal.stopPrice; recommendation.targetPrice=proposal.targetPrice;
+    if (assessment.market.bestAskQuantity === null || assessment.market.bestAskQuantity < tradePlan.lots) {
+      assessment.blockers.push('На лучшей цене покупки недостаточно лотов'); assessment.decision='blocked';
     }
 
-    return {
-      ranking,
-      liquid,
-      trendUp,
-      volumeConfirmed,
-      readyForMarketCheck: true,
-      candidate: { instrument, ranking, candleAnalysis, proposal, tradePlan, assessment },
-    };
+    if (assessment.decision !== 'candidate') {
+      return finish('blocked',[...proposal.reasons,...assessment.blockers,...assessment.warnings],true);
+    }
+
+    return finish('signal',proposal.reasons,true,{instrument,ranking,candleAnalysis,proposal,tradePlan,assessment,
+      signalInput,lastPricesPayload:lastPrices,tradingStatusPayload:tradingStatus});
   }
 
-  private recordCandidate(candidate: CandidateEvaluation, now: Date): IntradayScanEvent {
+  private assertFreshQuotes(instrument:ResolvedIntradayInstrument,orderBook:unknown,tradingStatus:unknown,lastPrices:unknown,now:Date):void {
+    sandboxBidValue(orderBook,tradingStatus,instrument.instrumentId,1,instrument.lotSize,now);
+    const prices = (lastPrices as {lastPrices?:{instrumentUid?:unknown;time?:unknown;price?:Quotation}[]}).lastPrices;
+    const price = prices?.length===1 ? prices[0] : undefined;
+    const age = typeof price?.time === 'string' ? now.getTime()-Date.parse(price.time) : NaN;
+    if (price?.instrumentUid!==instrument.instrumentId || !Number.isFinite(age) || age < -1000 || age > 60_000 || quotationToNumber(price?.price)===null) throw new Error();
+  }
+
+  private refreshCandidate(result:InstrumentScanResult,now:Date):boolean {
+    const candidate = result.candidate;
+    if (!candidate) return false;
+    const evaluation = evaluateTradingSignal({...candidate.signalInput,now});
+    let reasons:string[] = evaluation.proposal ? [] : evaluation.reasons;
+    if (!reasons.length) {
+      try { this.assertFreshQuotes(candidate.instrument,candidate.signalInput.orderBookPayload,
+        candidate.tradingStatusPayload,candidate.lastPricesPayload,now); }
+      catch { reasons=['Свежесть, принадлежность инструменту или доступный объём котировок не подтверждены']; }
+    }
+    if (!reasons.length) return true;
+    delete result.candidate;
+    result.readyForMarketCheck=false;
+    result.ranking.candidateReady=false;
+    result.ranking.score=(evaluation.dataValid?30:0)+(result.liquid?20:0)+(result.volumeConfirmed?20:0);
+    result.ranking.reasons=[...reasons];
+    Object.assign(result.recommendation,{status:'blocked',reasons:[...reasons],score:result.ranking.score,
+      entryPrice:null,stopPrice:null,targetPrice:null,totalRiskRub:null,netRewardRub:null});
+    result.event={instrumentId:candidate.instrument.instrumentId,observedAt:now.toISOString(),status:'skipped',reasons:[...reasons]};
+    return false;
+  }
+
+  private emptyRecommendation(ticker:string,instrumentId:string,status:AssetRecommendation['status'],reasons:string[]):AssetRecommendation {
+    return {ticker,instrumentId,status,reasons,score:0,lotCostRub:null,roundTripCostsRub:null,totalRiskRub:null,netRewardRub:null,entryPrice:null,stopPrice:null,targetPrice:null};
+  }
+
+  private recordCandidate(candidate: CandidateEvaluation, now: Date, selection:TradingSelection): IntradayScanEvent {
     const observedAt = now.toISOString();
     const since = new Date(
       now.getTime() - this.config.scanner.candidateCooldownMinutes * 60_000,
@@ -546,6 +577,7 @@ export class IntradayScanner {
         strategy: 'intraday',
         instrumentId: candidate.instrument.instrumentId,
         since,
+        selectionRevision:selection.revision,
       })
     ) {
       return {
@@ -573,10 +605,20 @@ export class IntradayScanner {
       warnings: candidate.assessment.warnings,
       snapshot: {
         source: 'intraday-scanner',
+        tradingSelection: selection,
+        tradingStrategy: {id:selection.strategyId,version:'1',referenceStartMinutes:this.config.scanner.sessionStartMinutes},
+        sandboxTargetExitPolicy: {
+          version:'1', enabled:this.config.execution.sandboxTargetExitEnabled === true,
+          commissionRateNano:decimalPriceNano(Math.max(0.003,this.config.commissionRate)),
+          slippageRateNano:this.config.scanner.slippageRate === 0 ? '0' : decimalPriceNano(this.config.scanner.slippageRate),
+        },
         instrument: {
           ticker: candidate.instrument.ticker,
           label: candidate.instrument.label,
           name: candidate.instrument.name,
+          instrumentId:candidate.instrument.instrumentId,
+          lotSize:candidate.instrument.lotSize,
+          priceStep:candidate.instrument.priceStep,
         },
         screening: candidate.ranking,
         proposal: candidate.proposal,

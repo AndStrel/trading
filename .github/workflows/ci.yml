@@ -21,12 +21,32 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run build
-      - run: docker build --build-arg INSTALL_TINVEST_CA=false --tag andstrel/trading:ci .
+      - name: Verify non-trading profile maintenance safeguards
+        run: python3 -m unittest discover -s ops -p 'test_*.py'
+      - run: docker build --build-arg INSTALL_TINVEST_CA=false --build-arg APP_REVISION=${{ github.sha }} --tag andstrel/trading:ci .
       - name: Verify PNG rendering in the hardened runtime
         run: |
           docker run --rm --network none --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
             andstrel/trading:ci npm run smoke:candidate-card
+      - name: Verify read-only sandbox arming in the hardened runtime
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
+            andstrel/trading:ci npm run smoke:sandbox-arming
+      - name: Verify selectable strategies offline in the hardened runtime
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
+            andstrel/trading:ci npm run smoke:strategy-bot
+      - name: Verify immutable catalog source reads in the hardened runtime
+        run: |
+          docker run --rm --network none --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
+            andstrel/trading:ci npm run smoke:catalog-source
       - name: Verify Telegram bot command surface offline
         run: |
           docker run --rm --network none --read-only \
