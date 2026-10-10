@@ -1,0 +1,5 @@
+# SBERP reversal v1: temporal-integrity amendment
+
+The initial frozen protocol inadvertently required the *future* following week's first session to be within 14 days of the entry week. This cannot be known at entry and made the first result look-ahead biased. The old report is superseded, not silently overwritten as if it had always been valid.
+
+Corrected entry eligibility uses only the two already completed weeks and the current week first session: each of the two known adjacent first-session gaps must be at most 14 calendar days. The following week's existence or distance is **not** an entry condition. Once opened, exit at the first observed weekday session of the next observed calendar week, even if a long trading suspension has intervened; report the realized holding duration and highlight such events. The dataset's final week remains censored because its exit is outside the research window. All other frozen parameters and costs stay unchanged. Recalculate all outcomes and gates; do not count the prior result as evidence.

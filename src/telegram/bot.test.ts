@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -276,6 +276,126 @@ describe('TelegramTradingBot', () => {
     expect(sent).toHaveLength(2);
     expect(sent[0]?.text).toContain('паузу');
     expect(sent[1]?.text).toContain('Сканер: пауза');
+  });
+
+  it('lists paper commands in help', async () => {
+    const journal = createJournal();
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      TELEGRAM_ALLOWED_CHAT_IDS: '42',
+    });
+    const sent: string[] = [];
+    const client: TelegramClient = {
+      getUpdates: async () => [{ update_id: 1, message: { chat: { id: 42 }, text: '/help' } }],
+      sendMessage: async (_chatId, text) => {
+        sent.push(text);
+      },
+      sendPhoto: async () => undefined,
+    };
+    const scanner = { isPaused: () => false, pause: () => undefined, resume: () => undefined };
+    const bot = new TelegramTradingBot(config, client, scanner, journal, () => undefined);
+    await bot.pollOnce();
+    expect(sent[0]).toContain('/paper');
+    expect(sent[0]).toContain('/dual');
+    expect(sent[0]).toContain('/sleeve');
+  });
+
+  it('reports paper dual momentum from mounted snapshot files', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'andstrel-paper-snapshots-'));
+    temporaryDirectories.push(directory);
+    const rows = [
+      { day: '2022-01-03', open: 100, high: 100, low: 100, close: 100, volume: 1 },
+      { day: '2022-01-04', open: 101, high: 101, low: 101, close: 101, volume: 1 },
+    ];
+    const snapshot = { rowsSha256: 'test', rows };
+    for (const name of ['sbmx', 'sbgb', 'sbmm']) {
+      writeFileSync(join(directory, `${name}-daily-2021-2025.json`), JSON.stringify(snapshot));
+    }
+    const previous = process.env.T_INVEST_PAPER_SNAPSHOT_DIR;
+    process.env.T_INVEST_PAPER_SNAPSHOT_DIR = directory;
+    const journal = createJournal();
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      TELEGRAM_ALLOWED_CHAT_IDS: '42',
+    });
+    const sent: string[] = [];
+    const client: TelegramClient = {
+      getUpdates: async () => [{ update_id: 1, message: { chat: { id: 42 }, text: '/dual' } }],
+      sendMessage: async (_chatId, text) => {
+        sent.push(text);
+      },
+      sendPhoto: async () => undefined,
+    };
+    const scanner = { isPaused: () => false, pause: () => undefined, resume: () => undefined };
+    const bot = new TelegramTradingBot(config, client, scanner, journal, () => undefined);
+    try {
+      await bot.pollOnce();
+    } finally {
+      if (previous === undefined) delete process.env.T_INVEST_PAPER_SNAPSHOT_DIR;
+      else process.env.T_INVEST_PAPER_SNAPSHOT_DIR = previous;
+    }
+    expect(sent[0]).toContain('Paper dual momentum');
+    expect(sent[0]).toContain('Заявок брокеру нет');
+  });
+
+  it('combines sleeve and dual momentum in /paper', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'andstrel-paper-summary-'));
+    temporaryDirectories.push(directory);
+    const rows = [
+      { day: '2022-01-03', open: 100, high: 100, low: 100, close: 100, volume: 1 },
+      { day: '2022-01-04', open: 101, high: 101, low: 101, close: 101, volume: 1 },
+    ];
+    const snapshot = { rowsSha256: 'test', rows };
+    for (const name of ['sbmx', 'sbgb', 'sbmm']) {
+      writeFileSync(join(directory, `${name}-daily-2021-2025.json`), JSON.stringify(snapshot));
+    }
+    const previous = process.env.T_INVEST_PAPER_SNAPSHOT_DIR;
+    process.env.T_INVEST_PAPER_SNAPSHOT_DIR = directory;
+    const journal = createJournal();
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      TELEGRAM_ALLOWED_CHAT_IDS: '42',
+    });
+    const sent: string[] = [];
+    const client: TelegramClient = {
+      getUpdates: async () => [{ update_id: 1, message: { chat: { id: 42 }, text: '/paper' } }],
+      sendMessage: async (_chatId, text) => {
+        sent.push(text);
+      },
+      sendPhoto: async () => undefined,
+    };
+    const scanner = { isPaused: () => false, pause: () => undefined, resume: () => undefined };
+    const bot = new TelegramTradingBot(config, client, scanner, journal, () => undefined);
+    try {
+      await bot.pollOnce();
+    } finally {
+      if (previous === undefined) delete process.env.T_INVEST_PAPER_SNAPSHOT_DIR;
+      else process.env.T_INVEST_PAPER_SNAPSHOT_DIR = previous;
+    }
+    expect(sent[0]).toContain('Admitted paper-only');
+    expect(sent[0]).toContain('Paper cash sleeve: не открыт');
+    expect(sent[0]).toContain('Paper dual momentum');
+  });
+
+  it('reports an empty paper cash sleeve without contacting the broker', async () => {
+    const journal = createJournal();
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      TELEGRAM_ALLOWED_CHAT_IDS: '42',
+    });
+    const sent: string[] = [];
+    const client: TelegramClient = {
+      getUpdates: async () => [{ update_id: 1, message: { chat: { id: 42 }, text: '/sleeve' } }],
+      sendMessage: async (_chatId, text) => {
+        sent.push(text);
+      },
+      sendPhoto: async () => undefined,
+    };
+    const scanner = { isPaused: () => false, pause: () => undefined, resume: () => undefined };
+    const bot = new TelegramTradingBot(config, client, scanner, journal, () => undefined);
+    await bot.pollOnce();
+    expect(sent[0]).toContain('Paper cash sleeve: не открыт');
+    expect(sent[0]).toContain('Заявок брокеру нет');
   });
 
   it('returns the last market scan with counts and ranked near-misses', async () => {
@@ -729,6 +849,98 @@ describe('TelegramTradingBot', () => {
     expect(answers).toEqual([{ callbackId: 'callback-1', text: 'Проверяю и отправляю…' }]);
     expect(submitScenario).toHaveBeenCalledWith(17, '42');
     expect(sent[0]).toContain('Sandbox-заявка #17');
+  });
+
+  it('covers resume, execution, orders, candidates, reject, and open sleeve replies', async () => {
+    const journal = createJournal();
+    journal.openPaperCashSleeve({
+      instrumentId: 'figi-lqdt',
+      principal: 1_000_000,
+      openPrice: 100,
+      day: '2025-01-06',
+    });
+    journal.markPaperCashSleeve({ markPrice: 105, day: '2025-06-30' });
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      TELEGRAM_ALLOWED_CHAT_IDS: '42',
+    });
+    const sent: string[] = [];
+    let paused = true;
+    const updates: TelegramUpdate[] = [
+      { update_id: 1, message: { chat: { id: 42 }, text: '/resume' } },
+      { update_id: 2, message: { chat: { id: 42 }, text: '/execution' } },
+      { update_id: 3, message: { chat: { id: 42 }, text: '/orders' } },
+      { update_id: 4, message: { chat: { id: 42 }, text: '/candidates' } },
+      { update_id: 5, message: { chat: { id: 42 }, text: '/reject 9' } },
+      { update_id: 6, message: { chat: { id: 42 }, text: '/sleeve' } },
+    ];
+    const client: TelegramClient = {
+      getUpdates: async () => updates.splice(0, 1),
+      sendMessage: async (_chatId, text) => {
+        sent.push(text);
+      },
+      sendPhoto: async () => undefined,
+    };
+    const scanner = {
+      isPaused: () => paused,
+      pause: () => {
+        paused = true;
+      },
+      resume: () => {
+        paused = false;
+      },
+    };
+    const rejectScenario = vi.fn();
+    const execution = {
+      mode: () => 'sandbox',
+      isConfigured: () => true,
+      isReady: () => true,
+      isKilled: () => false,
+      armSandbox: vi.fn(),
+      kill: vi.fn(),
+      queueScenario: vi.fn(),
+      rejectScenario,
+      listRecent: () => [
+        {
+          id: 1,
+          scenarioId: 3,
+          mode: 'sandbox' as const,
+          status: 'pending' as const,
+          instrumentId: 'sber',
+          side: 'long' as const,
+          lots: 2,
+          limitPrice: 250.5,
+          estimatedRiskRub: 1200,
+          orderRequestId: 'req-1',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      submitScenario: vi.fn(),
+      reconcileScenario: vi.fn(),
+    };
+    const bot = new TelegramTradingBot(
+      config,
+      client,
+      scanner,
+      journal,
+      () => undefined,
+      async () => new Uint8Array(),
+      execution,
+    );
+
+    for (let index = 0; index < 6; index += 1) {
+      await bot.pollOnce();
+    }
+
+    expect(paused).toBe(false);
+    expect(sent[0]).toContain('Сканер снова активен');
+    expect(sent[1]).toContain('Исполнение: sandbox');
+    expect(sent[2]).toContain('Последние sandbox-поручения');
+    expect(sent[2]).toContain('#3');
+    expect(sent[3]).toContain('intraday-кандидатов');
+    expect(rejectScenario).toHaveBeenCalledWith(9, '42');
+    expect(sent[5]).toContain('Paper cash sleeve LQDT: открыт');
   });
 
 });

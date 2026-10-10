@@ -47,3 +47,8 @@ jobs:
             --security-opt no-new-privileges:true \
             --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
             andstrel/trading:ci npm run smoke:catalog-source
+      - name: Verify Telegram bot command surface offline
+        run: |
+          docker run --rm --network none --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m,mode=1777 \
+            andstrel/trading:ci npm run smoke:telegram-bot

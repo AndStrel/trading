@@ -24,7 +24,28 @@ describe('calculateTradePlan', () => {
     expect(plan.totalRiskRub).toBe(448);
     expect(plan.netRewardRub).toBe(1_152);
     expect(plan.rewardToRisk).toBe(2.57);
+    expect(plan.plannedGrossMovePct).toBe(5);
+    expect(plan.breakEvenGrossPct).toBeGreaterThan(0);
     expect(plan.allowed).toBe(true);
+  });
+
+  it('rejects an Investor-tariff target that cannot clear multiplicative round-trip costs', () => {
+    const plan = calculateTradePlan({
+      side: 'long',
+      entryPrice: 300,
+      stopPrice: 295,
+      targetPrice: 301,
+      lotSize: 10,
+      maxRiskRub: 50_000,
+      maxPositionRub: 50_000,
+      commissionRate: 0.003,
+      slippageRate: 0.0005,
+      minimumRewardToRisk: 0,
+    });
+    expect(plan.plannedGrossMovePct).toBe(0.3333);
+    expect(plan.breakEvenGrossPct).toBeCloseTo(0.70246, 4);
+    expect(plan.allowed).toBe(false);
+    expect(plan.reasons).toContain('Planned gross move does not clear modeled round-trip costs');
   });
 
   it('rejects a plan with insufficient net reward-to-risk', () => {

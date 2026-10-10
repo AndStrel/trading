@@ -1,0 +1,5 @@
+# TRUR 2025 source checkpoint — timestamps only
+
+The [TRUR intraday v1 protocol](TRUR_INTRADAY_V1.md) was frozen before price outcomes. Public MOEX ISS TRUR/TQTF one-minute trade candles, 10:00–17:00 MSK, were cached for all 261 ordinary weekdays in 2025. The ignored source manifest `.trading/trur-2025-source.json` has SHA-256 `e5128b98d3d9f2252300156de49128744ff1e32de7736ce1bfedec84e255fd56`; each compressed day is hash-checked on read.
+
+Only timestamps and row counts were inspected here. Of 261 weekdays, 253 have any print and 171 have all 421 minute candles. The fixed 10:01–10:03 entry window contains a print on **247** active days; 16:55–17:00 exit window on **244**; both on **238**. Thus 6 active days cancel entry and **9 entered days lack an observed exit print**. Missing prints do not prove absent standing quotes or unfillable orders, but the frozen trade-print rule fails its zero-unresolved-exit gate. Do not score 238/238 observable pairs as if missing exits were known before entry.

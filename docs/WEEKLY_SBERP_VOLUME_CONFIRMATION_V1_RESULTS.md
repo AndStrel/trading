@@ -1,0 +1,11 @@
+# SBERP volume-confirmed continuation v1: early-period result
+
+**Rejected in discovery.** The [rule](WEEKLY_SBERP_VOLUME_CONFIRMATION_V1.md) was frozen before testing, SHA-256 `cd1e576e278c7463b2371ee823f7f8dc62335ccfd3fd804ee0ad773b31d3fd71`. Full result: `.trading/weekly-sberp-volume-confirmation-v1-early.json`. Source: 1,862 validated MOEX ISS security-level SBERP daily rows, 2007–2014, row SHA-256 `d57ac049daa6b5c3e5219e7553fe2b1403762d1a9e4d00ebce5373f1f31e0eaf`. The rule used only completed prior-week prices and volume; tests show later prices/volume do not change an earlier entry decision. No 2026 data or real orders were used.
+
+After assumed 0.3% commission and 0.05% slippage per side, 16 of 30 completed trades won net (**53.33%**), but only 45 of 97 marked active weeks were positive (**46.39%**). The sample is far below 100 trades. Mean net trade return was +7.91%, profit factor 2.67, and modeled equity grew from ₽1m to ₽1.441m; however, those attractive aggregates are overwhelmingly due to 2009. Without the five best trades, the sum of completed-trade returns is **−81.86 percentage points**. Maximum marked drawdown was 20.61%.
+
+In 2009, 12 of 14 trades won and the mean was +24.20%. Every other entry year from 2008 through 2014 had a negative mean trade return, including two losing trades in 2008 averaging −22.72%. Thus the annual consistency, positive-week, trade-count, and concentration gates all fail. A headline >51% trade-win rate is not sufficient evidence of a persistent weekly edge.
+
+The predeclared unchanged-rule 2015–2025 diagnostic was also run: `.trading/weekly-sberp-volume-confirmation-v1-later.json`. It found **20 winners in 41 completed trades (48.78%)**, mean net **−2.556%**, profit factor **0.501**, and modeled ending equity **₽0.793m**. Although 84 of 157 active marked weeks were positive (53.50%), the completed trades and capital outcome failed. The 2020–2022 cohort had only 3 winners in 12 trades and −11.39% mean net; there were no entries in 2016. Thus both periods reject this mechanism, and the later data do not rehabilitate the failed early discovery.
+
+No volume multiplier or holding period should be retuned on these years. Dividend adjustment, actual tariff and execution, market impact, and lot-size effects remain unmodeled; the candidate does not warrant further execution work.

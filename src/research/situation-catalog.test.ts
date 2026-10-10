@@ -24,6 +24,18 @@ function candles(count: number, start = '2025-01-02T07:00:00.000Z'): HistoricalM
 }
 
 describe('research situation catalog', () => {
+  it('does not change features when only future candles change', () => {
+    const input = candles(120);
+    const metadata = { instrumentId: 'instrument-uid', ticker: 'TEST', sourceYear: 2025, sourceArchiveSha256: 'a'.repeat(64) };
+    const original = buildResearchSituations(input, metadata)[0]!;
+    const changed = input.map((candle, index) => index <= 30 ? candle : {
+      ...candle, open: candle.open * 2, high: candle.high * 2, low: candle.low * 2,
+      close: candle.close * 2, volume: candle.volume * 2,
+    });
+    const rebuilt = buildResearchSituations(changed, metadata)[0]!;
+    expect(rebuilt.featureVector).toEqual(original.featureVector);
+    expect(rebuilt.outcomes).not.toEqual(original.outcomes);
+  });
   it('builds past-only features and separate forward outcomes', () => {
     const result = buildResearchSituations(
       candles(120),

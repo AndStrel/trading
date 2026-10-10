@@ -29,8 +29,19 @@ export type TradePlan = {
   grossRewardRub: number;
   netRewardRub: number;
   rewardToRisk: number;
+  plannedGrossMovePct: number;
+  breakEvenGrossPct: number;
   reasons: string[];
 };
+
+export function roundTripBreakEvenGrossPct(commission: number, slippage: number): number {
+  if (![commission, slippage].every((value) => Number.isFinite(value) && value >= 0 && value < 1)) {
+    throw new Error('Invalid cost rates');
+  }
+  return (
+    ((1 + slippage) * (1 + commission) / ((1 - slippage) * (1 - commission)) - 1) * 100
+  );
+}
 
 export function calculateTradePlan(input: TradePlanInput): TradePlan {
   const { entryPrice, stopPrice, targetPrice, lotSize, maxRiskRub, maxPositionRub } = input;
@@ -82,9 +93,14 @@ export function calculateTradePlan(input: TradePlanInput): TradePlan {
   const grossRewardRub = rewardPerUnit * units;
   const netRewardRub = grossRewardRub - estimatedCommissionRub - estimatedSlippageRub;
   const rewardToRisk = totalRiskRub > 0 ? netRewardRub / totalRiskRub : 0;
+  const plannedGrossMovePct = (rewardPerUnit / entryPrice) * 100;
+  const breakEvenGross = roundTripBreakEvenGrossPct(input.commissionRate, input.slippageRate);
   const reasons: string[] = [];
 
   if (lots === 0) reasons.push('No whole lot fits the configured risk and position limits');
+  if (plannedGrossMovePct <= breakEvenGross) {
+    reasons.push('Planned gross move does not clear modeled round-trip costs');
+  }
   if (rewardToRisk < minimumRewardToRisk) {
     const formattedMinimum = minimumRewardToRisk === 2 ? '2.0' : String(minimumRewardToRisk);
     reasons.push(`Net reward-to-risk is below ${formattedMinimum}`);
@@ -103,6 +119,8 @@ export function calculateTradePlan(input: TradePlanInput): TradePlan {
     grossRewardRub: roundMoney(grossRewardRub),
     netRewardRub: roundMoney(netRewardRub),
     rewardToRisk: Math.round(rewardToRisk * 100) / 100,
+    plannedGrossMovePct: Math.round(plannedGrossMovePct * 10000) / 10000,
+    breakEvenGrossPct: Math.round(breakEvenGross * 10000) / 10000,
     reasons,
   };
 }

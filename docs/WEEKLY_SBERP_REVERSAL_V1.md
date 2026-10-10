@@ -1,0 +1,9 @@
+# Frozen protocol: weekly SBERP reversal v1
+
+Local historical research only; no orders. Hypothesis: a sufficiently weak completed week in SBERP is followed by a positive *next* week often enough to cover execution costs. This uses a different mechanism from long-term trend and SBER/SBERP relative strength.
+
+Source: verified MOEX ISS TQBR SBERP daily open/close bars for 2015–2025. Keep 2026 untouched. Filter exchange weekend sessions. For each observed Monday-to-Sunday week, record its last weekday close. At the first observed session of a new week, compare the last close of the immediately preceding observed week with the last close of the week before it. If the completed prior week returned **at most −1.5%**, buy SBERP at the current week's first open. Exit at the first observed session's open in the following week. Require each adjacent observed week to be no more than 14 calendar days apart; otherwise skip. One position at a time, allocate available cash, no leverage. No stop or optional exit. Skip the initial warmup and any signal whose next-week exit is outside the dataset.
+
+Costs: 0.3% commission plus 0.05% slippage **per side**, stress 0.1% slippage per side. Compare with a weekly always-long control using exactly the same holding/exit and costs. Include a marked portfolio weekly audit and 2016–2019, 2020–2022, 2023–2025 cohorts. Do not tune the −1.5% threshold or holding period after observing results.
+
+Minimum research gate: at least 100 completed entries in 50 distinct weeks, at least 51% net-winning trades and 51% positive active portfolio weeks, positive mean net return, profit factor above 1, positive sum of returns excluding the best five trades, positive mean net return in each traded year and each cohort, and no unobserved year. Even if this exploratory gate passes, independent confirmation, dividend/corporate-action adjustments, and execution verification are still needed before trading.

@@ -1,0 +1,12 @@
+# Si after US-open continuation v1 — rejected after costs
+
+The [rule and costs](SI_US_SESSION_CONTINUATION_V1.md) and [rejection-only missing-exit bound](SI_US_SESSION_MISSING_EXIT_BOUND_PROTOCOL.md) were written before this candidate's price outcomes were calculated. The [timestamp-only checkpoint](SI_2026_EVENING_SOURCE_CHECKPOINT.md) used hash-checked existing daytime and new evening MOEX ISS exact-contract archives. Their manifests have SHA-256 `ed8c32be0f099e8caeb8d773b6edaa7cac08e397c326fe2135ba810e56c36b74` and `f009a75d32eea6665e42abd14088c66b11d75e95f7644c2c4970f8bbb5d79a02`. Reproduce with `npm run build` and `node dist/research-si-us-session-continuation.js`; ignored full machine report `.trading/si-us-session-continuation-v1.json` SHA-256 `b85f6061ec1f23c487ccdf5ad7f531dedcf2a0bc7bbd10da853bb306d0644ba5`.
+
+The selected period has 133 ordinary weekdays with complete 16:30–16:59 signal minutes and exact 17:01 entry candles. All generated nonzero signals. There are **132 printed 22:00 exits** and **one unresolved exit** (11 June), which remains in the denominator of 133 attempted trades. The fixed 51% screen requires **68** net winners.
+
+- Before costs, 73 of 132 completed print-proxy trades were winners (55.3%), with +0.0426% mean gross **on completed trades only**.
+- With the conditional Investor futures commission 0.10% per side and base 0.05% adverse execution per side, only **29 completed trades** were net winners. Even awarding the unknown exit a win gives an upper bound of **30/133 = 22.6%**. Completed-only mean base net was −0.2574% per trade.
+- Under stress execution (0.10% adverse per side), the optimistic upper bound is **19/133 = 14.3%**, and completed-only mean stress net was −0.3574%.
+- Base optimistic upper bounds by contract are SiM6 14/57 (24.6%), SiU6 14/65 (21.5%), and SiZ6 2/11 (18.2%). Neither long nor short side reaches the bar.
+
+**Decision:** reject this precise 17:01–22:00 continuation rule. The one unresolved exit independently fails the zero-unresolved gate, but even the impossible favorable assignment cannot approach 51% after expenses. The 2026 archive was used for other project research, so this result is exploratory, not a fresh holdout. The completed-only mean is descriptive and must not be mistaken for an unbiased all-attempt return. Historical candles do not provide executable quotes, an intraday stop, or margin, tax and fill evidence. No orders were placed.

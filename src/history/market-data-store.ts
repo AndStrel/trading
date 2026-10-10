@@ -349,6 +349,10 @@ export class MarketDataStore {
       deleteOtherTickerCandles.run(input.year, input.ticker, input.year, input.instrumentId);
       deleteOtherTickerImports.run(input.ticker, input.year, input.instrumentId);
       deleteOtherTickerResearch.run(input.ticker, input.year, input.instrumentId);
+      // A corrected source invalidates its derived features/labels atomically.
+      database.prepare(`DELETE FROM research_situations
+        WHERE instrument_id = ? AND source_year = ? AND source_archive_sha256 <> ?`)
+        .run(input.instrumentId, input.year, input.archiveSha256);
       // A renewed archive is authoritative for its full calendar year. Removing its prior
       // rows inside the same transaction prevents stale rows from surviving a correction.
       deletePriorArchive.run(input.instrumentId, input.year);

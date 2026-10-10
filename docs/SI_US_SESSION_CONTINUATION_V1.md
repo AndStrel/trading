@@ -1,0 +1,13 @@
+# Si after US-open continuation v1 — exploratory fixed rule
+
+Research only; no orders. During the selected 2026-03-23 through 2026-09-25 period, US equity cash trading begins at 16:30 MSK on ordinary US trading days. Hypothesis: a 16:30–16:59 USD/RUB futures move may continue into the Moscow evening session. This is a mechanism to test, not a claim of causality or predictable profits; some Russian weekdays are US holidays. The 2026 Si archive has already been used for other hypotheses, so this is exploratory and requires a later independent period even if it passes.
+
+Use the existing hash-checked MOEX ISS RFUD exact-contract 10:00–17:00 minute archive and fetch an additional 17:00–22:00 minute archive for the same predetermined ordinary weekday dates and contracts from `si2026DaySpecs`. Exclude the two previously verified special-session dates, 2026-05-01 and 2026-06-12. Never stitch contract price levels across dates. Before calculating returns, report timestamp coverage and source hashes.
+
+Require all 30 completed 16:30–16:59 signal minutes. At 17:00, set direction from `close(16:59)/open(16:30)-1`: strictly positive → long, strictly negative → short, exactly zero → cash. Enter at the **17:01 minute open** and close at the **22:00 minute open** on the same date. Missing signal history is a data gap; missing entry cancels; missing exit is unresolved and fails admission. Do not learn future exit availability when deciding the entry. One position per eligible day, no leverage assumed in return calculations and no overnight carry. There is no stop, so passing this screen would not yet be an executable risk-controlled strategy.
+
+Apply the published T-Investments Investor futures commission assumption 0.10% of notional **per side**, plus adverse slippage 0.05% per side in base and 0.10% in stress. Reuse the `siTradeReturn` long/short accounting from the prior Si protocol. Report gross only to decompose costs. Source minute opens are not historical executable bid/ask quotes.
+
+Screen gate: at least 100 completed trades on 50 dates; zero unresolved exits or unexplained data gaps; at least 51% strictly positive base and stress net trades; positive base and stress mean for each contract and the full set; positive base/stress sum after removing five best dates. Even a pass requires independently fixed 2027/forward validation, live spread/fill and margin-risk checks, tax review and an actual fee quote before any order.
+
+Sources: [MOEX ISS](https://www.moex.com/a2920), [T-Investments futures trading](https://www.tbank.ru/invest/help/brokerage/account/forts/trade-futures/).

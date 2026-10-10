@@ -55,7 +55,7 @@ export const DEFAULT_REPLAY_PHASES: readonly ReplayPhase[] = [
   },
   {
     id: 'out_of_sample',
-    label: 'Out-of-sample holdout (untouched)',
+    label: 'Historical holdout (2025 already examined)',
     from: '2025-11-01',
     to: '2025-12-31',
   },
@@ -130,7 +130,7 @@ export type ReplayTrade = {
   targetPrice: number;
   exitMarketPrice: number;
   exitFillPrice: number;
-  /** Market-price excursion before the modeled exit, excluding fees and slippage. */
+  /** Lower-bound market excursion; stop/target exit-minute extremes are unknown. */
   maxAdverseExcursionRub: number;
   maxFavorableExcursionRub: number;
   maxAdverseExcursionR: number;
@@ -635,23 +635,30 @@ function simulateExit(input: {
   };
 }
 
-function calculateExcursions(input: {
+export function calculateExcursions(input: {
   entryIndex: number;
   exitIndex: number;
-  session: readonly PreparedMinuteCandle[];
+  session: readonly Pick<HistoricalMinuteCandle, 'open' | 'high' | 'low'>[];
   entryMarketPrice: number;
+  exitMarketPrice: number;
+  exitReason: ReplayExitReason;
 }): { maxAdverseExcursionPrice: number; maxFavorableExcursionPrice: number } {
   let maxAdverseExcursionPrice = 0;
   let maxFavorableExcursionPrice = 0;
   for (let index = input.entryIndex; index <= input.exitIndex; index += 1) {
     const candle = input.session[index]!;
+    const fullMinute = index < input.exitIndex || input.exitReason === 'time_exit' || input.exitReason === 'session_exit';
+    // Intrabar ordering is unknowable. For level/open exits include only the
+    // observed open and modeled fill, not extrema possibly reached after exit.
+    const low = fullMinute ? candle.low : Math.min(candle.open, input.exitMarketPrice);
+    const high = fullMinute ? candle.high : Math.max(candle.open, input.exitMarketPrice);
     maxAdverseExcursionPrice = Math.max(
       maxAdverseExcursionPrice,
-      input.entryMarketPrice - candle.low,
+      input.entryMarketPrice - low,
     );
     maxFavorableExcursionPrice = Math.max(
       maxFavorableExcursionPrice,
-      candle.high - input.entryMarketPrice,
+      high - input.entryMarketPrice,
     );
   }
   return { maxAdverseExcursionPrice, maxFavorableExcursionPrice };
@@ -849,6 +856,8 @@ function buildCandidates(
         exitIndex: exit.exitIndex,
         session,
         entryMarketPrice,
+        exitMarketPrice: exit.exitMarketPrice,
+        exitReason: exit.exitReason,
       });
 
       candidates.push({
@@ -1283,9 +1292,10 @@ export function replayVwapPullback(input: ReplayInput): ReplayReport {
     ),
   );
   const warnings = [
+    'MAE/MFE are lower bounds: for stop, target and gap exits only the exit-minute open and modeled fill are included; intrabar extrema may occur after exit.',
     'The archive has OHLCV candles, not bid/ask quotes or actual fills; adverse per-side slippage is a model, not a measurement.',
     'The replay is long-only, uses no leverage, and permits at most one executed trade per ticker per Moscow session.',
-    'A positive development or validation result does not validate the strategy. Interpret the untouched out-of-sample result separately.',
+    'A positive development or validation result does not validate the strategy. The 2025 holdout has already been examined and is not an independent test for new variants.',
   ];
   if (data.some((item) => item.minuteCandleCount === 0)) {
     warnings.push('At least one requested instrument has no minute candles; do not compare partial-universe results.');

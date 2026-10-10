@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { HistoricalMinuteCandle } from '../history/market-data-store.js';
 import {
   DEFAULT_REPLAY_PARAMETERS,
+  calculateExcursions,
   roundDownToStep,
   roundUpToStep,
   replayVwapPullback,
@@ -87,6 +88,27 @@ function syntheticArchive(): HistoricalMinuteCandle[] {
 }
 
 describe('replayVwapPullback', () => {
+  it.each([
+    ['stop', 99, 1, 0],
+    ['target', 102, 0, 2],
+    ['data_gap', 100, 0, 0],
+    ['time_exit', 100, 10, 10],
+    ['session_exit', 100, 10, 10],
+  ] as const)('bounds exit-minute excursions for %s', (exitReason, exitMarketPrice, adverse, favorable) => {
+    expect(calculateExcursions({
+      entryIndex: 0, exitIndex: 0,
+      session: [{ open: 100, high: 110, low: 90 }],
+      entryMarketPrice: 100, exitMarketPrice, exitReason,
+    })).toEqual({ maxAdverseExcursionPrice: adverse, maxFavorableExcursionPrice: favorable });
+  });
+
+  it('retains prior-minute extrema and actual gap-open stop prices', () => {
+    expect(calculateExcursions({
+      entryIndex: 0, exitIndex: 1,
+      session: [{ open: 100, high: 103, low: 99.5 }, { open: 98, high: 120, low: 90 }],
+      entryMarketPrice: 100, exitMarketPrice: 98, exitReason: 'stop',
+    })).toEqual({ maxAdverseExcursionPrice: 2, maxFavorableExcursionPrice: 3 });
+  });
   it('accepts a lazy instrument iterable for bounded-memory archive replays', () => {
     function* instruments(): Generator<{ instrument: typeof instrument; candles: HistoricalMinuteCandle[] }> {
       yield { instrument, candles: syntheticArchive() };

@@ -4,7 +4,8 @@ import {
   RESEARCH_DATASET_VERSION,
   RESEARCH_OUTCOME_HORIZONS_MINUTES,
 } from './research/situation-catalog.js';
-import { MarketDataStore, type HistoricalMinuteCandle } from './history/market-data-store.js';
+import { MarketDataStore } from './history/market-data-store.js';
+import { qualitySummary } from './research/data-quality.js';
 
 type ResearchCatalogCliOptions = {
   years: number[];
@@ -92,36 +93,6 @@ export function parseResearchCatalogArgs(args: string[]): ResearchCatalogCliOpti
   };
 }
 
-function minuteGap(left: string, right: string): number {
-  return (Date.parse(right) - Date.parse(left)) / 60_000;
-}
-
-function qualitySummary(
-  candles: readonly HistoricalMinuteCandle[],
-  rawRowCount: number,
-  invalidRowCount: number,
-  duplicateRowCount: number,
-) {
-  let largestGapMinutes = 0;
-  let oneMinuteGapCount = 0;
-  for (let index = 1; index < candles.length; index += 1) {
-    const gap = minuteGap(candles[index - 1]!.time, candles[index]!.time);
-    if (gap === 1) oneMinuteGapCount += 1;
-    largestGapMinutes = Math.max(largestGapMinutes, gap);
-  }
-  return {
-    rawRowCount,
-    invalidRowCount,
-    duplicateRowCount,
-    invalidRate: rawRowCount === 0 ? 0 : invalidRowCount / rawRowCount,
-    storedCandleCount: candles.length,
-    firstCandleAt: candles[0]?.time ?? null,
-    lastCandleAt: candles.at(-1)?.time ?? null,
-    largestGapMinutes,
-    oneMinuteGapCount,
-  };
-}
-
 async function main(): Promise<void> {
   const options = parseResearchCatalogArgs(process.argv.slice(2));
   if (options.help) {
@@ -135,30 +106,41 @@ async function main(): Promise<void> {
   const requestedTickers = new Set(options.tickers);
   let archiveCount = 0;
   let catalogedSituations = 0;
+  let rejectedArchives = 0;
 
   for (const year of options.years) {
     const archives = store
       .listArchiveImports(year)
       .filter((archive) => archive.ticker !== null && (requestedTickers.size === 0 || requestedTickers.has(archive.ticker)));
+    if (archives.length === 0) throw new Error(`No imported historical archives for requested year ${year}`);
+    for (const ticker of requestedTickers) {
+      if (archives.filter((archive) => archive.ticker === ticker).length !== 1) {
+        throw new Error(`Expected exactly one source archive for ${ticker}/${year}; refusing missing or mixed-source coverage`);
+      }
+    }
 
     for (const archive of archives) {
       archiveCount += 1;
       const candles = store.listMinuteCandles({
         instrumentId: archive.instrumentId,
-        from: `${year}-01-01T00:00:00.000Z`,
-        to: `${year + 1}-01-01T00:00:00.000Z`,
+        from: new Date(`${year}-01-01T00:00:00+03:00`).toISOString(),
+        to: new Date(`${year + 1}-01-01T00:00:00+03:00`).toISOString(),
       });
       const quality = qualitySummary(
         candles,
         archive.rawRowCount,
         archive.invalidRowCount,
         archive.duplicateRowCount,
+        year,
       );
-      if (archive.ticker === null || candles.length === 0) {
+      if (archive.ticker === null || quality.blockers.length > 0) {
+        rejectedArchives += 1;
+        store.replaceResearchSituations({ datasetVersion: RESEARCH_DATASET_VERSION,
+          instrumentId: archive.instrumentId, sourceYear: year, situations: [] });
         console.log(
           JSON.stringify({
             status: 'skipped',
-            reason: 'empty-archive',
+            reason: 'quality-blockers',
             ticker: archive.ticker,
             year,
             source: archive.source,
@@ -188,6 +170,9 @@ async function main(): Promise<void> {
         sourceYear: year,
         situations,
       });
+      if (situations.length === 0) {
+        throw new Error(`No contiguous research situations for ${archive.ticker}/${year}; catalog is not complete`);
+      }
       catalogedSituations += situations.length;
       console.log(
         JSON.stringify({
@@ -197,6 +182,7 @@ async function main(): Promise<void> {
           year,
           source: archive.source,
           datasetVersion: RESEARCH_DATASET_VERSION,
+          archiveSha256: archive.archiveSha256,
           situations: situations.length,
           quality,
         }),
@@ -208,6 +194,7 @@ async function main(): Promise<void> {
     const suffix = options.tickers.length > 0 ? `: ${options.tickers.join(', ')}` : '';
     throw new Error(`No imported historical archives matched the research catalog request${suffix}`);
   }
+  if (rejectedArchives > 0) throw new Error(`${rejectedArchives} archive(s) failed quality checks; catalog is not complete`);
   console.log(
     JSON.stringify({
       status: 'complete',

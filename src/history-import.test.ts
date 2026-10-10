@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseHistoryImportArgs, resolveHistorySourceForTicker } from './history-import.js';
+import { assertImportQuality, parseHistoryImportArgs, resolveHistorySourceForTicker } from './history-import.js';
+
+describe('historical import quality gate', () => {
+  it('never treats partial or duplicate source data as a successful import', () => {
+    expect(() => assertImportQuality(0, 0)).not.toThrow();
+    expect(() => assertImportQuality(58, 0)).toThrow('Archive quality failed');
+    expect(() => assertImportQuality(0, 1)).toThrow('Archive quality failed');
+  });
+});
 
 describe('parseHistoryImportArgs', () => {
   it('accepts repeatable years and an optional ticker subset', () => {

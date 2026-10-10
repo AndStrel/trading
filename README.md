@@ -52,3 +52,5 @@ npm run build
 ```
 
 Полный указатель: [документация](docs/DOCUMENTATION.md). Текущий план обновления и выполненные пункты: [BOT_REFRESH_PLAN](docs/BOT_REFRESH_PLAN.md). Исторические исследования, replay и rejected-гипотезы находятся в отдельном разделе указателя и не заменяют инструкцию рабочего запуска.
+
+Отдельный research-контур (без сети и без заявок): `docker compose --profile research up -d --build research`. Качество минутных архивов, `situation-v2` и зафиксированные отрицательные эксперименты: [ROADMAP](docs/ROADMAP.md), [DATA_QUALITY_CHECKPOINT](docs/DATA_QUALITY_CHECKPOINT.md), [RESEARCH_DATASET](docs/RESEARCH_DATASET.md).

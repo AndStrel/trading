@@ -1,0 +1,9 @@
+# Si 11:01-entry oracle ceiling — limited room, no strategy
+
+The [diagnostic protocol](SI_1101_ENTRY_ORACLE_CEILING_PROTOCOL.md) was fixed before calculation. Reproduce offline with `npm run build` and `node dist/research-si-entry-oracle-ceiling.js`. The complete ignored report `.trading/si-1101-entry-oracle-ceiling.json` has SHA-256 `3374488c2c49edd26fd269cb4a7e44ff43c6704d4c43f88d8308f95db5ad8e21`.
+
+All 133 ordinary dates have the full required signal, entry and future exit-minute window. With the Investor-fee/base-slippage model, an impossible future-aware exit at the best minute high/low gives **84/133 = 63.16%** strictly positive net days for each fixed direction: first-hour continuation and first-hour reversal. Under 0.10% adverse slippage per side, only **69/133 = 51.88%** of days are oracle-net-positive for each direction. The mean base oracle returns are +0.1747% (continuation) and +0.2130% (reversal), which are unattainable upper bounds, not expected returns.
+
+The fixed 51% screen requires at least **68/133** real net-winning days. At base costs, this is at least 68 of the 84 oracle-winnable days (80.95%); at stressed slippage it is 68 of 69 (98.55%). Realistic exits must also withstand unavailable high/low fills, true spread, latency, market impact and costs. Therefore the 11:01 fixed entry is not *mathematically ruled out* by this diagnostic, but a robust same-day rule would need unusually precise exit selection. The actual predeclared first-hour reversal and previous continuation tests did not come close. Do not search this same sample for the best exit minute and call it validated.
+
+Next: prioritize a genuinely predictive entry mechanism or a different instrument/session, and secure new contemporaneous bid/ask data. This ceiling does not prove a strategy, live executable prices, or permission to trade. No orders were placed.

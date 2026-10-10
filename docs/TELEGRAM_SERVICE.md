@@ -36,7 +36,20 @@
 - `/reject ID` — отклонить подготовленную sandbox-заявку;
 - `/reconcile ID` — сверить исход sandbox-заявки и связанный выход без повторной отправки;
 - `/kill` — запретить новые отправки заявок;
-- `/help` — справка.
+- `/help` — справка;
+- `/paper` — сводка admitted paper-стратегий (кэш LQDT/SBMM + dual momentum);
+- `/sleeve` — локальный paper cash sleeve LQDT/SBMM (журнал, без заявок брокеру);
+- `/dual` — paper dual momentum SBMX/SBGB/SBMM (локальный сигнал, без заявок брокеру).
+
+Для `/dual` и `/paper` контейнер монтирует `./.trading` только для чтения (`T_INVEST_PAPER_SNAPSHOT_DIR=/app/.trading`). Обновляйте снимки на хосте:
+
+```bash
+npm run build && npm run research:refresh-paper-daily
+# или на сервере без локального Node:
+docker compose --profile maintenance run --rm paper-daily-refresh
+```
+
+Снимки — те же файлы `sbmx-daily-2021-2025.json` и т.д., внутри могут быть строки за 2026; admission dual momentum по-прежнему зафиксирован на 2022–2025. После обновления MOEX, если `research:sbmx-sbgb-sbmm-dual-momentum` падает с «Frozen … source changed», пересчитайте ворота на 2022–2025 и обновите константы в `src/research/paper-daily-frozen-source.ts`. Команды `/dual` и `/paper` читают снимки без hash-pin и продолжают работать.
 
 Реальные заявки недоступны. В режиме `sandbox` бот готовит поручение автоматически, но отправляет его после команды `/approve ID CONFIRM` или кнопки подтверждения конкретной карточки. Вход — лимитная FOK-заявка, без маржи и short. Для sandbox реализованы отдельно включаемые защитный стоп, контроль дневного убытка и закрытие в конце сессии; неизвестный исход или неисполненный выход сохраняют блокировку и требуют сверки. Если PNG-карточка не отрендерилась или не отправилась, бот отправляет короткий текстовый fallback.
 
@@ -44,6 +57,8 @@
 после изменения настройки применить нельзя: необходимо открыть `/strategies`
 заново. Смена стратегии или активов аннулирует прежний проход и требует свежих
 рекомендаций; сохранённая карточка прежней ревизии не допускается к новому входу.
+
+Офлайн-проверка всех slash-команд без токена и сети: `npm run build && npm run smoke:telegram-bot` (также в CI). После деплоя workflow `Deploy Telegram service` автоматически запускает тот же smoke через `docker compose run … node dist/telegram-bot-smoke.js` (нужен свежий образ с `dist/telegram-bot-smoke.js`).
 
 ## Первый запуск
 
@@ -176,3 +191,20 @@ docker compose down
 ```
 
 `docker compose down` не удаляет журнал. Команда `docker compose down -v` удалит Docker volume с историей — её использовать нельзя без проверенной резервной копии.
+
+### Обновление paper-снимков (будни)
+
+После закрытия MOEX, чтобы `/dual` и `/paper` не зависали в `stale` дольше, чем позволяет ISS:
+
+```bash
+cd /opt/andstrel/trading   # или корень репозитория
+docker compose --profile maintenance run --rm paper-daily-refresh
+```
+
+Пример cron на сервере (UTC, ~19:05 после вечерней сессии):
+
+```cron
+5 19 * * 1-5 cd /opt/andstrel/trading && docker compose --profile maintenance run --rm paper-daily-refresh >>/var/log/andstrel-paper-daily.log 2>&1
+```
+
+Deploy через GitHub Actions уже вызывает `paper-daily-refresh` после `docker compose up`.

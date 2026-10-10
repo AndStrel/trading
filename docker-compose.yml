@@ -6,12 +6,15 @@ services:
       context: .
       dockerfile: Dockerfile
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       T_INVEST_JOURNAL_PATH: /app/data/journal.sqlite
       T_INVEST_MARKET_DATA_PATH: /app/data/market-data.sqlite
+      T_INVEST_PAPER_SNAPSHOT_DIR: /app/.trading
     volumes:
       - trading-journal:/app/data
+      - ./.trading:/app/.trading:ro
       - ${T_INVEST_LOCAL_RELAY_DIR:-./.trading/relay}:/run/relay:ro
     ports:
       - "127.0.0.1:8088:8080"
@@ -24,6 +27,117 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+
+  # Local-only research sandbox. It has no network, no broker credentials and
+  # can read/write only the bind-mounted research database and reports.
+  research:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_TINVEST_CA: "false"
+    profiles:
+      - research
+    environment:
+      NODE_ENV: production
+      T_INVEST_MARKET_DATA_PATH: /app/.trading/market-data.sqlite
+    volumes:
+      - ./.trading:/app/.trading
+      - ./docs:/app/docs:ro
+      - ./src:/app/src:ro
+    command: ["sleep", "infinity"]
+    restart: "no"
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  # Host cron or deploy hook: refresh MOEX daily JSON for Telegram /dual (network required).
+  paper-daily-refresh:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_TINVEST_CA: "false"
+    profiles:
+      - maintenance
+    environment:
+      T_INVEST_PAPER_SNAPSHOT_DIR: /app/.trading
+    volumes:
+      - ./.trading:/app/.trading
+    command:
+      - sh
+      - -c
+      - node dist/research-import-sbmx-daily.js && node dist/research-import-sbgb-daily.js && node dist/research-import-sbmm-daily.js && node dist/research-sbmx-sbgb-sbmm-dual-momentum.js
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  # Opt-in read-only MOEX quote observation. No .env, broker token, or order API.
+  quote-capture:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_TINVEST_CA: "false"
+    profiles:
+      - quotes
+    environment:
+      NODE_ENV: production
+      QUOTE_TICKER: TMON
+      QUOTE_SAMPLES: "1"
+    volumes:
+      - ./.trading/quotes:/app/.trading/quotes
+    command: ["node", "dist/research-moex-stock-quote-scheduler.js"]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  # Opt-in TMON@/SPBRU market-data only. Uses a separate read-only token
+  # mounted as a secret; no .env, account endpoints, or order API are used.
+  spbru-quote-capture:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_TINVEST_CA: "true"
+    profiles:
+      - spbru-quotes
+    environment:
+      NODE_ENV: production
+    secrets:
+      - tinvest_readonly_token
+    volumes:
+      - ./.trading/quotes-spbru:/app/.trading/quotes-spbru
+    command: ["node", "dist/research-spbru-quote-scheduler.js"]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+secrets:
+  tinvest_readonly_token:
+    file: ./.trading/secrets/tinvest-readonly-token
 
 volumes:
   trading-journal:

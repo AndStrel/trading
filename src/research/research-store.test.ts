@@ -30,6 +30,25 @@ function candles(count: number) {
 }
 
 describe('research catalog storage', () => {
+  it('invalidates derived situations when the same instrument archive is corrected', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'andstrel-research-correction-test-'));
+    directories.push(directory);
+    const store = new MarketDataStore(join(directory, 'market-data.sqlite'));
+    const source = { instrumentId: 'instrument-uid', ticker: 'TEST', year: 2025,
+      archiveSha256: 'a'.repeat(64), candles: candles(120), rawRowCount: 120,
+      invalidRowCount: 0, lotSize: 1, priceStep: 0.01 };
+    store.importMinuteArchive(source);
+    const situations = buildResearchSituations(source.candles, {
+      instrumentId: source.instrumentId, ticker: source.ticker,
+      sourceYear: source.year, sourceArchiveSha256: source.archiveSha256,
+    });
+    store.replaceResearchSituations({ datasetVersion: 'situation-v2', instrumentId: source.instrumentId,
+      sourceYear: source.year, situations });
+    store.importMinuteArchive(source);
+    expect(store.countResearchSituations({ datasetVersion: 'situation-v2' })).toBe(situations.length);
+    store.importMinuteArchive({ ...source, archiveSha256: 'b'.repeat(64) });
+    expect(store.countResearchSituations({ datasetVersion: 'situation-v2' })).toBe(0);
+  });
   it('replaces one archive catalog and searches only before the target', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'andstrel-research-store-test-'));
     directories.push(directory);
@@ -143,8 +162,8 @@ describe('research catalog storage', () => {
     const situations = Array.from({ length: 5_005 }, (_, index) => {
       const observedAt = new Date(Date.parse('2024-01-01T07:00:00.000Z') + index * 60_000).toISOString();
       return {
-        situationId: `situation-v1/test-${index}`,
-        datasetVersion: 'situation-v1',
+        situationId: `situation-v2/test-${index}`,
+        datasetVersion: 'situation-v2',
         instrumentId: 'instrument-uid',
         ticker: 'TEST',
         sessionDate: '2024-01-01',
@@ -170,13 +189,13 @@ describe('research catalog storage', () => {
     });
 
     store.replaceResearchSituations({
-      datasetVersion: 'situation-v1',
+      datasetVersion: 'situation-v2',
       instrumentId: 'instrument-uid',
       sourceYear: 2024,
       situations,
     });
     const neighbors = store.findSimilarResearchSituations({
-      datasetVersion: 'situation-v1',
+      datasetVersion: 'situation-v2',
       featureVector: [5_004],
       before: '2025-01-01T00:00:00.000Z',
       limit: 3,

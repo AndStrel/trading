@@ -1,0 +1,16 @@
+# TMON v2: correction for the observed kopeck price grid
+
+This is a **post-result execution-cost sensitivity**, not a new signal or strategy. The original [fixed rule and result](TMON_INTRADAY_CARRY_V2_RESULTS.md) used a provisional 0.000001-RUB price increment. On 2026-09-28, both the read-only T-Invest ETF instrument record for TMON/TQBR and the [current MOEX security metadata](https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/TMON.json?iss.meta=off&iss.only=securities&securities.columns=SECID,BOARDID,MINSTEP,DECIMALS,LOTSIZE,PREVPRICE) reported a **0.01-RUB minimum increment** and one unit per lot.
+
+The hash-verified local trade-candle archives contain **zero off-cent OHLC values** among 111,856 prices in 2025 and 91,380 in 2026 through 25 September. These are repeated candle fields, not independent market observations. Current metadata and the price grid do not independently prove every historical exchange tick rule, but they make the provisional microtick too favorable for an execution sensitivity.
+
+The audit script `node dist/research-tmon-v2-cent-tick-audit.js` verifies the untouched original report SHA-256 `c0c1653d656109896499268c2807dcaf83ab3a3a5b8dec110effe717d8e55f90`, reads **exactly the same 336 completed entry/exit price pairs**, retains the zero-brokerage assumption and the original 0.005%/side base and 0.010%/side stress adverse allowances, then rounds each modeled buy up and sell down to 0.01 RUB. It does not change signals, dates, missing-exit handling or slippage percentages. The original default calculation remains identical for all 336 trades. Ignored machine report: `.trading/tmon-v2-cent-tick-audit.json`, SHA-256 `dfb932035115b458b0f26ea6646381ce42ced9622ffe8736268c6aaf6ea30ee9`.
+
+| Period | Original base wins / mean | Cent-tick base wins / mean | Cent-tick stress wins / mean |
+| --- | ---: | ---: | ---: |
+| 2025 | 82/184 (44.6%), −0.0111% | **78/184 (42.4%), −0.0155%** | 63/184 (34.2%), −0.0299% |
+| 2026 through 25 September | 54/152 (35.5%), −0.0071% | **48/152 (31.6%), −0.0099%** | 31/152 (20.4%), −0.0226% |
+
+Thus correcting the price grid makes this already-rejected unconditional same-day rule worse. It does **not** imply that live orders always lose a full tick on each side: passive orders, queue position, spread, partial fills and changing liquidity remain unmeasured. Neither the original nor corrected trade-print proxy authorizes an order. No order was placed.
+
+Separate execution routing: the current read-only T-Invest **TMON/TQBR** instrument record reports `apiTradeAvailableFlag=false`, but **TMON@/SPBRU** (the same ISIN `RU000A106DL2`, a different trading mode and position UID) reports `true`. [T-Invest's API documentation](https://developer.tbank.ru/invest/services/instruments/head-instruments) defines that flag as API trade availability. On 2026-09-28 at 19:42 MSK, read-only T-Invest calls reported normal trading for TMON@/SPBRU and a recent one-level book of bid 165.06 RUB / ask 165.07 RUB, exchange timestamp 16:41:55 UTC; no order was sent. One snapshot does not establish a persistent spread, fill or fee, and the MOEX/TQBR candle backtest must **not** be relabeled as a SPBRU execution backtest. Venue-specific quotes and settlement/position behavior must be checked separately before any future candidate is considered.

@@ -1,0 +1,7 @@
+# TMON@/SPBRU 2025 opening-hour exploration — not a strategy
+
+The frozen raw T-Invest exchange-hour archive was used to inspect **all** weekday paths from the 10:00 MSK open print to every hourly open from 11:00 to 23:00. This is post-hoc exploration, not an independent strategy test or a reason to optimize exit time. Reproduce with `npm run build` and `node dist/research-tmon-spbru-opening-diagnostic.js`; full ignored report `.trading/tmon-spbru-opening-diagnostic-2025.json` has SHA-256 `f1f013c1a301076925e1510ee8f0d67ba8b4c81b9dc14a7c82bb847182fdf274`.
+
+There are 218 weekdays in scope; the 11:00 exit pair is absent on one date, all later exit pairs are present. The 10:00→11:00 average *gross* change was +0.00897%, but only 104/217 dates had a positive print change. At every exit hour, applying one adverse 0.01-RUB tick per side and preliminary zero brokerage left a **negative mean** and no more than **41/218** strictly positive net outcomes (18.8%). The least-negative observed net mean was −0.00157% at the 22:00 exit, with only 39/218 net winners. Selecting that hour after this scan would be data snooping, not validation.
+
+Interpretation: a modest opening repricing appears in these trade prints, but the tested 10:00-open family has no visible margin over the two-tick round-trip allowance on 2025 data. Historical hourly opens are not executable quotes; fees, tax, liquidity, queue and live filling remain unverified. This diagnostic does not test every conditional TMON@ strategy and authorizes no order.

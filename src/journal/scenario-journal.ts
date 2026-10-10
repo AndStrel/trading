@@ -3,6 +3,15 @@ import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import type { ExecutionMode, Strategy } from '../config.js';
+import {
+  applyLqdtSleeve,
+  assertMoneyMarketSleeveTicker,
+  emptyLqdtSleeve,
+  LQDT_SLEEVE_DEFAULT_COSTS,
+  type LqdtSleeveEvent,
+  type LqdtSleeveState,
+  type MoneyMarketSleeveTicker,
+} from '../domain/lqdt-cash-sleeve.js';
 import { riskBudgetFits } from '../execution/live-pilot-risk.js';
 import { assertSnapshotProgress, type SandboxOrderSnapshot } from '../execution/sandbox-order-state.js';
 import { decimalPriceNano, nativeStopKey, type NativeStopKey, type SandboxStopIntent, type SandboxStopObservation } from '../execution/sandbox-stop-state.js';
@@ -131,6 +140,40 @@ export type ExecutionOrderInput = Omit<
   ExecutionOrderRecord,
   'id' | 'status' | 'brokerOrderId' | 'approvedByChatId' | 'createdAt' | 'updatedAt' | 'detail'
 >;
+
+export type PaperCashSleeveRecord = {
+  book: string;
+  ticker: MoneyMarketSleeveTicker;
+  instrumentId: string;
+  role: 'cash_sleeve';
+  state: LqdtSleeveState;
+  updatedAt: string;
+  openedAt?: string;
+  closedAt?: string;
+  closeNote?: string;
+};
+
+type PaperCashSleeveRow = {
+  book: string;
+  ticker: MoneyMarketSleeveTicker;
+  instrument_id: string;
+  role: 'cash_sleeve';
+  status: 'empty' | 'open';
+  cash: number;
+  principal: number | null;
+  units: number | null;
+  entry_day: string | null;
+  entry_price: number | null;
+  last_mark_day: string | null;
+  last_mark_price: number | null;
+  marked_equity: number | null;
+  commission_rate: number;
+  slippage_rate: number;
+  opened_at: string | null;
+  updated_at: string;
+  closed_at: string | null;
+  close_note: string | null;
+};
 
 type JournalRow = {
   id: number | bigint;
@@ -323,6 +366,28 @@ const schema = `
 
   CREATE INDEX IF NOT EXISTS execution_events_order_created
     ON execution_events(execution_order_id, created_at ASC);
+
+  CREATE TABLE IF NOT EXISTS paper_cash_sleeves (
+    book TEXT PRIMARY KEY,
+    ticker TEXT NOT NULL CHECK(ticker IN ('LQDT', 'SBMM')),
+    instrument_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role = 'cash_sleeve'),
+    status TEXT NOT NULL CHECK(status IN ('empty', 'open')),
+    cash REAL NOT NULL CHECK(cash > 0),
+    principal REAL,
+    units REAL,
+    entry_day TEXT,
+    entry_price REAL,
+    last_mark_day TEXT,
+    last_mark_price REAL,
+    marked_equity REAL,
+    commission_rate REAL NOT NULL,
+    slippage_rate REAL NOT NULL,
+    opened_at TEXT,
+    updated_at TEXT NOT NULL,
+    closed_at TEXT,
+    close_note TEXT
+  ) STRICT;
 
   CREATE TABLE IF NOT EXISTS execution_evidence (
     execution_order_id INTEGER PRIMARY KEY REFERENCES execution_orders(id),
@@ -780,6 +845,71 @@ export class ScenarioJournal {
     } finally {
       database.close();
     }
+  }
+
+  getPaperCashSleeve(book = 'default'): PaperCashSleeveRecord | null {
+    const database = this.open();
+    try {
+      const row = database.prepare('SELECT * FROM paper_cash_sleeves WHERE book = ?').get(book) as
+        | PaperCashSleeveRow
+        | undefined;
+      return row ? this.toPaperCashSleeve(row) : null;
+    } finally {
+      database.close();
+    }
+  }
+
+  openPaperCashSleeve(input: {
+    book?: string;
+    ticker?: string;
+    instrumentId: string;
+    principal: number;
+    openPrice: number;
+    day: string;
+  }): PaperCashSleeveRecord {
+    const book = input.book ?? 'default';
+    const database = this.open();
+    try {
+      const existing = database.prepare('SELECT * FROM paper_cash_sleeves WHERE book = ?').get(book) as
+        | PaperCashSleeveRow
+        | undefined;
+      const prior = existing ? this.toPaperCashSleeve(existing).state : emptyLqdtSleeve(input.principal);
+      const applied = applyLqdtSleeve(prior, {
+        type: 'open',
+        day: input.day,
+        openPrice: input.openPrice,
+        principal: input.principal,
+      });
+      if (!applied.ok) throw new Error(applied.refused);
+      this.writePaperCashSleeve(database, {
+        book,
+        ticker: assertMoneyMarketSleeveTicker(input.ticker ?? 'LQDT'),
+        instrumentId: input.instrumentId,
+        state: applied.state,
+        openedAt: new Date().toISOString(),
+      });
+      const row = database.prepare('SELECT * FROM paper_cash_sleeves WHERE book = ?').get(book) as PaperCashSleeveRow;
+      return this.toPaperCashSleeve(row);
+    } finally {
+      database.close();
+    }
+  }
+
+  markPaperCashSleeve(input: { book?: string; markPrice: number; day: string }): PaperCashSleeveRecord {
+    return this.applyOpenSleeve(input.book ?? 'default', { type: 'mark', day: input.day, markPrice: input.markPrice });
+  }
+
+  closePaperCashSleeve(input: {
+    book?: string;
+    closePrice: number;
+    day: string;
+    note?: string;
+  }): PaperCashSleeveRecord {
+    return this.applyOpenSleeve(
+      input.book ?? 'default',
+      { type: 'close', day: input.day, closePrice: input.closePrice },
+      input.note,
+    );
   }
 
   closePaperTrade(input: PaperTradeCloseInput): PaperTradeRecord {
@@ -1966,6 +2096,7 @@ export class ScenarioJournal {
     chmodSync(this.databasePath, 0o600);
     database.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
     database.exec(schema);
+    this.migratePaperCashSleeveTickers(database);
     return database;
   }
 
@@ -1989,6 +2120,160 @@ export class ScenarioJournal {
       warnings: parseStringArray(row.warnings_json),
       snapshot: parseJson<unknown>(row.snapshot_json, {}),
       ...(row.note ? { note: row.note } : {}),
+    };
+  }
+
+  private migratePaperCashSleeveTickers(database: DatabaseSync): void {
+    const table = database
+      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'paper_cash_sleeves'`)
+      .get() as { sql: string } | undefined;
+    if (!table || table.sql.includes("ticker IN ('LQDT', 'SBMM')")) return;
+    database.exec(`
+      CREATE TABLE paper_cash_sleeves_v2 (
+        book TEXT PRIMARY KEY,
+        ticker TEXT NOT NULL CHECK(ticker IN ('LQDT', 'SBMM')),
+        instrument_id TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role = 'cash_sleeve'),
+        status TEXT NOT NULL CHECK(status IN ('empty', 'open')),
+        cash REAL NOT NULL CHECK(cash > 0),
+        principal REAL,
+        units REAL,
+        entry_day TEXT,
+        entry_price REAL,
+        last_mark_day TEXT,
+        last_mark_price REAL,
+        marked_equity REAL,
+        commission_rate REAL NOT NULL,
+        slippage_rate REAL NOT NULL,
+        opened_at TEXT,
+        updated_at TEXT NOT NULL,
+        closed_at TEXT,
+        close_note TEXT
+      ) STRICT;
+      INSERT INTO paper_cash_sleeves_v2 SELECT * FROM paper_cash_sleeves;
+      DROP TABLE paper_cash_sleeves;
+      ALTER TABLE paper_cash_sleeves_v2 RENAME TO paper_cash_sleeves;
+    `);
+  }
+
+  private applyOpenSleeve(book: string, event: LqdtSleeveEvent, closeNote?: string): PaperCashSleeveRecord {
+    const database = this.open();
+    try {
+      const existing = database.prepare('SELECT * FROM paper_cash_sleeves WHERE book = ?').get(book) as
+        | PaperCashSleeveRow
+        | undefined;
+      if (!existing) throw new Error('Paper cash sleeve was not found');
+      const applied = applyLqdtSleeve(this.toPaperCashSleeve(existing).state, event);
+      if (!applied.ok) throw new Error(applied.refused);
+      this.writePaperCashSleeve(database, {
+        book,
+        ticker: assertMoneyMarketSleeveTicker(existing.ticker),
+        instrumentId: existing.instrument_id,
+        state: applied.state,
+        ...(existing.opened_at ? { openedAt: existing.opened_at } : {}),
+        ...(event.type === 'close'
+          ? { closedAt: new Date().toISOString(), ...(closeNote ? { closeNote } : {}) }
+          : {
+              ...(existing.closed_at ? { closedAt: existing.closed_at } : {}),
+              ...(existing.close_note ? { closeNote: existing.close_note } : {}),
+            }),
+      });
+      const row = database.prepare('SELECT * FROM paper_cash_sleeves WHERE book = ?').get(book) as PaperCashSleeveRow;
+      return this.toPaperCashSleeve(row);
+    } finally {
+      database.close();
+    }
+  }
+
+  private writePaperCashSleeve(
+    database: DatabaseSync,
+    input: {
+      book: string;
+      ticker: MoneyMarketSleeveTicker;
+      instrumentId: string;
+      state: LqdtSleeveState;
+      openedAt?: string;
+      closedAt?: string;
+      closeNote?: string;
+    },
+  ): void {
+    const costs =
+      input.state.status === 'open' ? input.state.costs : LQDT_SLEEVE_DEFAULT_COSTS;
+    const now = new Date().toISOString();
+    database
+      .prepare(
+        `INSERT INTO paper_cash_sleeves (
+           book, ticker, instrument_id, role, status, cash, principal, units,
+           entry_day, entry_price, last_mark_day, last_mark_price, marked_equity,
+           commission_rate, slippage_rate, opened_at, updated_at, closed_at, close_note
+         ) VALUES (?, ?, ?, 'cash_sleeve', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(book) DO UPDATE SET
+           instrument_id = excluded.instrument_id,
+           status = excluded.status,
+           cash = excluded.cash,
+           principal = excluded.principal,
+           units = excluded.units,
+           entry_day = excluded.entry_day,
+           entry_price = excluded.entry_price,
+           last_mark_day = excluded.last_mark_day,
+           last_mark_price = excluded.last_mark_price,
+           marked_equity = excluded.marked_equity,
+           commission_rate = excluded.commission_rate,
+           slippage_rate = excluded.slippage_rate,
+           opened_at = excluded.opened_at,
+           updated_at = excluded.updated_at,
+           closed_at = excluded.closed_at,
+           close_note = excluded.close_note`,
+      )
+      .run(
+        input.book,
+        input.ticker,
+        input.instrumentId,
+        input.state.status,
+        input.state.status === 'empty' ? input.state.cash : input.state.principal,
+        input.state.status === 'open' ? input.state.principal : null,
+        input.state.status === 'open' ? input.state.units : null,
+        input.state.status === 'open' ? input.state.entryDay : null,
+        input.state.status === 'open' ? input.state.entryPrice : null,
+        input.state.status === 'open' ? input.state.lastMarkDay : null,
+        input.state.status === 'open' ? input.state.lastMarkPrice : null,
+        input.state.status === 'open' ? input.state.markedEquity : null,
+        costs.commission,
+        costs.slippage,
+        input.openedAt ?? null,
+        now,
+        input.closedAt ?? null,
+        input.closeNote ?? null,
+      );
+  }
+
+  private toPaperCashSleeve(row: PaperCashSleeveRow): PaperCashSleeveRecord {
+    const costs = { commission: row.commission_rate, slippage: row.slippage_rate };
+    const state: LqdtSleeveState =
+      row.status === 'open'
+        ? {
+            status: 'open',
+            role: 'cash_sleeve',
+            entryDay: row.entry_day!,
+            entryPrice: row.entry_price!,
+            units: row.units!,
+            principal: row.principal!,
+            costs,
+            lastMarkDay: row.last_mark_day!,
+            lastMarkPrice: row.last_mark_price!,
+            markedEquity: row.marked_equity!,
+          }
+        : { status: 'empty', cash: row.cash };
+    return {
+      book: row.book,
+      ticker: row.ticker,
+      instrumentId: row.instrument_id,
+      role: 'cash_sleeve',
+      state,
+      updatedAt: row.updated_at,
+      ...(row.opened_at ? { openedAt: row.opened_at } : {}),
+      ...(row.closed_at ? { closedAt: row.closed_at } : {}),
+      ...(row.close_note ? { closeNote: row.close_note } : {}),
     };
   }
 
