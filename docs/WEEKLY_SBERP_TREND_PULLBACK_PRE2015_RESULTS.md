@@ -1,0 +1,11 @@
+# SBERP trend-pullback v1: independent 2007–2014 result
+
+**Failed independent validation; reject the rule.** The unchanged discovery rule is [WEEKLY_SBERP_TREND_PULLBACK_V1.md](WEEKLY_SBERP_TREND_PULLBACK_V1.md), SHA-256 `ce420b9adbd61fdadadf74316d9c5d0d62808ad7273f6b5d275be8425583fe04`. The independent-period plan was [frozen before importing](WEEKLY_SBERP_TREND_PULLBACK_PRE2015_VALIDATION.md), SHA-256 `290952626ab9d7df17947d7c8b1cef730838b445cc93dab50da521132e1e649c`. Full machine-readable ledger: `.trading/weekly-sberp-trend-pullback-pre2015.json`.
+
+MOEX ISS security-level SBERP daily candles supplied 1,862 validated rows from 2007-07-20 through 2014-12-30, source row SHA-256 `d57ac049daa6b5c3e5219e7553fe2b1403762d1a9e4d00ebce5373f1f31e0eaf`. Yearly coverage was 115 rows in the listing year and 247–255 in each full year; weekends were excluded by the frozen engine. The security-level historical endpoint and later TQBR discovery endpoint can differ in board composition, and neither source adjusts dividends or proves opening-price executability. This limits cross-era comparability, but the older period fails even before those issues are resolved.
+
+Only **17 of 45 completed entries won net (37.78%)**, far below 51%, and only 45 entries occurred versus the predeclared minimum 100. The marked portfolio had 73 positive active weeks out of 138 (52.90%), but those weeks are not equivalent to completed winning trades. Mean net trade return was +1.325%, profit factor 1.299, and ending modeled equity from ₽1m was ₽1.091m; these positive aggregates were concentrated in 2009. Excluding the five best trade returns produces **−129.28 percentage points**, and the portfolio reached a 26.47% drawdown.
+
+There were no entries in 2008. In 2009, seven of nine trades won and their average net return was +18.81%. In 2010, 2011, 2012, 2013 and 2014, mean net trade returns were negative; 2011 and 2012 each had only one winner in seven trades. The rule therefore fails the independent trade-win, sample, year-coverage, annual profitability and concentration gates. Combining the 2009 boom with later weak years would mask the failure rather than validate the rule.
+
+No retuning or 2026 holdout access follows. This and the [2015–2025 discovery failure](WEEKLY_SBERP_TREND_PULLBACK_V1_RESULTS.md) close the v1 research line; no real orders are authorized.

@@ -9,6 +9,11 @@ import { TInvestClient } from './tbank/client.js';
 import { TInvestHistoryClient } from './tbank/history-client.js';
 
 export type HistorySource = 'auto' | 'tinvest' | 'moex';
+export function assertImportQuality(invalidRowCount: number, duplicateRowCount: number): void {
+  if (invalidRowCount > 0 || duplicateRowCount > 0) {
+    throw new Error(`Archive quality failed: ${invalidRowCount} invalid and ${duplicateRowCount} duplicate rows; stored data is for diagnostics, not an accepted dataset`);
+  }
+}
 type ImportCliOptions = { years: number[]; tickers: string[]; source: HistorySource; help: boolean };
 
 const usage = `Usage:
@@ -108,11 +113,12 @@ async function main(): Promise<void> {
     const history = await moexClient.getMinuteHistory(ticker, year);
     const imported = store.importMinuteArchive({ ...history, year, source: 'moex' });
     console.log(JSON.stringify({
-      status: history.invalidRowCount === 0 ? 'complete' : 'partial', source: 'moex', ticker, year,
+      status: history.invalidRowCount === 0 && history.duplicateRowCount === 0 ? 'complete' : 'partial', source: 'moex', ticker, year,
       storedCandleCount: imported.storedCandleCount, invalidRowCount: history.invalidRowCount,
       duplicateRowCount: history.duplicateRowCount, firstCandleAt: history.candles[0]?.time ?? null,
       lastCandleAt: history.candles.at(-1)?.time ?? null, archiveSha256: history.archiveSha256,
     }));
+    assertImportQuality(history.invalidRowCount, history.duplicateRowCount);
   }
 
   for (const year of options.years) {
@@ -132,10 +138,11 @@ async function main(): Promise<void> {
             archiveSha256: digest, lotSize: instrument.lotSize, priceStep: instrument.priceStep,
             candles: parsed.candles, rawRowCount: parsed.rawRowCount, invalidRowCount: parsed.invalidRowCount,
             duplicateRowCount: parsed.duplicateRowCount, source: 'tinvest' });
-          console.log(JSON.stringify({ status: parsed.invalidRowCount === 0 ? 'complete' : 'partial', source: 'tinvest', ticker, year,
+          console.log(JSON.stringify({ status: parsed.invalidRowCount === 0 && parsed.duplicateRowCount === 0 ? 'complete' : 'partial', source: 'tinvest', ticker, year,
             storedCandleCount: imported.storedCandleCount, invalidRowCount: parsed.invalidRowCount,
             duplicateRowCount: parsed.duplicateRowCount, firstCandleAt: parsed.candles[0]?.time ?? null,
             lastCandleAt: parsed.candles.at(-1)?.time ?? null, archiveSha256: digest }));
+          assertImportQuality(parsed.invalidRowCount, parsed.duplicateRowCount);
         } catch (error) {
           if (options.source !== 'auto') throw error;
           console.warn(JSON.stringify({ status: 'source_fallback', from: 'tinvest', to: 'moex', ticker, year,

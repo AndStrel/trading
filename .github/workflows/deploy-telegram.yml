@@ -73,6 +73,10 @@ jobs:
 
               chmod 600 .env
               docker compose up -d --build --remove-orphans
+              docker compose --profile maintenance run --rm paper-daily-refresh
+              docker compose run --rm --no-deps \
+                -e T_INVEST_PAPER_SNAPSHOT_DIR=/app/.trading \
+                telegram-service node dist/telegram-bot-smoke.js
               docker compose ps
               docker compose logs --tail=40 telegram-service
           REMOTE

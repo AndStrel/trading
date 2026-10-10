@@ -15,7 +15,10 @@ import {
   type OrbRvolResearchMode,
   type OrbRvolSessionSchedule,
 } from './backtest/orb-rvol.js';
-import { getMoexEquities2025SessionSchedule } from './backtest/orb-rvol-calendar.js';
+import {
+  getMoexEquities2025SessionSchedule,
+  getMoexEquities2026SessionSchedule,
+} from './backtest/orb-rvol-calendar.js';
 import { buildOrbRvolOpeningRangeBreadth } from './backtest/orb-rvol-breadth.js';
 import { MarketDataStore } from './history/market-data-store.js';
 
@@ -53,6 +56,7 @@ export type OrbRvolRunResult = {
 const usage = `Usage:
   npm run backtest:replay:orb-rvol -- --year 2025 --session-start 10:00 --session-end 18:40
   npm run backtest:replay:orb-rvol -- --year 2025 --ticker SBER,GAZP --session-start 10:00 --session-end 18:40
+  npm run backtest:replay:orb-rvol -- --year 2026 --ticker SBER
   npm run backtest:replay:orb-rvol -- --mode retest-breadth --year 2025 --session-start 10:00 --session-end 18:40
 
 Collects all first opening-range breakout events from imported minute archives. The command is
@@ -61,6 +65,8 @@ unverified current exchange schedule cannot silently change the experiment.
 
 The fixed session profile is recorded in the JSON output. For 2025, date eligibility is
 resolved by the versioned MOEX equity calendar; verify the supplied session hours separately.
+For 2026, only regular weekdays are included and dated main-session hours are resolved from
+the versioned calendar; weekends and special holiday sessions are excluded.
 The retest-breadth mode is research-only: it waits for a post-breakout retest and adds
 a same-opening-range cross-sectional breadth filter; it never sends broker orders.`;
 
@@ -110,7 +116,7 @@ export function parseOrbRvolArgs(args: string[]): OrbRvolCliOptions {
   }
 
   return {
-    replay: parseReplayArgs(replayArgs),
+    replay: parseReplayArgs(replayArgs, { latestAllowedYear: 2026 }),
     sessionStartMinuteMoscow,
     sessionEndMinuteMoscow,
     mode,
@@ -125,6 +131,13 @@ function archiveRange(year: number): { from: string; to: string } {
 }
 
 function requireSessionSchedule(options: OrbRvolCliOptions): OrbRvolSessionSchedule {
+  if (options.replay.year === 2026) {
+    return {
+      startMinuteMoscow: 9 * 60,
+      endMinuteMoscow: 18 * 60 + 55,
+      source: 'moex-equities-2026-regular-weekdays-v1; date-specific profiles are recorded per event',
+    };
+  }
   if (options.sessionStartMinuteMoscow === null || options.sessionEndMinuteMoscow === null) {
     throw new Error(
       'ORB RVOL requires both --session-start and --session-end. Check the dated exchange schedule before running.',
@@ -242,6 +255,8 @@ export async function runOrbRvolResearch(options: OrbRvolCliOptions): Promise<Or
           startMinuteMoscow: sessionSchedule.startMinuteMoscow,
           endMinuteMoscow: sessionSchedule.endMinuteMoscow,
         })
+      : options.replay.year === 2026
+        ? getMoexEquities2026SessionSchedule({ sessionDate: session.sessionDate })
       : sessionSchedule;
 
   let marketBreadthByDate: Map<string, OrbRvolMarketBreadth | null> | null = null;

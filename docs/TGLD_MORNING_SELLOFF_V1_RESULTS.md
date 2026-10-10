@@ -1,0 +1,7 @@
+# TGLD morning-selloff reversal v1 — 2025 discovery result
+
+**Reject.** The [rule](TGLD_MORNING_SELLOFF_V1.md) was frozen before reading strategy outcomes. Its 2025 local report is `.trading/tgld-morning-selloff-v1-2025.json`, reproducible SHA-256 `123dbe307af8fbdf525d963d79e34175ee9b07300763de9098cde208b5c85e5e`. Source archive and coverage: [TGLD 2025 source checkpoint](TGLD_2025_SOURCE_CHECKPOINT.md).
+
+Among 261 weekdays, 30 lacked a required exact signal candle (including eight inactive dates), 169 stayed in cash, and 62 yielded completed same-day trades. No entry cancellations or unresolved exits occurred. Gross winners were 25/62 (40.32%); after the predeclared adverse execution and tick rounding, just 14/62 (22.58%) won. Mean gross return was +0.02089% per trade; mean base net was **−0.32660%** and stressed mean **−0.49989%**. Base-net mean was negative in January–June (−0.37749%, 34 trades) and July–December (−0.26480%, 28 trades). Worst base-net trade was −2.86533%. Sum of base-net returns excluding the five best trades was −26.62957 percentage points.
+
+The sample fails the 100-trade minimum, 51% net-win threshold, positive mean/aggregate, stress, both half-year blocks, and best-five resilience. Gross winners are below 51% even if execution costs were zero. Do not alter the 0.2% signal threshold, entry/exit windows, or cost allowances on this source. Per the frozen protocol, do **not** test this rejected rule on 2026. These are historical trade-print estimates, not executable bid/ask fills or actual PnL. No real orders.

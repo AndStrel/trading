@@ -24,6 +24,18 @@ function candles(count: number, start = '2025-01-02T07:00:00.000Z'): HistoricalM
 }
 
 describe('research situation catalog', () => {
+  it('does not change features when only future candles change', () => {
+    const input = candles(120);
+    const metadata = { instrumentId: 'instrument-uid', ticker: 'TEST', sourceYear: 2025, sourceArchiveSha256: 'a'.repeat(64) };
+    const original = buildResearchSituations(input, metadata)[0]!;
+    const changed = input.map((candle, index) => index <= 30 ? candle : {
+      ...candle, open: candle.open * 2, high: candle.high * 2, low: candle.low * 2,
+      close: candle.close * 2, volume: candle.volume * 2,
+    });
+    const rebuilt = buildResearchSituations(changed, metadata)[0]!;
+    expect(rebuilt.featureVector).toEqual(original.featureVector);
+    expect(rebuilt.outcomes).not.toEqual(original.outcomes);
+  });
   it('builds past-only features and separate forward outcomes', () => {
     const result = buildResearchSituations(
       candles(120),
@@ -38,16 +50,17 @@ describe('research situation catalog', () => {
 
     expect(result.length).toBe(9);
     expect(result[0]).toMatchObject({
-      datasetVersion: 'situation-v1',
+      datasetVersion: 'situation-v2',
       ticker: 'TEST',
       sessionDate: '2025-01-02',
       observedAt: '2025-01-02T07:30:00.000Z',
-      featureAvailableAt: '2025-01-02T07:30:00.000Z',
+      featureAvailableAt: '2025-01-02T07:31:00.000Z',
       sourceYear: 2025,
     });
     expect(Object.keys(result[0]!.features)).toEqual(RESEARCH_FEATURE_SPECS.map(({ name }) => name));
     expect(result[0]!.featureVector).toHaveLength(RESEARCH_FEATURE_SPECS.length);
     expect(result[0]!.outcomes.map(({ horizonMinutes }) => horizonMinutes)).toEqual([15, 30]);
+    expect(result[0]!.outcomes[0]!.terminalAt).toBe('2025-01-02T07:46:00.000Z');
     expect(result[0]!.outcomes.every((outcome) => outcome.terminalAt > result[0]!.featureAvailableAt)).toBe(true);
   });
 
@@ -70,4 +83,3 @@ describe('research situation catalog', () => {
     expect(researchVectorDistance([1, 2], [1, 2])).toBe(0);
   });
 });
-

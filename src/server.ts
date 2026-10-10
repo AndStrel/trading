@@ -7,6 +7,8 @@ import { analyzeCandles } from './domain/candle-analysis.js';
 import { assessTradeScenario } from './domain/trade-scenario.js';
 import { summarizePaperTrades } from './domain/paper-report.js';
 import { calculatePaperEntry, calculatePaperExit } from './domain/paper-trade.js';
+import { lqdtSleeveNetReturnPct, moscowCalendarDay } from './domain/lqdt-cash-sleeve.js';
+import { readPaperDualMomentumSignal } from './domain/sbmx-sbgb-dual-momentum.js';
 import { calculateTradePlan } from './domain/trade-plan.js';
 import { quotationToNumber } from './domain/money.js';
 import { ScenarioJournal } from './journal/scenario-journal.js';
@@ -523,6 +525,140 @@ export function createServer(
   );
 
   server.registerTool(
+    'open_paper_cash_sleeve',
+    {
+      description:
+        'Park idle paper cash in one continuous LQDT or SBMM hold (cash_sleeve). Applies modeled Investor costs, refuses a second buy while open, and never submits an order.',
+      inputSchema: z.object({
+        instrumentId: instrumentIdSchema,
+        ticker: z.enum(['LQDT', 'SBMM']).default('LQDT'),
+        principal: z.number().positive(),
+        confirmPaperSleeve: z.literal(true),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async ({ instrumentId, ticker, principal }) => {
+      const marketPrice = getExchangeLastPrice(await client.getLastPrices([instrumentId]));
+      const sleeve = journal.openPaperCashSleeve({
+        instrumentId,
+        ticker,
+        principal,
+        openPrice: marketPrice,
+        day: moscowCalendarDay(),
+      });
+      return result({
+        mode: 'paper-trading',
+        role: 'cash_sleeve',
+        orderSubmitted: false,
+        sleeve,
+        warning: 'Historical LQDT carry is not a forecast; this is cash parking, not alpha or live authorization.',
+      });
+    },
+  );
+
+  server.registerTool(
+    'mark_paper_cash_sleeve',
+    {
+      description:
+        'Mark the open LQDT paper cash sleeve to the current last price without trading. Never submits an order.',
+      inputSchema: z.object({
+        confirmMark: z.literal(true),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async () => {
+      const current = journal.getPaperCashSleeve();
+      if (!current || current.state.status !== 'open') {
+        throw new Error('No open paper cash sleeve to mark');
+      }
+      const marketPrice = getExchangeLastPrice(await client.getLastPrices([current.instrumentId]));
+      const sleeve = journal.markPaperCashSleeve({ markPrice: marketPrice, day: moscowCalendarDay() });
+      return result({
+        mode: 'paper-trading',
+        role: 'cash_sleeve',
+        orderSubmitted: false,
+        sleeve,
+        markedNetReturnPct:
+          sleeve.state.status === 'open' ? lqdtSleeveNetReturnPct(sleeve.state) : null,
+      });
+    },
+  );
+
+  server.registerTool(
+    'close_paper_cash_sleeve',
+    {
+      description:
+        'Close the open LQDT paper cash sleeve at a simulated last price with Investor exit costs. Never submits an order.',
+      inputSchema: z.object({
+        confirmClose: z.literal(true),
+        note: z.string().trim().min(1).max(1_000).optional(),
+      }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+    },
+    async ({ note }) => {
+      const current = journal.getPaperCashSleeve();
+      if (!current || current.state.status !== 'open') {
+        throw new Error('No open paper cash sleeve to close');
+      }
+      const marketPrice = getExchangeLastPrice(await client.getLastPrices([current.instrumentId]));
+      const sleeve = journal.closePaperCashSleeve({
+        closePrice: marketPrice,
+        day: moscowCalendarDay(),
+        ...(note ? { note } : {}),
+      });
+      return result({
+        mode: 'paper-trading',
+        role: 'cash_sleeve',
+        orderSubmitted: false,
+        sleeve,
+      });
+    },
+  );
+
+  server.registerTool(
+    'get_paper_cash_sleeve',
+    {
+      description:
+        'Read the local LQDT paper cash sleeve. Reads only SQLite and never contacts T-Invest.',
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async () => {
+      const sleeve = journal.getPaperCashSleeve();
+      return result({
+        mode: 'paper-trading',
+        role: 'cash_sleeve',
+        sleeve,
+        markedNetReturnPct:
+          sleeve?.state.status === 'open' ? lqdtSleeveNetReturnPct(sleeve.state) : null,
+      });
+    },
+  );
+
+  server.registerTool(
+    'get_paper_dual_momentum_signal',
+    {
+      description:
+        'Read the frozen paper SBMX/SBGB/SBMM dual-momentum sleeve from local daily snapshots. Never submits an order and is not live authorization.',
+      inputSchema: z.object({
+        asOf: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      }),
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    async ({ asOf }) => {
+      const day = asOf ?? moscowCalendarDay();
+      return result({
+        mode: 'paper-trading',
+        role: 'dual_momentum_overlay',
+        orderSubmitted: false,
+        warning:
+          'Admitted on 2022-05-04–2025 only vs SBMX/SBGB/SBMM holds; edge vs SBMM is small; 2026 untouched; not a broker order.',
+        signal: readPaperDualMomentumSignal(day),
+      });
+    },
+  );
+
+  server.registerTool(
     'get_paper_report',
     {
       description:
@@ -558,6 +694,7 @@ export function createServer(
         }),
       );
 
+      const sleeve = journal.getPaperCashSleeve();
       return result({
         mode: 'paper-trading',
         accounting: 'simulated',
@@ -565,6 +702,16 @@ export function createServer(
         window,
         ...(strategy ? { strategy } : {}),
         report,
+        cashSleeve: sleeve
+          ? {
+              ticker: sleeve.ticker,
+              role: sleeve.role,
+              status: sleeve.state.status,
+              markedEquity: sleeve.state.status === 'open' ? sleeve.state.markedEquity : sleeve.state.cash,
+              markedNetReturnPct:
+                sleeve.state.status === 'open' ? lqdtSleeveNetReturnPct(sleeve.state) : null,
+            }
+          : null,
       });
     },
   );

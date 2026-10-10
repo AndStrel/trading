@@ -1,0 +1,7 @@
+# TGLD morning-strength continuation v1 — 2024 discovery result
+
+**Reject.** The [rule](TGLD_MORNING_STRENGTH_V1.md) was frozen before reading 2024 outcomes. The ignored local report `.trading/tgld-morning-strength-v1-2024.json` reproduced SHA-256 `5153000966b98d53fdd2f0739a605993df0a101f296458d875bea26e5a80fcff`. Source coverage: [2024 checkpoint](TGLD_2024_SOURCE_CHECKPOINT.md).
+
+Of 262 weekdays, 10 lacked a required exact signal anchor, 182 stayed in cash, 69 completed a same-day trade, and one entry had no observed 16:55–17:00 exit print. There were no entry cancellations. Gross winners: **31/69 (44.93%)**; base-net winners after predeclared adverse execution and tick rounding: **24/69 (34.78%)**. Mean gross return was **−0.10161%** per completed trade, base net **−0.37948%**, and stressed net **−0.59733%**. Base-net means were negative in January–June (−0.40345%; 33 trades) and July–December (−0.35751%; 36 trades). Worst base-net trade was −2.65811%; removing the five best left a −31.24661 percentage-point sum.
+
+The sample fails the 100-trade minimum, 51% net winners, positive mean/aggregate, stress, both half-years, resilience, and zero-unresolved-exit gates. Gross outcomes already fail, so a different commission assumption cannot rescue this fixed rule. Do not retune it on 2024 or check 2025/2026 under this rejected protocol. This is trade-print research, not executable bid/ask evidence or actual PnL. No real orders.

@@ -12,8 +12,8 @@ type SimilarCliOptions = {
 const usage = `Usage:
   npm run research:similar -- --ticker SBER --at 2025-06-03T08:30:00.000Z --neighbors 20
 
-Finds past situations similar to one cataloged situation. The target timestamp is
-used as a strict temporal cutoff, so future situations cannot become neighbors.`;
+Finds past situations similar to the candle starting at --at. The cutoff is its
+close (+1 minute). Only outcomes completed by that cutoff are returned.`;
 
 function parsePositiveInteger(raw: string, flag: string): number {
   const value = Number(raw);
@@ -87,8 +87,8 @@ async function main(): Promise<void> {
           situationId: target.situationId,
           ticker: target.ticker,
           observedAt: target.observedAt,
+          featureAvailableAt: target.featureAvailableAt,
           features: target.features,
-          outcomes: target.outcomes,
         },
         neighbors: neighbors.map(({ featureVector: _featureVector, ...neighbor }) => neighbor),
       },
@@ -104,4 +104,3 @@ if (process.argv[1] && import.meta.url === new URL(process.argv[1], 'file:').hre
     process.exitCode = 1;
   });
 }
-

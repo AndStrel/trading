@@ -1,0 +1,7 @@
+# Si 2026 evening data checkpoint — timestamps only
+
+The [fixed exploratory rule](SI_US_SESSION_CONTINUATION_V1.md) was written before reading its evening outcomes. MOEX ISS RFUD exact-contract 17:00–22:00 one-minute responses were archived for every 2026-03-23 through 2026-09-25 weekday under ignored `.trading/si-2026-evening-source/`. Raw bodies are hash-checked on read. The ignored manifest `.trading/si-2026-evening-source.json` has SHA-256 `f009a75d32eea6665e42abd14088c66b11d75e95f7644c2c4970f8bbb5d79a02`; the existing daytime manifest SHA-256 is `ed8c32be0f099e8caeb8d773b6edaa7cac08e397c326fe2135ba810e56c36b74`.
+
+Only timestamps were inspected: 135 weekdays, of which two previously documented dates were special sessions, leaving **133 ordinary sessions**. All 133 have the complete 16:30–16:59 daytime signal window and exact 17:01 entry print. The exact 22:00 exit print exists on **132**. The exception is **2026-06-11, SiU6**, whose final observed candle is 21:59. Only 98 ordinary dates have every minute of the 301-minute 17:00–22:00 window, so this archive cannot establish continuous risk exposure or actual fills.
+
+Before reading prices, do not exclude 11 June because of its future exit availability. If its signal is nonzero, that date is an unresolved attempted trade and fails the zero-unresolved gate. A separately frozen optimistic missing-exit bound may reject the win-rate hypothesis without selecting only complete days; it cannot accept it.

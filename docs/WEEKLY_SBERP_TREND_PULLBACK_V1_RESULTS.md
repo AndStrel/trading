@@ -1,0 +1,13 @@
+# SBERP trend-pullback v1: exploratory result
+
+**Update:** the subsequently frozen [independent 2007–2014 check](WEEKLY_SBERP_TREND_PULLBACK_PRE2015_RESULTS.md) failed with only 37.78% net-winning completed trades. This rule is now rejected, not merely awaiting confirmation.
+
+**Not admitted for trading.** The [rule](WEEKLY_SBERP_TREND_PULLBACK_V1.md) was frozen at SHA-256 `ce420b9adbd61fdadadf74316d9c5d0d62808ad7273f6b5d275be8425583fe04` before the result was calculated. Full ledger and portfolio audit: `.trading/weekly-sberp-trend-pullback-v1.json`. Source: MOEX ISS TQBR SBERP daily, 2,827 rows in 2015–2025, row SHA-256 `099fbd5eae7e056a2aea986048792175a6bc5139264ffa65d037b908cd28631e`. The 2026 holdout remains untouched.
+
+The first exploratory run had **47 net-winning completed trades out of 73 (64.38%)** after assumed 0.3% commission and 0.05% slippage on each side. The mean completed-trade return was +1.234% (+1.132% with 0.1% slippage per side), and profit factor was 1.537. The marked portfolio had **148 positive active weeks out of 264 (56.06%)**, ended at modeled ₽1.182m from ₽1m and had a 12.97% peak-to-trough drawdown. Four of the 73 entries occurred in 2015, before the 2016–2025 cohort breakdown.
+
+Despite clearing both raw 51% fractions and showing a positive modeled ending value, it **fails the frozen research gate**. There are only 73 completed trades rather than 100. Excluding the best five trades makes the sum of trade returns slightly negative (−0.132 percentage points), so a few unusually good outcomes are essential. The 2020–2022 cohort had 6 winners in 13 trades, with −2.910% mean net per trade. Mean trade returns were negative in 2018, 2020, 2021, 2024 and 2025. The 2022 cohort contains only one trade and is not persuasive evidence of resilience. This is not a stable 51%-plus weekly profit process across market regimes.
+
+The already established 20-session always-long SBERP control generated 513 completed trades and a modeled ₽1.827m ending value, but its historical drawdown reached 64.83% and several years were negative. Its warmup differs (253 observed sessions versus this rule's 200), so it is context, not an exact paired experiment. The pullback model has a smaller drawdown but no demonstrated independent edge over holding SBERP.
+
+This is price-only backtesting with model costs, no dividends, taxes, actual lot-size constraints, quote depth, market impact or verified opening fills. The mechanism combines two ideas already explored on this 2015–2025 era; no post-result parameter changes or real orders are justified. A new, predeclared mechanism or a genuinely independent validation period is required, not threshold fitting on these results.

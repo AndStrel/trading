@@ -1,0 +1,7 @@
+# TMON 2025: upper-bound diagnostic fixed before reading prices
+
+This is a rejection-only diagnostic for [TMON intraday carry v1](TMON_INTRADAY_CARRY_V1.md), not a claim that trade prints were executable. The prior [coverage audit](TMON_2025_SOURCE_CHECKPOINT.md) used timestamps only: 184 entry days, 141 with both prints, and 43 entered days with no observed exit. Do not select the 141 complete days as a backtest population.
+
+For each of the 184 entered days, use the first trade-candle open from 10:01–10:03. For the 141 days with a 16:55–17:00 candle, use its first open. For each 43 unresolved exits, assign an **optimistic win** only for the upper bound, regardless of its actual unknown outcome. Canceled entries are not trades. Count strictly positive net returns under the v1 base, stress and severe execution allowances, with zero broker commission only as a conditional assumption. Round adverse executed prices to the provisional 0.000001 RUB tick. Also show a zero-cost gross bound as a diagnostic, not an investable result.
+
+The upper bound on the net-win fraction is `(observed completed net wins + 43) / 184`. To clear at least 51%, this requires **94** net winners, so at least **51** observed completed winners. If the bound falls below 51%, reject the frozen trade-print v1 even under this favorable missing-data assignment. If it clears, the outcome is inconclusive: the 43 exits, quote availability, spread and actual fills remain unknown. Do not optimize time windows or costs after seeing results, and do not authorize orders based on this bound.

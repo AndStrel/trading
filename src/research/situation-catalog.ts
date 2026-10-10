@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 
 import type { HistoricalMinuteCandle } from '../history/market-data-store.js';
 
-export const RESEARCH_DATASET_VERSION = 'situation-v1';
+// v2 fixes candle availability: timestamps identify the START of a minute.
+export const RESEARCH_DATASET_VERSION = 'situation-v2';
 export const RESEARCH_OUTCOME_HORIZONS_MINUTES = [15, 30, 60] as const;
 
 export const RESEARCH_FEATURE_SPECS = [
@@ -166,7 +167,7 @@ function buildOutcome(
 
   return {
     horizonMinutes,
-    terminalAt: candles[terminalIndex]!.time,
+    terminalAt: new Date(Date.parse(candles[terminalIndex]!.time) + 60_000).toISOString(),
     forwardReturnPct: percentageChange(candles[terminalIndex]!.close, entryClose),
     maxFavorablePct: percentageChange(Math.max(...futureWindow.map((candle) => candle.high)), entryClose),
     maxAdversePct: percentageChange(Math.min(...futureWindow.map((candle) => candle.low)), entryClose),
@@ -200,7 +201,7 @@ function buildSegmentSituations(
       ticker: metadata.ticker,
       sessionDate: dateKey(observedAt),
       observedAt,
-      featureAvailableAt: observedAt,
+      featureAvailableAt: new Date(Date.parse(observedAt) + 60_000).toISOString(),
       sourceYear: metadata.sourceYear,
       sourceArchiveSha256: metadata.sourceArchiveSha256,
       features,

@@ -9,6 +9,8 @@ import type {
   IntradayScanner,
   IntradayScanReport,
 } from '../scanner/intraday-scanner.js';
+import { moscowCalendarDay } from '../domain/lqdt-cash-sleeve.js';
+import { readPaperDualMomentumSignal } from '../domain/sbmx-sbgb-dual-momentum.js';
 import { buildCandidateCardSvg, renderCandidateCardPng } from './candidate-card.js';
 import type { TelegramClient, TelegramUpdate } from './client.js';
 
@@ -160,6 +162,9 @@ function helpText(): string {
     '/approve ID CONFIRM — подтвердить одну sandbox-заявку',
     '/reject ID — отклонить подготовленную заявку',
     '/kill — немедленно запретить новые отправки заявок',
+    '/paper — сводка admitted paper-стратегий (кэш + dual momentum)',
+    '/sleeve — локальный paper cash sleeve LQDT/SBMM (без заявок брокеру)',
+    '/dual — paper dual momentum SBMX/SBGB/SBMM (сигнал, без заявок брокеру)',
     '',
     'Реальный счёт недоступен: реализовано только подтверждаемое исполнение в песочнице.',
   ].join('\n');
@@ -395,6 +400,12 @@ export class TelegramTradingBot {
         return helpText();
       case '/status':
         return this.statusText();
+      case '/paper':
+        return this.paperSummaryText();
+      case '/sleeve':
+        return this.sleeveText();
+      case '/dual':
+        return this.dualMomentumText();
       case '/execution':
         return this.executionText();
       case '/pause':
@@ -406,6 +417,56 @@ export class TelegramTradingBot {
       default:
         return `Неизвестная команда.\n\n${helpText()}`;
     }
+  }
+
+  private paperSummaryText(): string {
+    return ['Admitted paper-only (не live):', '', this.sleeveText(), '', '—', '', this.dualMomentumText()].join(
+      '\n',
+    );
+  }
+
+  private sleeveText(): string {
+    const sleeve = this.journal.getPaperCashSleeve();
+    if (!sleeve) {
+      return [
+        'Paper cash sleeve: не открыт.',
+        'Парковка кэша — LQDT или SBMM без недельного перезахода, не торговый сигнал.',
+        'Открытие/маркировка — через MCP open_paper_cash_sleeve / mark_paper_cash_sleeve. Заявок брокеру нет.',
+      ].join('\n');
+    }
+    if (sleeve.state.status === 'empty') {
+      return [
+        `Paper cash sleeve ${sleeve.ticker}: закрыт.`,
+        `Денежный остаток модели: ${formatNumber(sleeve.state.cash)} ₽`,
+        sleeve.closeNote ? `Заметка: ${sleeve.closeNote}` : 'Это не live-позиция.',
+      ].join('\n');
+    }
+    return [
+      `Paper cash sleeve ${sleeve.ticker}: открыт (${sleeve.role})`,
+      `Вход: ${sleeve.state.entryDay} @ ${formatNumber(sleeve.state.entryPrice)}`,
+      `Марк: ${sleeve.state.lastMarkDay} @ ${formatNumber(sleeve.state.lastMarkPrice)}`,
+      `Оценка выхода с издержками: ${formatNumber(sleeve.state.markedEquity)} ₽`,
+      'Не перезаходить каждую неделю. Заявок брокеру нет.',
+    ].join('\n');
+  }
+
+  private dualMomentumText(): string {
+    const signal = readPaperDualMomentumSignal(moscowCalendarDay());
+    if (!signal.available) {
+      return [
+        'Paper dual momentum SBMX/SBGB/SBMM: нет локальных дневных снимков.',
+        'Сигнал считается только по файлам .trading/*-daily-*.json. Заявок брокеру нет.',
+      ].join('\n');
+    }
+    const staleNote = signal.stale
+      ? `Снимки актуальны до ${signal.dataThrough}; запрошен ${signal.requestedAsOf ?? 'сегодня'}. Обновите daily-импорт.`
+      : `Данные через ${signal.dataThrough}.`;
+    return [
+      `Paper dual momentum: ${signal.sleeve ?? 'еще нет сигнала'} на ${signal.asOf}`,
+      staleNote,
+      signal.firstSignalDay ? `Первый исторический сигнал: ${signal.firstSignalDay}` : 'Разогрев не завершён.',
+      'Правило из SBMX_SBGB_SBMM_DUAL_MOMENTUM_V1. Не live-допуск. Заявок брокеру нет.',
+    ].join('\n');
   }
 
   private statusText(): string {

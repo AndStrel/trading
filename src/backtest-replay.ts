@@ -50,11 +50,10 @@ Replays the registered vwap-pullback strategy from already imported one-minute a
 It is read-only: the command never sends a broker order and fails rather than silently
 dropping a requested ticker that lacks an imported archive.`;
 
-function parseYear(value: string): number {
+function parseYear(value: string, latestAllowedYear = new Date().getUTCFullYear() - 1): number {
   const year = Number(value.trim());
-  const latestCompleteYear = new Date().getUTCFullYear() - 1;
-  if (!Number.isInteger(year) || year < MIN_SUPPORTED_REPLAY_YEAR || year > latestCompleteYear) {
-    throw new Error(`--year must be an integer from ${MIN_SUPPORTED_REPLAY_YEAR} through ${latestCompleteYear}`);
+  if (!Number.isInteger(year) || year < MIN_SUPPORTED_REPLAY_YEAR || year > latestAllowedYear) {
+    throw new Error(`--year must be an integer from ${MIN_SUPPORTED_REPLAY_YEAR} through ${latestAllowedYear}`);
   }
   return year;
 }
@@ -70,7 +69,10 @@ function parseTickers(value: string): string[] {
   return tickers;
 }
 
-export function parseReplayArgs(args: string[]): ReplayCliOptions {
+export function parseReplayArgs(
+  args: string[],
+  options: { latestAllowedYear?: number } = {},
+): ReplayCliOptions {
   let year: number | null = null;
   const tickers: string[] = [];
   let help = false;
@@ -89,7 +91,7 @@ export function parseReplayArgs(args: string[]): ReplayCliOptions {
 
     if (flag === '--year') {
       if (year !== null) throw new Error('--year may be provided only once');
-      year = parseYear(value);
+      year = parseYear(value, options.latestAllowedYear);
     } else {
       tickers.push(...parseTickers(value));
     }

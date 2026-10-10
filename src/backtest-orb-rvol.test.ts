@@ -33,6 +33,15 @@ describe('parseOrbRvolArgs', () => {
     });
   });
 
+  it('allows 2026 only through the dated ORB research entry point', () => {
+    expect(parseOrbRvolArgs(['--year', '2026', '--ticker', 'SBER'])).toEqual({
+      replay: { year: 2026, tickers: ['SBER'], help: false },
+      sessionStartMinuteMoscow: null,
+      sessionEndMinuteMoscow: null,
+      mode: 'legacy',
+    });
+  });
+
   it('rejects an unknown or duplicate mode', () => {
     expect(() => parseOrbRvolArgs(['--mode', 'unknown'])).toThrow('legacy or retest-breadth');
     expect(() => parseOrbRvolArgs(['--mode', 'retest-breadth', '--mode', 'legacy'])).toThrow('only once');

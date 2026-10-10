@@ -157,6 +157,54 @@ describe('ScenarioJournal', () => {
     ).toEqual([]);
   });
 
+  it('opens one LQDT paper cash sleeve, refuses churn, then marks and closes', () => {
+    const { journal } = createJournal();
+
+    const opened = journal.openPaperCashSleeve({
+      instrumentId: 'figi-lqdt',
+      principal: 1_000_000,
+      openPrice: 100,
+      day: '2025-01-06',
+    });
+    expect(opened.state.status).toBe('open');
+    expect(opened.ticker).toBe('LQDT');
+
+    const other = journal.openPaperCashSleeve({
+      book: 'sbmm',
+      ticker: 'SBMM',
+      instrumentId: 'figi-sbmm',
+      principal: 1_000_000,
+      openPrice: 10,
+      day: '2025-01-06',
+    });
+    expect(other.ticker).toBe('SBMM');
+    expect(opened.role).toBe('cash_sleeve');
+
+    expect(() =>
+      journal.openPaperCashSleeve({
+        instrumentId: 'figi-lqdt',
+        principal: 10_000,
+        openPrice: 101,
+        day: '2025-01-13',
+      }),
+    ).toThrow('sleeve-already-open-no-churn');
+
+    const marked = journal.markPaperCashSleeve({ markPrice: 110, day: '2025-06-30' });
+    expect(marked.state.status).toBe('open');
+    if (marked.state.status !== 'open') throw new Error('expected open');
+    expect(marked.state.lastMarkPrice).toBe(110);
+
+    const closed = journal.closePaperCashSleeve({
+      closePrice: 110,
+      day: '2025-12-30',
+      note: 'policy end',
+    });
+    expect(closed.state).toEqual({ status: 'empty', cash: expect.any(Number) });
+    if (closed.state.status !== 'empty') throw new Error('expected empty');
+    expect(closed.state.cash).toBeGreaterThan(1_000_000);
+    expect(closed.closeNote).toBe('policy end');
+  });
+
   it('persists scanner pause and Telegram update state', () => {
     const { journal } = createJournal();
 

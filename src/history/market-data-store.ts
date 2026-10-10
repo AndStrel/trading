@@ -348,6 +348,10 @@ export class MarketDataStore {
       deleteOtherTickerCandles.run(input.year, input.ticker, input.year, input.instrumentId);
       deleteOtherTickerImports.run(input.ticker, input.year, input.instrumentId);
       deleteOtherTickerResearch.run(input.ticker, input.year, input.instrumentId);
+      // A corrected source invalidates its derived features/labels atomically.
+      database.prepare(`DELETE FROM research_situations
+        WHERE instrument_id = ? AND source_year = ? AND source_archive_sha256 <> ?`)
+        .run(input.instrumentId, input.year, input.archiveSha256);
       // A renewed archive is authoritative for its full calendar year. Removing its prior
       // rows inside the same transaction prevents stale rows from surviving a correction.
       deletePriorArchive.run(input.instrumentId, input.year);
@@ -721,7 +725,9 @@ export class MarketDataStore {
       const outcomes = this.readResearchOutcomes(database, nearestRows.map(({ row }) => row.situation_id));
       return nearestRows.map(({ situation, distance }) => ({
         ...situation,
-        outcomes: outcomes.get(situation.situationId) ?? [],
+        // A past observation can still have an outcome that was unknown at the
+        // decision cutoff. Keep the historical neighbor, but never reveal it.
+        outcomes: (outcomes.get(situation.situationId) ?? []).filter((outcome) => outcome.terminalAt <= input.before),
         distance,
       }));
     } finally {
