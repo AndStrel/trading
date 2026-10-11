@@ -72,7 +72,11 @@ async function diagnose(settings) {
     }
   }
 
-  if (settings.profile === 'sandbox' || config.execution.mode === 'sandbox') {
+  if (config.execution.mode === 'live') {
+    add('LIVE_MODE', config.execution.token && config.execution.accountId ? 'ok' : 'error',
+      'Реальный счёт задан отдельным токеном и дневным счётом. Заявка не уходит, пока в Telegram не будет /execution_arm LIVE и подтверждения карточки. При старте kill switch включён.');
+    add('LIVE_ARM', 'warning', 'Брокер, деньги и снятие стопа этой проверкой не затрагивались. После запуска смотрите /status.');
+  } else if (settings.profile === 'sandbox' || config.execution.mode === 'sandbox') {
     add('SANDBOX_MODE', config.execution.mode === 'sandbox' ? 'ok' : 'error', 'Для sandbox-профиля требуется T_INVEST_EXECUTION_MODE=sandbox.');
     add('SANDBOX_TOKEN', config.execution.token ? 'ok' : 'error', 'Песочнице нужен отдельный T_INVEST_SANDBOX_TOKEN.');
     add('SANDBOX_PROTECTION', config.execution.sandboxProtectionEnabled ? 'ok' : 'warning', 'Защитный выход включается T_INVEST_SANDBOX_PROTECTION_ENABLED=true.');

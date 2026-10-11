@@ -48,6 +48,14 @@ describe('daily live preparation readiness', () => {
     expect(report.blockers.join(';')).toContain('sandbox');
   });
 
+  it('accepts a trader tariff without treating the check itself as permission to send', async () => {
+    const client = broker();
+    client.getUserInfo.mockResolvedValue({ tariff: 'Trader' });
+    const report = await new LivePilotPreflight(config, client).check();
+    expect(report).toMatchObject({ liveSubmissionAllowed: false, accountChecksPassed: true });
+    expect(report.blockers.join(';')).not.toContain('Тариф');
+  });
+
   it('never marks live submission ready even when the account checks pass', async () => {
     const report = await new LivePilotPreflight(config, broker()).check();
     expect(report).toMatchObject({ liveSubmissionAllowed: false, accountChecksPassed: true, availableCashRub: 1000 });

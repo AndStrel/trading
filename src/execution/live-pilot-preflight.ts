@@ -48,8 +48,8 @@ export class LivePilotPreflight {
           || account.type !== 'ACCOUNT_TYPE_TINKOFF') {
           report.blockers.push('Доступ к выбранному обычному брокерскому счёту не подтверждён.');
         }
-        const tariff = z.object({ tariff: z.string() }).parse(infoPayload).tariff;
-        if (tariff.toLowerCase() !== 'investor') report.blockers.push('Тариф изменился: требуется повторная проверка расходов.');
+        const tariff = z.object({ tariff: z.string() }).parse(infoPayload).tariff.toLowerCase();
+        if (tariff !== 'investor' && tariff !== 'trader') report.blockers.push('Тариф изменился: требуется повторная проверка расходов.');
         if (report.blockers.length === 0) {
           const [positionPayload, orderPayload, stopPayload] = await Promise.all([
             this.client.getPositions(pilot.accountId), this.client.getOrders(pilot.accountId), this.client.getStopOrders(pilot.accountId),
@@ -81,7 +81,9 @@ export class LivePilotPreflight {
         report.blockers.push('Проверка брокера не завершена или ответ неполный. Счёт не признан готовым.');
       }
     }
-    report.blockers.push('Live-отправка закрыта: ещё нужны защитный стоп, сверка после сбоев, учёт фактического убытка и sandbox-проверка полного цикла.');
+    report.blockers.push(this.config.execution.mode === 'live'
+      ? 'Проверка не отправляет заявку. Нужны /execution_arm LIVE и /approve ID CONFIRM. Стоп ставится только после исполнения покупки.'
+      : 'Live-отправка закрыта: ещё нужны защитный стоп, сверка после сбоев, учёт фактического убытка и sandbox-проверка полного цикла.');
     return report;
   }
 }

@@ -17,6 +17,7 @@ import type { TelegramClient, TelegramUpdate } from './client.js';
 import { menuCommand, tradingMenu } from './menu.js';
 import { formatNanoRub } from '../execution/sandbox-round-trip.js';
 import { getStrategyDescriptor, isTradingStrategyId, STRATEGY_CATALOG, type TradingStrategyId } from '../strategies/catalog.js';
+import { strategyEntryWindow } from '../strategies/entry-window.js';
 import type { TradingSelection } from '../strategies/selection.js';
 
 type TradingReport = Omit<IntradayScanReport, 'strategyId' | 'selectionRevision' | 'recommendations'> &
@@ -41,7 +42,7 @@ type ExecutionControl = Pick<
   | 'listRecent'
   | 'submitScenario'
   | 'reconcileScenario'
->;
+> & { armLive?(): Promise<void> };
 type TelegramBotLog = (message: string) => void;
 type CardRenderer = (svg: string) => Promise<Uint8Array>;
 
@@ -50,6 +51,54 @@ function normalizeCommand(text: string): string {
   if (fromMenu) return fromMenu;
   const firstWord = text.trim().split(/\s+/, 1)[0]?.toLowerCase() ?? '';
   return firstWord.replace(/@[a-z0-9_]+$/i, '');
+}
+
+function moscowClock(ms: number): string {
+  return new Date(ms).toLocaleTimeString('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' });
+}
+
+export function entryHoursNote(strategyId: TradingStrategyId, startMinutes: number, now: Date): string {
+  const window = strategyEntryWindow(strategyId, startMinutes, now);
+  if (!window || (now.getTime() >= window.entryStartMs && now.getTime() < window.entryEndMs)) return '';
+  return `Новые заявки с ${moscowClock(window.entryStartMs)} до ${moscowClock(window.entryEndMs)} МСК. Сейчас окно закрыто.`;
+}
+
+function explainOrderBlock(detail: string): string {
+  const text: Record<string, string> = {
+    'Net reward-to-risk is below 2.0': 'после комиссии и проскальзывания потенциал меньше двух рисков',
+    'Cash including entry costs is insufficient': 'денег дневного лимита не хватает на вход с расходами',
+    'Trade risk including round-trip expenses exceeds the limit': 'риск сделки с расходами выше лимита',
+    'Daily reserved risk budget would be exceeded': 'дневной резерв риска будет превышен',
+    'Daily loss allowance would be exceeded': 'дневной лимит убытка будет превышен',
+    'Short and margin trading are forbidden': 'короткие и маржинальные сделки запрещены',
+    'Daily pilot preparation is disabled': 'подготовка дневного пилота выключена',
+    'Scenario exceeds the position limit': 'размер позиции выше лимита',
+    'Scenario exceeds the risk limit': 'риск выше лимита сделки',
+    'Short execution is disabled': 'короткая заявка запрещена',
+    'Execution kill switch is active': 'стоп включён, новая заявка не уйдёт',
+    'Live account checks failed; no order was sent': 'проверка реального счёта не пройдена, заявка не отправлена',
+    'Instrument is not in normal trading status': 'бумага сейчас не в обычных торгах',
+    'API limit-order availability is not confirmed': 'лимитная заявка через API сейчас недоступна',
+    'A valid bid/ask spread is unavailable': 'нет нормального спреда bid/ask',
+    'Best ask does not contain enough lots': 'на лучшем предложении не хватает лотов',
+    'Current spread exceeds the intraday limit': 'спред шире дневного лимита',
+    'Current best ask moved too far from the planned entry': 'цена ушла от плана, нужна новая карточка',
+    'Daily execution order limit has been reached': 'на сегодня исчерпан лимит числа заявок',
+    'Daily execution risk limit would be exceeded': 'эта заявка превысит дневной лимит риска',
+    'Versioned scanner entry window is closed; regenerate the candidate': 'окно входа закрыто, нужна новая карточка',
+    'Queued order has outdated expense assumptions; create a fresh candidate': 'расходы в карточке устарели, нужен новый проход',
+    'Sandbox arming is not confirmed; separate preparation or recovery is required and execution remains killed': 'песочница не включена: нет подтверждённой подготовки или нужна сверка, стоп остаётся включённым',
+    'Sandbox protection is not confirmed; entry risk remains reserved, new entries are killed, and no stop is retried': 'покупка могла исполниться, защитный стоп песочницы не подтверждён. Новые заявки заблокированы.',
+    'Sandbox reconciliation is incomplete; no new order was sent and prior risk remains reserved': 'сверка песочницы не завершена. Новая заявка не отправлялась, резерв сохранён.',
+    'Live pilot rejected the order': 'дневной лимит не пропустил заявку',
+    'No whole lot fits the configured risk and position limits': 'ни один целый лот не помещается в лимит риска и позиции',
+    'Intraday scanner is paused by an authorized operator': 'сканер на паузе',
+    'Intraday universe contains no eligible instruments': 'в выбранной вселенной нет подходящих бумаг',
+    'Candidate is below the per-scan ranking limit': 'сигнал есть, но в этот проход он не вошёл в число карточек',
+  };
+  if (text[detail]) return text[detail];
+  if (detail.startsWith('Candidate is older than ')) return 'карточка устарела, нужен новый проход сканера';
+  return detail;
 }
 
 function formatNumber(value: number): string {
@@ -195,16 +244,17 @@ function helpText(): string {
     '/pilot — одобренные лимиты дневного пилота',
     '/pilot_check — проверить отдельный live-счёт без заявок',
     '/orders — последние подготовленные поручения',
-    '/reconcile ID — сверить sandbox-заявку без повторной отправки',
+    '/reconcile ID — сверить заявку без повторной покупки',
     '/execution_arm SANDBOX — разрешить подтверждённые заявки в песочнице',
-    '/approve ID CONFIRM — подтвердить одну sandbox-заявку',
+    '/execution_arm LIVE — разрешить подтверждённые заявки на реальном счёте',
+    '/approve ID CONFIRM — подтвердить одну заявку',
     '/reject ID — отклонить подготовленную заявку',
     '/kill — немедленно запретить новые отправки заявок',
     '/paper — сводка admitted paper-стратегий (кэш + dual momentum)',
     '/sleeve — локальный paper cash sleeve LQDT/SBMM (без заявок брокеру)',
     '/dual — paper dual momentum SBMX/SBGB/SBMM (сигнал, без заявок брокеру)',
     '',
-    'Реальный счёт недоступен: реализовано только подтверждаемое исполнение в песочнице.',
+    'Реальный счёт включается отдельно: T_INVEST_EXECUTION_MODE=live, свой токен и счёт, затем /execution_arm LIVE и /approve ID CONFIRM.',
   ].join('\n');
 }
 
@@ -280,22 +330,9 @@ export class TelegramTradingBot {
       return;
     }
 
-    let executionHint = '';
-    let executionScenarioId: number | undefined;
-    if (this.execution?.mode() === 'sandbox') {
-      try {
-        const order = this.execution.queueScenario(scenario);
-        if (order) {
-          executionHint = `\nПесочница: /approve ${scenario.id} CONFIRM или /reject ${scenario.id}`;
-          executionScenarioId = scenario.id;
-        }
-      } catch (error: unknown) {
-        const detail = error instanceof Error ? error.message : 'Unknown execution queue error';
-        this.log(`Execution queue failed for scenario ${scenario.id}: ${detail}`);
-      }
-    } else if (this.execution) {
-      executionHint = '\nИсполнение выключено. Заявка не готовилась. Чтобы она стала подтверждаемой, нужен T_INVEST_EXECUTION_MODE=sandbox, затем /execution_arm SANDBOX и /approve ID CONFIRM. Реальные заявки недоступны.';
-    }
+    const prepared = this.prepareCandidate(scenario);
+    const executionHint = prepared.hint;
+    const executionScenarioId = prepared.scenarioId;
 
     for (const chatId of this.config.telegram.allowedChatIds) {
       await this.sendCandidateCard(
@@ -338,7 +375,7 @@ export class TelegramTradingBot {
     }
 
     if (command === '/start' || command === '/menu' || command === '/help') {
-      await this.client.sendMessage(normalizedChatId, 'Управление — кнопками ниже. Реальные заявки пока заблокированы.\n\n' + helpText(), { replyMarkup: tradingMenu() });
+      await this.client.sendMessage(normalizedChatId, `${this.nextStepText()}\n\n${helpText()}`, { replyMarkup: tradingMenu() });
       return;
     }
     if (command === '/app') {
@@ -349,7 +386,7 @@ export class TelegramTradingBot {
       } else {
         // An INLINE launch supplies signed initData. A keyboard web_app launch
         // does not, so the persistent menu sends this inline launch separately.
-        await this.client.sendMessage(normalizedChatId, 'Панель: статус, кандидаты и ограничения. Реальные заявки недоступны.', {
+        await this.client.sendMessage(normalizedChatId, `Панель: статус, кандидаты и ограничения. ${this.nextStepText()}`, {
           replyMarkup: { inline_keyboard: [[{ text: 'Открыть Mini App', web_app: { url: this.config.telegram.miniApp.url } }]] },
         });
       }
@@ -409,9 +446,15 @@ export class TelegramTradingBot {
           const exit = result.sandboxExit;
           const sale = exit ? ` Продано ${exit.soldLots}, осталось ${exit.remainingLots} лот. Результат после известных комиссий: ${exit.netPnlNano === null ? 'не подтверждён' : formatNanoRub(exit.netPnlNano)}. Пустой счёт: ${exit.flatConfirmedAt ? 'подтверждён при этой сверке' : 'не подтверждён'}. Sandbox, не реальная доходность.` : '';
           const reserve = result.order.status === 'failed' ? 'Подтверждено нулевое исполнение; резерв освобождён.' : 'Резерв риска сохранён.';
-          await this.client.sendMessage(normalizedChatId, `Sandbox-сверка #${id}: ${result.executionStatus}; исполнено ${result.lotsExecuted}/${result.order.lots} лот.${sale} Новая заявка не отправлялась. ${reserve}`);
-        } catch {
-          await this.client.sendMessage(normalizedChatId, 'Сверка не подтверждена. Новая заявка не отправлялась; ранее зарезервированный риск сохранён.');
+          const text = this.execution.mode() === 'live'
+            ? `Сверка #${id}: ${result.executionStatus}; исполнено ${result.lotsExecuted}/${result.order.lots} лот. ${result.lotsExecuted > 0 ? 'Защитный стоп поставлен или уже стоял. ' : ''}Повторная покупка не отправлялась. ${reserve}`
+            : `Sandbox-сверка #${id}: ${result.executionStatus}; исполнено ${result.lotsExecuted}/${result.order.lots} лот.${sale} Новая заявка не отправлялась. ${reserve}`;
+          await this.client.sendMessage(normalizedChatId, text);
+        } catch (error: unknown) {
+          const text = this.execution.mode() === 'live'
+            ? `Сверка #${id} не завершена. Повторную покупку не отправляйте: снова /reconcile ${id}. Если покупка уже есть, стоп мог не подтвердиться.`
+            : `Сверка не подтверждена. ${this.errorMessage(error)}`;
+          await this.client.sendMessage(normalizedChatId, text);
         }
       }
       return;
@@ -447,7 +490,7 @@ export class TelegramTradingBot {
       await this.client.sendMessage(
         normalizedChatId,
         this.execution
-          ? 'Kill switch включён. Новые заявки не будут отправляться.'
+          ? 'Kill switch включён. Новые заявки не будут отправляться. Уже открытая позиция и уже принятая заявка этим не закрываются.'
           : 'Модуль исполнения не подключён.',
       );
       return;
@@ -478,7 +521,9 @@ export class TelegramTradingBot {
                 inline_keyboard: [
                   [
                     {
-                      text: `✅ Подтвердить sandbox #${executionScenarioId}`,
+                      text: this.execution?.mode() === 'live'
+                        ? `✅ Подтвердить #${executionScenarioId}`
+                        : `✅ Подтвердить sandbox #${executionScenarioId}`,
                       callback_data: `exec:approve:${executionScenarioId}:confirm`,
                     },
                   ],
@@ -522,7 +567,8 @@ export class TelegramTradingBot {
     }
 
     for (const candidate of candidates) {
-      await this.sendCandidateCard(chatId, candidate, 'Кандидат из журнала');
+      const prepared = this.prepareCandidate(candidate);
+      await this.sendCandidateCard(chatId, candidate, 'Кандидат из журнала', prepared.hint, prepared.scenarioId);
     }
   }
 
@@ -548,7 +594,7 @@ export class TelegramTradingBot {
         return 'Сканер поставлен на паузу. Новые проходы не будут запрашивать данные рынка.';
       case '/resume':
         this.scanner.resume();
-        return 'Сканер снова активен. Следующий проход состоится на ближайшей границе интервала.';
+        return 'Сканер снова активен. Проход запускается сразу, не на следующей границе интервала.';
       default:
         return `Неизвестная команда.\n\n${helpText()}`;
     }
@@ -613,6 +659,7 @@ export class TelegramTradingBot {
     const report = this.scanner.getLatestReport?.();
 
     return [
+      this.nextStepText(),
       `Сканер: ${this.scanner.isPaused() ? 'пауза' : 'активен'}`,
       `Интервал: ${this.config.scanner.intervalSeconds / 60} мин.`,
       `Вселенная: ${universe}`,
@@ -647,7 +694,7 @@ export class TelegramTradingBot {
         `${item.ticker}: ${labels[item.status]} · оценка ${item.score}/100`,
         `Лот: ${money(item.lotCostRub)} · затраты круга: ${money(item.roundTripCostsRub)}`,
         `Расчётный риск: ${money(item.totalRiskRub)} · потенциал после расходов: ${money(item.netRewardRub)}`,
-        ...item.reasons.slice(0, 2).map(reason => `• ${reason.slice(0, 240)}`),
+        ...item.reasons.slice(0, 2).map(reason => `• ${explainOrderBlock(reason).slice(0, 240)}`),
       ].join('\n')),
       'Оценка отражает соответствие правилам, а не вероятность прибыльной сделки. Карточки кандидатов доступны через /candidates.',
     ].filter(Boolean).join('\n\n');
@@ -737,8 +784,67 @@ export class TelegramTradingBot {
       `Порог фактического дневного убытка: ${formatNumber(pilot.maxDailyLossRub)} ₽ — монитор ещё не подключён.`,
       `Комиссия в модели: ${formatNumber(this.config.commissionRate * 100)}% на сторону плюс проскальзывание.`,
       'Без плеча и шортов; средства недельного счёта не используются.',
-      'Реальные заявки недоступны. Лимит риска не гарантирует размер фактического убытка.',
+      this.execution?.mode() === 'live'
+        ? this.nextStepText()
+        : 'Реальные заявки недоступны. Лимит риска не гарантирует размер фактического убытка.',
     ].join('\n');
+  }
+
+  private prepareCandidate(scenario: JournalScenarioRecord): { hint: string; scenarioId?: number } {
+    if (!this.execution) return { hint: '' };
+    if (this.execution.mode() !== 'sandbox' && this.execution.mode() !== 'live') {
+      return { hint: `\n${this.nextStepText()}` };
+    }
+    try {
+      const order = this.execution.queueScenario(scenario);
+      if (!order) return { hint: '' };
+      if (order.status === 'rejected' || order.status === 'failed') {
+        return { hint: `\nЗаявка #${scenario.id} уже ${order.status === 'rejected' ? 'отклонена' : 'не прошла'}. Ждите новый сигнал сканера.` };
+      }
+      if (order.status === 'submitting') {
+        return { hint: `\nЗаявка #${scenario.id} уже у брокера, исход не подтверждён. /reconcile ${scenario.id}. Повторное подтверждение не создаёт вторую заявку.` };
+      }
+      if (order.status === 'accepted') {
+        return { hint: `\nЗаявка #${scenario.id} уже принята. Смотрите /orders. Новое подтверждение ничего не отправит.` };
+      }
+      const arm = this.execution.mode() === 'live' ? '/execution_arm LIVE' : '/execution_arm SANDBOX';
+      const hint = this.execution.isKilled()
+        ? `\nЗаявка #${scenario.id} подготовлена, отправка закрыта стопом. Сначала ${arm}, затем /approve ${scenario.id} CONFIRM.`
+        : `\n/approve ${scenario.id} CONFIRM или /reject ${scenario.id}.`;
+      return { hint, scenarioId: scenario.id };
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : 'Unknown execution queue error';
+      this.log(`Execution queue failed for scenario ${scenario.id}: ${detail}`);
+      return { hint: `\nЗаявка не подготовлена: ${explainOrderBlock(detail)}` };
+    }
+  }
+
+  private nextStepText(): string {
+    const paused = this.scanner.isPaused() ? 'Сканер на паузе: нажмите ▶ Продолжить. ' : '';
+    if (!this.execution) return `${paused}Модуль заявок не подключён.`;
+    const mode = this.execution.mode();
+    if (mode === 'disabled' || mode === '') {
+      return `${paused}Исполнение выключено. Заявка не готовилась. В .env поставьте T_INVEST_EXECUTION_MODE=sandbox или live и перезапустите контейнер.`;
+    }
+    if (!this.execution.isConfigured()) {
+      return `${paused}${mode === 'live' ? 'Реальный токен не задан или совпадает с токеном чтения.' : 'Токен песочницы не задан.'}`;
+    }
+    if (!this.execution.isReady()) {
+      return `${paused}${mode === 'live'
+        ? 'Не задан отдельный дневной счёт T_INVEST_LIVE_ACCOUNT_ID.'
+        : 'Песочница не подготовлена. После подготовки счёта: /execution_arm SANDBOX.'}`;
+    }
+    if (this.execution.isKilled()) {
+      return `${paused}${mode === 'live'
+        ? 'Реальный счёт закрыт стопом. Сначала /pilot_check, затем /execution_arm LIVE. Каждая карточка подтверждается отдельно. Уже открытая позиция не закрывается.'
+        : 'Песочница закрыта стопом. Когда счёт подготовлен: /execution_arm SANDBOX. Уже открытая позиция не закрывается.'}`;
+    }
+    const selection = this.scanner.getTradingSelection?.();
+    const hours = selection ? entryHoursNote(selection.strategyId, this.config.scanner.sessionStartMinutes, new Date()) : '';
+    const action = mode === 'live'
+      ? 'Реальный счёт включён. На карточке нажмите подтверждение. /kill снова запретит новые заявки.'
+      : 'Песочница включена. На карточке нажмите подтверждение. /kill снова запретит новые заявки.';
+    return `${paused}${hours ? `${hours} ` : ''}${action}`;
   }
 
   private executionText(): string {
@@ -746,9 +852,13 @@ export class TelegramTradingBot {
     return [
       `Исполнение: ${this.execution.mode()}`,
       `Токен: ${this.execution.isConfigured() ? 'задан' : 'не задан'}`,
-      `Sandbox-счёт: ${this.execution.isReady() ? 'настроен; активация требует отдельной проверки' : 'требуется отдельная подготовка'}`,
+      this.execution.mode() === 'live'
+        ? `Реальный счёт: ${this.execution.isReady() ? 'задан; включение требует /execution_arm LIVE' : 'не задан'}`
+        : `Sandbox-счёт: ${this.execution.isReady() ? 'настроен; активация требует отдельной проверки' : 'требуется отдельная подготовка'}`,
       `Kill switch: ${this.execution.isKilled() ? 'включён' : 'выключен'}`,
-      'Live-режим отсутствует; доступна только песочница с подтверждением каждой заявки.',
+      this.execution.mode() === 'live'
+        ? 'Каждая заявка требует /approve ID CONFIRM. После исполнения покупки ставится стоп.'
+        : 'Реальный счёт включается режимом live, отдельным токеном и /execution_arm LIVE.',
     ].join('\n');
   }
 
@@ -757,7 +867,7 @@ export class TelegramTradingBot {
     const orders = this.execution.listRecent(5);
     if (orders.length === 0) return 'Подготовленных поручений пока нет.';
     return [
-      'Последние sandbox-поручения:',
+      this.execution.mode() === 'live' ? 'Последние поручения:' : 'Последние sandbox-поручения:',
       ...orders.map(
         (order) =>
           `#${order.scenarioId}: ${order.status}, ${order.lots} лот. по ${formatTradePrice(order.limitPrice)} ₽, риск ${formatNumber(order.estimatedRiskRub)} ₽`,
@@ -771,8 +881,21 @@ export class TelegramTradingBot {
       return;
     }
     const confirmation = text.trim().split(/\s+/)[1];
+    if (confirmation === 'LIVE') {
+      if (!this.execution.armLive) {
+        await this.client.sendMessage(chatId, 'Боевой исполнитель не подключён. Для песочницы: /execution_arm SANDBOX');
+        return;
+      }
+      try {
+        await this.execution.armLive();
+        await this.client.sendMessage(chatId, 'Реальный счёт разрешён. Каждая заявка всё равно требует /approve ID CONFIRM.');
+      } catch (error: unknown) {
+        await this.client.sendMessage(chatId, `Не включено: ${this.errorMessage(error)}`);
+      }
+      return;
+    }
     if (confirmation !== 'SANDBOX') {
-      await this.client.sendMessage(chatId, 'Для включения отправьте точно: /execution_arm SANDBOX');
+      await this.client.sendMessage(chatId, 'Для песочницы: /execution_arm SANDBOX. Для реального счёта: /execution_arm LIVE');
       return;
     }
     try {
@@ -807,9 +930,11 @@ export class TelegramTradingBot {
     }
     try {
       const result = await this.execution.submitScenario(scenarioId, chatId);
+      const title = this.execution.mode() === 'live' ? 'Заявка' : 'Sandbox-заявка';
+      const stop = this.execution.mode() === 'live' && result.lotsExecuted > 0 ? ' Защитный стоп подтверждён.' : '';
       await this.client.sendMessage(
         chatId,
-        `Sandbox-заявка #${scenarioId}: ${result.executionStatus}; исполнено ${result.lotsExecuted}/${result.order.lots} лот.`,
+        `${title} #${scenarioId}: ${result.executionStatus}; исполнено ${result.lotsExecuted}/${result.order.lots} лот.${stop}`,
       );
     } catch (error: unknown) {
       await this.client.sendMessage(chatId, `Результат заявки #${scenarioId} не подтверждён: ${this.errorMessage(error)}. При сетевом сбое используйте /reconcile ${scenarioId}; заявку нельзя считать отсутствующей.`);
@@ -837,7 +962,8 @@ export class TelegramTradingBot {
     }
     try {
       this.execution.rejectScenario(scenarioId, chatId);
-      await this.client.sendMessage(chatId, `Sandbox-заявка #${scenarioId} отклонена.`);
+      const label = this.execution.mode() === 'live' ? 'Заявка' : 'Sandbox-заявка';
+      await this.client.sendMessage(chatId, `${label} #${scenarioId} отклонена.`);
     } catch (error: unknown) {
       await this.client.sendMessage(chatId, `Не отклонено: ${this.errorMessage(error)}`);
     }
@@ -878,15 +1004,16 @@ export class TelegramTradingBot {
       return;
     }
 
+    const blocked = Boolean(approveMatch && this.execution?.isKilled());
     await this.client.answerCallbackQuery?.(
       callbackId,
-      approveMatch ? 'Проверяю и отправляю…' : 'Отклоняю…',
+      blocked ? 'Стоп включён, заявка не уйдёт' : approveMatch ? 'Проверяю и отправляю…' : 'Отклоняю…',
     );
     if (approveMatch) await this.submitExecution(normalizedChatId, scenarioId);
     else await this.rejectExecutionById(normalizedChatId, scenarioId);
   }
 
   private errorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : 'неизвестная ошибка';
+    return explainOrderBlock(error instanceof Error ? error.message : 'неизвестная ошибка');
   }
 }

@@ -1,5 +1,7 @@
 import { loadConfig } from './config.js';
 import { ExecutionService } from './execution/execution-service.js';
+import { LiveExecutionService } from './execution/live-execution-service.js';
+import { LiveOrderClient } from './execution/live-order-client.js';
 import { TInvestOrderClient } from './execution/tinvest-order-client.js';
 import { LivePilotPreflight } from './execution/live-pilot-preflight.js';
 import { LivePreflightClient, liveProductionEndpoint } from './execution/live-preflight-client.js';
@@ -28,21 +30,23 @@ if (!config.telegram.token) {
 
 const journal = new ScenarioJournal(config.journalPath);
 const tInvestClient = new TInvestClient(config.token, config.baseUrl, { transport: config.transport });
-const orderClient = new TInvestOrderClient(config.execution.token, config.execution.baseUrl, undefined, { transport: config.transport });
-const protection = config.execution.sandboxProtectionEnabled ? new SandboxProtectionService(config, orderClient, journal) : undefined;
-const exits = config.execution.sandboxProtectionEnabled ? new SandboxExitService(config, orderClient, journal) : undefined;
-const lossGuard = config.execution.sandboxLossGuardEnabled && exits ? new SandboxLossGuard(config, orderClient, tInvestClient, exits, journal) : undefined;
-const sessionClose = config.execution.sandboxSessionCloseEnabled && exits ? new SandboxSessionClose(config, orderClient, tInvestClient, exits, journal) : undefined;
-const execution = new ExecutionService(
-  config,
-  tInvestClient,
-  orderClient,
-  journal,
-  protection,
-  exits,
-  lossGuard,
-  sessionClose,
-);
+const livePilot = new LivePilotPreflight(config, new LivePreflightClient(config.livePilot.token, liveProductionEndpoint, config.transport));
+const sandboxOrderClient = config.execution.mode === 'live'
+  ? undefined
+  : new TInvestOrderClient(config.execution.token, config.execution.baseUrl, undefined, { transport: config.transport });
+const protection = sandboxOrderClient && config.execution.sandboxProtectionEnabled ? new SandboxProtectionService(config, sandboxOrderClient, journal) : undefined;
+const exits = sandboxOrderClient && config.execution.sandboxProtectionEnabled ? new SandboxExitService(config, sandboxOrderClient, journal) : undefined;
+const lossGuard = sandboxOrderClient && config.execution.sandboxLossGuardEnabled && exits ? new SandboxLossGuard(config, sandboxOrderClient, tInvestClient, exits, journal) : undefined;
+const sessionClose = sandboxOrderClient && config.execution.sandboxSessionCloseEnabled && exits ? new SandboxSessionClose(config, sandboxOrderClient, tInvestClient, exits, journal) : undefined;
+const execution = config.execution.mode === 'live'
+  ? new LiveExecutionService(
+      config,
+      tInvestClient,
+      new LiveOrderClient(config.execution.token, config.execution.baseUrl, undefined, { transport: config.transport }),
+      livePilot,
+      journal,
+    )
+  : new ExecutionService(config, tInvestClient, sandboxOrderClient!, journal, protection, exits, lossGuard, sessionClose);
 const directMarketFetch: typeof fetch = config.transport === 'fetch' ? fetch : async (input, init) => {
   if (typeof input !== 'string' || typeof init?.body !== 'string' || !config.token) throw new Error('Invalid market request');
   const response = await postWithSystemCurl({ url: input, token: config.token, body: init.body });
@@ -101,7 +105,7 @@ const telegram = new TelegramTradingBot(
   undefined,
   undefined,
   execution,
-  new LivePilotPreflight(config, new LivePreflightClient(config.livePilot.token, liveProductionEndpoint, config.transport)),
+  livePilot,
 );
 
 // Safe startup read-back, captured by the EXISTING deployment log. This proves
@@ -142,7 +146,7 @@ if (config.telegram.miniApp.enabled) {
   });
   process.stdout.write(JSON.stringify({ event: 'mini-app-listening', liveSubmissionAllowed: false }) + '\n');
 }
-if (config.execution.sandboxProtectionEnabled && config.execution.mode === 'sandbox') {
+if (config.execution.sandboxProtectionEnabled && config.execution.mode === 'sandbox' && execution instanceof ExecutionService) {
   const safety = new SandboxSafetyMonitor(config, execution, journal, telegramClient, lossGuard);
   const monitor = async () => {
     try {

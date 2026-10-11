@@ -153,6 +153,26 @@ describe('local configuration doctor', () => {
     expect(result.stdout + result.stderr).not.toContain('invalid-secret-marker');
   });
 
+  it('recognizes live execution without calling it disabled or printing secrets', () => {
+    const path = fixtureEnvironment(temporaryDirectory(), [
+      'T_INVEST_TOKEN=readonly-secret-marker',
+      'TELEGRAM_BOT_TOKEN=telegram-secret-marker',
+      'T_INVEST_SANDBOX_TOKEN=sandbox-secret-marker',
+      'T_INVEST_LIVE_TOKEN=live-secret-marker',
+      'T_INVEST_LIVE_ACCOUNT_ID=account-secret-marker',
+      'T_INVEST_EXECUTION_MODE=live',
+    ].join('\n') + '\n');
+    const result = runDoctor(path);
+    expect(result.status).toBe(0);
+    const checks = JSON.parse(result.stdout).checks;
+    expect(checks).toContainEqual(expect.objectContaining({ code: 'LIVE_MODE', status: 'ok' }));
+    expect(checks).toContainEqual(expect.objectContaining({ code: 'LIVE_ARM', status: 'warning' }));
+    expect(checks).not.toContainEqual(expect.objectContaining({ code: 'EXECUTION_DISABLED' }));
+    for (const secret of ['readonly-secret-marker', 'telegram-secret-marker', 'sandbox-secret-marker', 'live-secret-marker', 'account-secret-marker']) {
+      expect(result.stdout + result.stderr).not.toContain(secret);
+    }
+  });
+
   it('requires a separate sandbox token and diagnoses disabled guards', () => {
     const path = fixtureEnvironment(temporaryDirectory(), 'T_INVEST_TOKEN=readonly-marker\nTELEGRAM_BOT_TOKEN=bot-marker\nT_INVEST_EXECUTION_MODE=sandbox\n');
     const result = runDoctor(path, 'sandbox');

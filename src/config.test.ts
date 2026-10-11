@@ -185,6 +185,24 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ T_INVEST_EXECUTION_MODE: 'live' })).toThrow();
   });
 
+  it('sends live orders only with a separate production token and account', () => {
+    const config = loadConfig({
+      T_INVEST_TOKEN: 'read-token',
+      T_INVEST_SANDBOX_TOKEN: 'sandbox-token',
+      T_INVEST_LIVE_TOKEN: 'production-token',
+      T_INVEST_LIVE_ACCOUNT_ID: 'daily-account',
+      T_INVEST_EXECUTION_MODE: 'live',
+    });
+    expect(config.execution.mode).toBe('live');
+    expect(config.execution.token).toBe('production-token');
+    expect(config.execution.accountId).toBe('daily-account');
+    expect(config.execution.baseUrl).toBe('https://invest-public-api.tbank.ru/rest');
+    expect(config.token).toBe('read-token');
+    expect(() => loadConfig({
+      T_INVEST_TOKEN: 'read-token', T_INVEST_LIVE_TOKEN: 'production-token', T_INVEST_EXECUTION_MODE: 'live',
+    })).toThrow(/account/);
+  });
+
   it('resolves three isolated credential roles using the dedicated sandbox field', () => {
     const config = loadConfig({
       T_INVEST_TOKEN: 'read-token',

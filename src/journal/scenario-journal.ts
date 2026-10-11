@@ -338,7 +338,7 @@ const schema = `
   CREATE TABLE IF NOT EXISTS execution_orders (
     id INTEGER PRIMARY KEY,
     scenario_id INTEGER NOT NULL UNIQUE REFERENCES scenario_journal(id),
-    mode TEXT NOT NULL CHECK(mode IN ('disabled', 'sandbox')),
+    mode TEXT NOT NULL CHECK(mode IN ('disabled', 'sandbox', 'live')),
     status TEXT NOT NULL CHECK(status IN ('pending', 'rejected', 'submitting', 'accepted', 'failed')),
     instrument_id TEXT NOT NULL,
     side TEXT NOT NULL CHECK(side IN ('long', 'short')),
@@ -1043,10 +1043,20 @@ export class ScenarioJournal {
     } finally { database.close(); }
   }
 
+  listRecoverableLiveOrders(limit: number): ExecutionOrderRecord[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 51) throw new Error('Invalid reconciliation batch size');
+    const database = this.open();
+    try {
+      return (database.prepare("SELECT * FROM execution_orders WHERE mode = 'live' AND status IN ('submitting', 'accepted') ORDER BY id ASC LIMIT ?")
+        .all(limit) as ExecutionOrderRow[]).map(row => this.toExecutionOrder(row));
+    } finally { database.close(); }
+  }
+
   claimExecution(scenarioId: number, chatId: string, limits?: {
     from: string; to: string; now: string; maxOrders: number; maxRiskRub: number; singlePosition?: boolean;
     lossGuard?: { proofId: string; accountId: string; maxDailyLossRub: number; maxTradeLossRub: number };
     preparedSandbox?: { raw: string; accountId: string; generation: string | null };
+    liveAccountId?: string;
     tradingSelection?: { key: string; raw: string };
     cashBaseline?: SandboxCashBaseline;
   }): ExecutionOrderRecord {
@@ -1059,6 +1069,10 @@ export class ScenarioJournal {
       if (!row) throw new Error('Execution order was not found');
 
       if (row.status === 'pending') {
+        if (row.mode === 'live') {
+          const armed = (database.prepare("SELECT value FROM runtime_state WHERE key='execution.live_armed_account'").get() as { value: string } | undefined)?.value;
+          if (!limits?.liveAccountId || armed !== limits.liveAccountId) throw new Error('Live account is not armed');
+        }
         if (limits) {
           const killed = database.prepare('SELECT value FROM runtime_state WHERE key = ?')
             .get('execution.kill_switch') as { value: string } | undefined;
@@ -1110,7 +1124,7 @@ export class ScenarioJournal {
           )
           .run(chatId, now, row.id);
         this.appendExecutionEvent(database, Number(row.id), 'approved', { chatId }, now);
-        this.bumpSandboxRevision(database);
+        if (row.mode === 'sandbox') this.bumpSandboxRevision(database);
       } else {
         throw new Error(`Execution order is already ${row.status}`);
       }
@@ -1839,7 +1853,7 @@ export class ScenarioJournal {
         executionStatus: snapshot.executionStatus, lotsExecuted: snapshot.lotsExecuted,
         grossNano: snapshot.grossNano, commissionNano: snapshot.commissionNano,
       }, now);
-      if (!evidence || evidence.snapshot_json !== JSON.stringify(snapshot) || row.status !== status) this.bumpSandboxRevision(database);
+      if (row.mode === 'sandbox' && (!evidence || evidence.snapshot_json !== JSON.stringify(snapshot) || row.status !== status)) this.bumpSandboxRevision(database);
       database.exec('COMMIT');
       return this.toExecutionOrder(database.prepare('SELECT * FROM execution_orders WHERE id = ?').get(row.id) as ExecutionOrderRow);
     } catch (error: unknown) {
@@ -2022,6 +2036,25 @@ export class ScenarioJournal {
     finally { db.close(); }
   }
 
+  finishLiveArming(generation: string, accountId: string): void {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(accountId)) throw new Error('Live account is not armed');
+    const db = this.open();
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      const state = (key: string) => (db.prepare('SELECT value FROM runtime_state WHERE key=?').get(key) as { value: string } | undefined)?.value;
+      if (!generation || state('execution.kill_switch') !== 'true' || state('execution.kill_generation') !== generation
+        || db.prepare("SELECT id FROM execution_orders WHERE mode='live' AND status IN ('submitting','accepted') LIMIT 1").get()) {
+        throw new Error('Live arming was superseded or requires recovery; execution remains killed');
+      }
+      const now = new Date().toISOString();
+      db.prepare(`INSERT INTO runtime_state (key,value,updated_at) VALUES ('execution.live_armed_account',?,?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`).run(accountId, now);
+      db.prepare("UPDATE runtime_state SET value='false',updated_at=? WHERE key='execution.kill_switch'").run(now);
+      db.exec('COMMIT');
+    } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+    finally { db.close(); }
+  }
+
   private finishExecution(
     scenarioId: number,
     status: 'accepted' | 'failed',
@@ -2055,7 +2088,7 @@ export class ScenarioJournal {
         brokerOrderId,
         detail: detail.slice(0, 500),
       });
-      this.bumpSandboxRevision(database);
+      if (row.mode === 'sandbox') this.bumpSandboxRevision(database);
       database.exec('COMMIT');
 
       const finished = database.prepare('SELECT * FROM execution_orders WHERE id = ?').get(row.id) as ExecutionOrderRow;
@@ -2096,6 +2129,7 @@ export class ScenarioJournal {
     chmodSync(this.databasePath, 0o600);
     database.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;');
     database.exec(schema);
+    this.migrateExecutionOrderMode(database);
     this.migratePaperCashSleeveTickers(database);
     return database;
   }
@@ -2121,6 +2155,38 @@ export class ScenarioJournal {
       snapshot: parseJson<unknown>(row.snapshot_json, {}),
       ...(row.note ? { note: row.note } : {}),
     };
+  }
+
+  private migrateExecutionOrderMode(database: DatabaseSync): void {
+    const table = database.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'execution_orders'`).get() as { sql: string } | undefined;
+    if (!table || table.sql.includes("'live'")) return;
+    database.exec('PRAGMA foreign_keys = OFF');
+    database.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE execution_orders_live_mode (
+        id INTEGER PRIMARY KEY,
+        scenario_id INTEGER NOT NULL UNIQUE REFERENCES scenario_journal(id),
+        mode TEXT NOT NULL CHECK(mode IN ('disabled', 'sandbox', 'live')),
+        status TEXT NOT NULL CHECK(status IN ('pending', 'rejected', 'submitting', 'accepted', 'failed')),
+        instrument_id TEXT NOT NULL,
+        side TEXT NOT NULL CHECK(side IN ('long', 'short')),
+        lots INTEGER NOT NULL CHECK(lots > 0),
+        limit_price REAL NOT NULL CHECK(limit_price > 0),
+        estimated_risk_rub REAL NOT NULL CHECK(estimated_risk_rub > 0),
+        order_request_id TEXT NOT NULL UNIQUE,
+        broker_order_id TEXT,
+        approved_by_chat_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        detail TEXT
+      ) STRICT;
+      INSERT INTO execution_orders_live_mode SELECT * FROM execution_orders;
+      DROP TABLE execution_orders;
+      ALTER TABLE execution_orders_live_mode RENAME TO execution_orders;
+      CREATE INDEX IF NOT EXISTS execution_orders_updated_at ON execution_orders(updated_at DESC);
+      COMMIT;
+    `);
+    database.exec('PRAGMA foreign_keys = ON');
   }
 
   private migratePaperCashSleeveTickers(database: DatabaseSync): void {

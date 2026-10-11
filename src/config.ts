@@ -1,11 +1,12 @@
 import { z } from 'zod/v4';
 
 import type { TInvestTransport } from './tbank/client.js';
+import { liveProductionEndpoint } from './execution/live-preflight-client.js';
 import { pilotPositionBudget } from './execution/live-pilot-risk.js';
 import { TRADING_STRATEGY_IDS, type TradingStrategyId } from './strategies/catalog.js';
 
 export type Strategy = 'intraday' | 'swing';
-export type ExecutionMode = 'disabled' | 'sandbox';
+export type ExecutionMode = 'disabled' | 'sandbox' | 'live';
 export type IntradayUniverseMode = 'moex-liquid' | 'watchlist';
 
 export type IntradayWatchlistItem = {
@@ -60,7 +61,7 @@ export type BacktestConfig = {
   maxConcurrentPositions: number;
 };
 
-// Preparation only: this profile never enables live order submission.
+// Risk profile for the daily account. It does not by itself send an order.
 export type LivePilotConfig = {
   prepare: boolean;
   token?: string;
@@ -194,7 +195,7 @@ const envSchema = z.object({
   TELEGRAM_MINI_APP_URL: optionalNonEmpty,
   TELEGRAM_MINI_APP_HOST: z.enum(['127.0.0.1', '0.0.0.0']).default('127.0.0.1'),
   TELEGRAM_MINI_APP_PORT: z.coerce.number().int().min(1024).max(65535).default(8080),
-  T_INVEST_EXECUTION_MODE: z.enum(['disabled', 'sandbox']).default('disabled'),
+  T_INVEST_EXECUTION_MODE: z.enum(['disabled', 'sandbox', 'live']).default('disabled'),
   T_INVEST_TRADING_TOKEN: optionalNonEmpty,
   // Preserve the legacy sandbox role unless migration is explicitly selected.
   T_INVEST_TRADING_TOKEN_ROLE: z.enum(['sandbox', 'live']).default('sandbox'),
@@ -264,6 +265,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (parsed.T_INVEST_LIVE_ACCOUNT_ID && [parsed.T_INVEST_SWING_ACCOUNT_ID, parsed.T_INVEST_SANDBOX_ACCOUNT_ID].includes(parsed.T_INVEST_LIVE_ACCOUNT_ID)) {
     throw new Error('Daily live pilot must not use the weekly or sandbox account');
   }
+  if (parsed.T_INVEST_EXECUTION_MODE === 'live' && (!prepare || !liveToken || !parsed.T_INVEST_LIVE_ACCOUNT_ID)) {
+    throw new Error('Live execution requires the daily pilot profile, a separate live token and account');
+  }
+  const liveCredential = parsed.T_INVEST_EXECUTION_MODE === 'live' && liveToken && parsed.T_INVEST_LIVE_ACCOUNT_ID
+    ? { token: liveToken, accountId: parsed.T_INVEST_LIVE_ACCOUNT_ID }
+    : undefined;
   if (parsed.T_INVEST_LIVE_MAX_TRADE_RISK_RUB > parsed.T_INVEST_LIVE_MAX_DAILY_RISK_RUB) {
     throw new Error('Live per-trade risk must not exceed the daily risk budget');
   }
@@ -310,12 +317,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     },
     execution: {
       mode: parsed.T_INVEST_EXECUTION_MODE,
-      // Sandbox execution must not reuse or redirect production read-only data.
-      baseUrl: 'https://sandbox-invest-public-api.tbank.ru/rest',
-      ...(sandboxToken ? { token: sandboxToken } : {}),
-      ...(parsed.T_INVEST_SANDBOX_ACCOUNT_ID
-        ? { accountId: parsed.T_INVEST_SANDBOX_ACCOUNT_ID }
-        : {}),
+      // Sandbox stays on its own host. Live uses the production host and the live token only.
+      baseUrl: liveCredential ? liveProductionEndpoint : 'https://sandbox-invest-public-api.tbank.ru/rest',
+      ...(liveCredential ?? {
+        ...(sandboxToken ? { token: sandboxToken } : {}),
+        ...(parsed.T_INVEST_SANDBOX_ACCOUNT_ID ? { accountId: parsed.T_INVEST_SANDBOX_ACCOUNT_ID } : {}),
+      }),
       maxOrdersPerDay: parsed.T_INVEST_EXECUTION_MAX_ORDERS_PER_DAY,
       maxDailyRiskRub: prepare ? Math.min(parsed.T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB, parsed.T_INVEST_LIVE_MAX_DAILY_RISK_RUB) : parsed.T_INVEST_EXECUTION_MAX_DAILY_RISK_RUB,
       candidateMaxAgeMinutes: parsed.T_INVEST_EXECUTION_CANDIDATE_MAX_AGE_MINUTES,

@@ -8,7 +8,7 @@ import { loadConfig } from '../config.js';
 import { ScenarioJournal } from '../journal/scenario-journal.js';
 import type { IntradayScanEvent } from '../scanner/intraday-scanner.js';
 import type { TelegramClient, TelegramUpdate } from './client.js';
-import { TelegramTradingBot } from './bot.js';
+import { entryHoursNote, TelegramTradingBot } from './bot.js';
 import type { TradingSelection } from '../strategies/selection.js';
 import type { AssetRecommendation } from '../scanner/intraday-scanner.js';
 
@@ -135,10 +135,38 @@ describe('TelegramTradingBot', () => {
     expect(first).toContain('сигнал для проверки'); expect(first).toContain('наблюдать');
     expect(first).toContain('пропустить'); expect(first).toContain('ошибка данных');
     expect(first).toContain('затраты круга: 0.37 ₽'); expect(first).toContain('Расчётный риск: 3 ₽');
+    expect(first).toContain('Проверяемая причина');
     expect(first).not.toContain('hidden-instrument');
     revision = 3;
     await bot.pollOnce();
     expect(client.sendMessage).toHaveBeenLastCalledWith('42', expect.stringContaining('Дождитесь нового прохода рынка'));
+  });
+
+  it('explains a lot that does not fit the daily risk limit in Russian', async () => {
+    const recommendations: AssetRecommendation[] = [{
+      ticker: 'SBER', instrumentId: 'hidden-instrument', status: 'blocked', score: 40,
+      reasons: ['No whole lot fits the configured risk and position limits'],
+      lotCostRub: 3200, roundTripCostsRub: 20, totalRiskRub: 21, netRewardRub: 10,
+      entryPrice: 320, stopPrice: 310, targetPrice: 340,
+    }];
+    const scanner = { isPaused: () => false, pause: vi.fn(), resume: vi.fn(),
+      getTradingSelection: () => ({ strategyId: 'trend-momentum-v1' as const, revision: 1, tickers: ['SBER'] }),
+      getLatestReport: () => ({ strategyId: 'trend-momentum-v1' as const, selectionRevision: 1, recommendations,
+        observedAt: '2026-10-12T07:00:00Z', universe: { source: 'moex-liquid' as const, refreshedAt: '2026-10-12T07:00:00Z', requested: 1, active: 1, missingTickers: [] },
+        scanned: 1, liquid: 1, trendUp: 1, volumeConfirmed: 1, readyForMarketCheck: 0, marketCandidates: 0, recordedCandidates: 0, errors: 0, topRanked: [] }) };
+    const client: TelegramClient = { getUpdates: async () => [{ update_id: 1, message: { chat: { id: 42 }, text: '/recommendations' } }], sendMessage: vi.fn(), sendPhoto: vi.fn() };
+    await new TelegramTradingBot(loadConfig({ TELEGRAM_ALLOWED_CHAT_IDS: '42' }), client, scanner, createJournal(), () => undefined).pollOnce();
+    const text = vi.mocked(client.sendMessage).mock.calls[0]![1];
+    expect(text).toContain('ни один целый лот не помещается');
+    expect(text).not.toContain('No whole lot');
+    expect(text).not.toContain('hidden-instrument');
+  });
+
+  it('says the entry window is closed before the Moscow session', () => {
+    expect(entryHoursNote('trend-momentum-v1', 9 * 60 + 10, new Date('2026-10-12T05:00:00.000Z'))).toContain('09:10');
+    expect(entryHoursNote('trend-momentum-v1', 9 * 60 + 10, new Date('2026-10-12T05:00:00.000Z'))).toContain('окно закрыто');
+    expect(entryHoursNote('trend-momentum-v1', 9 * 60 + 10, new Date('2026-10-12T07:00:00.000Z'))).toBe('');
+    expect(entryHoursNote('opening-range-breakout-v1', 9 * 60 + 10, new Date('2026-10-12T06:20:00.000Z'))).toContain('09:40');
   });
 
   it('includes selected strategy and assets in the market overview before the first scan', async () => {
@@ -661,6 +689,190 @@ describe('TelegramTradingBot', () => {
     expect(queueScenario).not.toHaveBeenCalled();
     expect(photos[0]).toContain('Исполнение выключено');
     expect(photos[0]).toContain('Заявка не готовилась');
+  });
+
+  it('shows the next live step and a confirm button on a stored candidate', async () => {
+    const journal = createJournal();
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      TELEGRAM_ALLOWED_CHAT_IDS: '42',
+      T_INVEST_TOKEN: 'read-token',
+      T_INVEST_SANDBOX_TOKEN: 'sandbox-token',
+      T_INVEST_LIVE_TOKEN: 'live-token',
+      T_INVEST_LIVE_ACCOUNT_ID: 'daily-account',
+      T_INVEST_EXECUTION_MODE: 'live',
+      T_INVEST_INTRADAY_WATCHLIST: '[{"instrumentId":"sber","label":"SBER","lotSize":1,"priceStep":0.01}]',
+    });
+    const scenario = journal.record({
+      observedAt: new Date().toISOString(), strategy: 'intraday', instrumentId: 'sber',
+      input: { side: 'long', entryPrice: 100, stopPrice: 99, targetPrice: 105, lotSize: 1, slippageRate: 0.0005 },
+      decision: 'candidate', blockers: [], warnings: [],
+      snapshot: { tradePlan: { lots: 5, positionRub: 500, totalRiskRub: 8.49 } },
+    });
+    const sent: string[] = [];
+    const buttons: string[] = [];
+    const client: TelegramClient = {
+      getUpdates: async () => [
+        { update_id: 1, message: { chat: { id: 42 }, text: '/status' } },
+        { update_id: 2, message: { chat: { id: 42 }, text: '/candidates' } },
+      ],
+      sendMessage: async (_chatId, text) => { sent.push(text); },
+      sendPhoto: async ({ caption, replyMarkup }) => {
+        sent.push(caption);
+        const data = replyMarkup?.inline_keyboard?.[0]?.[0]?.callback_data;
+        if (data) buttons.push(data);
+      },
+    };
+    const execution = {
+      mode: () => 'live', isConfigured: () => true, isReady: () => true, isKilled: () => true,
+      armSandbox: vi.fn(), armLive: vi.fn(), kill: vi.fn(),
+      queueScenario: vi.fn().mockReturnValue({ scenarioId: scenario.id }),
+      rejectScenario: vi.fn(), listRecent: () => [], submitScenario: vi.fn(), reconcileScenario: vi.fn(),
+    };
+    const bot = new TelegramTradingBot(config, client, { isPaused: () => false, pause: () => undefined, resume: () => undefined },
+      journal, () => undefined, async () => new Uint8Array([137, 80, 78, 71]), execution);
+    await bot.pollOnce();
+    expect(sent[0]).toContain('/execution_arm LIVE');
+    expect(sent[1]).toContain(`/approve ${scenario.id} CONFIRM`);
+    expect(buttons).toEqual([`exec:approve:${scenario.id}:confirm`]);
+  });
+
+  it('explains a blocked live order in Russian and does not pretend a stopped button sends it', async () => {
+    const journal = createJournal();
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      TELEGRAM_ALLOWED_CHAT_IDS: '42',
+      T_INVEST_TOKEN: 'read-token',
+      T_INVEST_SANDBOX_TOKEN: 'sandbox-token',
+      T_INVEST_LIVE_TOKEN: 'live-token',
+      T_INVEST_LIVE_ACCOUNT_ID: 'daily-account',
+      T_INVEST_EXECUTION_MODE: 'live',
+    });
+    const scenario = journal.record({
+      observedAt: new Date().toISOString(), strategy: 'intraday', instrumentId: 'sber',
+      input: { side: 'long', entryPrice: 100, stopPrice: 99, targetPrice: 102, lotSize: 1, slippageRate: 0.0005 },
+      decision: 'candidate', blockers: [], warnings: [], snapshot: {},
+    });
+    const captions: string[] = [];
+    const answers: string[] = [];
+    const client: TelegramClient = {
+      getUpdates: async () => [
+        { update_id: 1, message: { chat: { id: 42 }, text: '/candidates' } },
+        { update_id: 2, callback_query: { id: 'cb-1', data: `exec:approve:${scenario.id}:confirm`, message: { chat: { id: 42 } } } },
+      ],
+      sendMessage: async () => undefined,
+      sendPhoto: async ({ caption }) => { captions.push(caption); },
+      answerCallbackQuery: async (_id, text) => { answers.push(text); },
+    };
+    const execution = {
+      mode: () => 'live', isConfigured: () => true, isReady: () => true, isKilled: () => true,
+      armSandbox: vi.fn(), armLive: vi.fn(), kill: vi.fn(),
+      queueScenario: vi.fn().mockImplementation(() => { throw new Error('Net reward-to-risk is below 2.0'); }),
+      rejectScenario: vi.fn(), listRecent: () => [],
+      submitScenario: vi.fn().mockRejectedValue(new Error('Execution kill switch is active')),
+      reconcileScenario: vi.fn(),
+    };
+    const bot = new TelegramTradingBot(config, client, { isPaused: () => false, pause: () => undefined, resume: () => undefined },
+      journal, () => undefined, async () => new Uint8Array([137, 80, 78, 71]), execution);
+    await bot.pollOnce();
+    expect(captions[0]).toContain('потенциал меньше двух рисков');
+    expect(captions[0]).not.toContain('reward-to-risk');
+    expect(answers).toEqual(['Стоп включён, заявка не уйдёт']);
+    expect(execution.submitScenario).toHaveBeenCalledOnce();
+  });
+
+  it('translates a stopped confirmation into the next Russian step', async () => {
+    const journal = createJournal();
+    const config = loadConfig({ TELEGRAM_BOT_TOKEN: 'test-token', TELEGRAM_ALLOWED_CHAT_IDS: '42' });
+    const sent: string[] = [];
+    const client: TelegramClient = {
+      getUpdates: async () => [{ update_id: 1, message: { chat: { id: 42 }, text: '/approve 7 CONFIRM' } }],
+      sendMessage: async (_chatId, text) => { sent.push(text); },
+      sendPhoto: async () => undefined,
+    };
+    const execution = {
+      mode: () => 'live', isConfigured: () => true, isReady: () => true, isKilled: () => true,
+      armSandbox: vi.fn(), armLive: vi.fn(), kill: vi.fn(), queueScenario: vi.fn(),
+      rejectScenario: vi.fn(), listRecent: () => [],
+      submitScenario: vi.fn().mockRejectedValue(new Error('Execution kill switch is active')),
+      reconcileScenario: vi.fn(),
+    };
+    const bot = new TelegramTradingBot(config, client, { isPaused: () => false, pause: () => undefined, resume: () => undefined }, journal, () => undefined, undefined, execution);
+    await bot.pollOnce();
+    expect(sent[0]).toContain('стоп включён, новая заявка не уйдёт');
+    expect(sent[0]).not.toContain('kill switch');
+  });
+
+  it('arms live, then kill blocks new submissions without claiming the position is closed', async () => {
+    const journal = createJournal();
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: 'test-token',
+      TELEGRAM_ALLOWED_CHAT_IDS: '42',
+      T_INVEST_TOKEN: 'read-token',
+      T_INVEST_SANDBOX_TOKEN: 'sandbox-token',
+      T_INVEST_LIVE_TOKEN: 'live-token',
+      T_INVEST_LIVE_ACCOUNT_ID: 'daily-account',
+      T_INVEST_EXECUTION_MODE: 'live',
+    });
+    const sent: string[] = [];
+    const client: TelegramClient = {
+      getUpdates: async () => [
+        { update_id: 1, message: { chat: { id: 42 }, text: '/execution_arm LIVE' } },
+        { update_id: 2, message: { chat: { id: 42 }, text: '/kill' } },
+      ],
+      sendMessage: async (_chatId, text) => { sent.push(text); },
+      sendPhoto: async () => undefined,
+    };
+    const armLive = vi.fn().mockResolvedValue(undefined);
+    const kill = vi.fn();
+    const execution = {
+      mode: () => 'live', isConfigured: () => true, isReady: () => true, isKilled: () => false,
+      armSandbox: vi.fn(), armLive, kill,
+      queueScenario: vi.fn(), rejectScenario: vi.fn(), listRecent: () => [],
+      submitScenario: vi.fn(), reconcileScenario: vi.fn(),
+    };
+    const bot = new TelegramTradingBot(config, client, { isPaused: () => false, pause: () => undefined, resume: () => undefined },
+      journal, () => undefined, undefined, execution);
+    await bot.pollOnce();
+    expect(armLive).toHaveBeenCalledOnce();
+    expect(kill).toHaveBeenCalledOnce();
+    expect(sent[0]).toContain('Реальный счёт разрешён');
+    expect(sent[0]).toContain('/approve');
+    expect(sent[1]).toContain('Kill switch включён');
+    expect(sent[1]).toContain('не закрываются');
+  });
+
+  it('does not offer a second confirmation for an order the broker already accepted', async () => {
+    const journal = createJournal();
+    const config = loadConfig({
+      TELEGRAM_BOT_TOKEN: 'test-token', TELEGRAM_ALLOWED_CHAT_IDS: '42',
+      T_INVEST_EXECUTION_MODE: 'sandbox', T_INVEST_TRADING_TOKEN: 'trade-token',
+    });
+    const scenario = journal.record({
+      observedAt: new Date().toISOString(), strategy: 'intraday', instrumentId: 'sber',
+      input: { side: 'long', entryPrice: 100, stopPrice: 99, targetPrice: 105, lotSize: 1, slippageRate: 0.0005 },
+      decision: 'candidate', blockers: [], warnings: [], snapshot: { tradePlan: { lots: 1, positionRub: 100, totalRiskRub: 2 } },
+    });
+    let markup: unknown;
+    const client: TelegramClient = {
+      getUpdates: async () => [],
+      sendMessage: async () => undefined,
+      sendPhoto: async ({ caption, replyMarkup }) => {
+        expect(caption).toContain('уже принята');
+        markup = replyMarkup;
+      },
+    };
+    const execution = {
+      mode: () => 'sandbox', isConfigured: () => true, isReady: () => true, isKilled: () => false,
+      armSandbox: vi.fn(), kill: vi.fn(),
+      queueScenario: vi.fn().mockReturnValue({ scenarioId: scenario.id, status: 'accepted' }),
+      rejectScenario: vi.fn(), listRecent: () => [], submitScenario: vi.fn(), reconcileScenario: vi.fn(),
+    };
+    const bot = new TelegramTradingBot(config, client, { isPaused: () => false, pause: () => undefined, resume: () => undefined },
+      journal, () => undefined, async () => new Uint8Array([137, 80, 78, 71]), execution);
+    await bot.notifyScannerEvent({ instrumentId: 'sber', observedAt: scenario.observedAt, status: 'candidate-recorded', scenarioId: scenario.id, reasons: [] });
+    expect(markup).toBeUndefined();
+    expect(execution.submitScenario).not.toHaveBeenCalled();
   });
 
   it('falls back to precise fractional trading prices when card rendering fails', async () => {

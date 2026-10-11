@@ -442,22 +442,33 @@ export class ExecutionService {
     if (!order || order.mode !== 'sandbox' || !scenario || !['submitting', 'accepted'].includes(order.status)) {
       throw new Error('Only an unresolved or accepted sandbox order can be reconciled');
     }
+    let snapshot;
+    let updated;
     try {
       const payload = await this.orderClient.getSandboxOrderState(this.accountId!, order.orderRequestId);
-      const snapshot = parseSandboxOrderState(payload, {
+      snapshot = parseSandboxOrderState(payload, {
         requestId: order.orderRequestId, instrumentId: order.instrumentId, lots: order.lots, lotSize: scenario.input.lotSize,
       }, now);
-      const updated = this.journal.recordExecutionReconciliation(scenarioId, snapshot);
-      const native = this.journal.getNativeStop(scenarioId);
-      const sandboxExit = this.exitReconciler && this.config.execution.sandboxProtectionEnabled
-        && (native?.observation?.status === 'STOP_ORDER_STATUS_EXECUTED' || this.journal.getSandboxSessionExit(scenarioId)?.phase === 'submitted')
-        ? await this.exitReconciler.reconcile(this.accountId!, scenarioId, now) : undefined;
-      return { order: updated, executionStatus: snapshot.executionStatus, lotsExecuted: snapshot.lotsExecuted,
-        ...(sandboxExit ? { sandboxExit } : {}) };
+      updated = this.journal.recordExecutionReconciliation(scenarioId, snapshot);
     } catch {
       this.journal.recordExecutionUncertain(scenarioId, 'Sandbox reconciliation did not confirm the result; prior risk remains reserved');
       throw new Error('Sandbox reconciliation is incomplete; no new order was sent and prior risk remains reserved');
     }
+    if (this.config.execution.sandboxProtectionEnabled && snapshot.lotsExecuted > 0 && this.protection) {
+      await this.protection.protect(this.accountId!, scenarioId, now);
+    }
+    let sandboxExit;
+    try {
+      const native = this.journal.getNativeStop(scenarioId);
+      sandboxExit = this.exitReconciler && this.config.execution.sandboxProtectionEnabled
+        && (native?.observation?.status === 'STOP_ORDER_STATUS_EXECUTED' || this.journal.getSandboxSessionExit(scenarioId)?.phase === 'submitted')
+        ? await this.exitReconciler.reconcile(this.accountId!, scenarioId, now) : undefined;
+    } catch {
+      this.journal.recordExecutionUncertain(scenarioId, 'Sandbox reconciliation did not confirm the result; prior risk remains reserved');
+      throw new Error('Sandbox reconciliation is incomplete; no new order was sent and prior risk remains reserved');
+    }
+    return { order: updated, executionStatus: snapshot.executionStatus, lotsExecuted: snapshot.lotsExecuted,
+      ...(sandboxExit ? { sandboxExit } : {}) };
   }
 
   private preparedSnapshot() {
