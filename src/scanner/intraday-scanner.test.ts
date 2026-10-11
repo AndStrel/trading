@@ -161,6 +161,18 @@ describe('IntradayScanner', () => {
     expect(fixture.scanner.getTradingSelection().strategyId).toBe('vwap-reclaim-v1');
   });
 
+  it('resume clears an operator pause and scans without waiting for the next interval', async () => {
+    const fixture = scannerFixture();
+    fixture.journal.setScannerPaused('intraday', true);
+    expect(await fixture.scanner.scanOnce(new Date(scanAt))).toEqual([
+      expect.objectContaining({ status: 'paused', instrumentId: 'scanner' }),
+    ]);
+    fixture.scanner.resume();
+    expect(fixture.journal.isScannerPaused('intraday')).toBe(false);
+    await vi.waitFor(() => expect(fixture.client.getShares).toHaveBeenCalled());
+    await vi.waitFor(() => expect(fixture.log.mock.calls.some(call => call[0]?.status === 'scan-completed')).toBe(true));
+  });
+
   it('does not launch a duplicate scan while the first candle request is unresolved', async () => {
     const fixture = scannerFixture();
     const entered = deferred<void>();

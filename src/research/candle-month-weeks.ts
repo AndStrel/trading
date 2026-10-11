@@ -1,0 +1,69 @@
+import { costScenarios, eventReturnPct, type Costs } from './trading-costs.js';
+import { weeklyBars } from './candle-week.js';
+import type { PatternTrade } from './candle-pattern.js';
+import type { DailyBar } from './weekly-trend.js';
+
+const traderStress: Costs = { commission: 0.0005, slippage: 0.001 };
+
+type MonthPoint = { month: string; open: number; close: number };
+
+function monthsOf(input: readonly DailyBar[]): MonthPoint[] {
+  const bars = input.filter((bar) => bar.day <= '2025-12-30');
+  if (bars.some((bar, index) => !Number.isFinite(bar.open) || bar.open <= 0 || !Number.isFinite(bar.close) || bar.close <= 0 ||
+    (index > 0 && bar.day <= bars[index - 1]!.day))) throw new Error('Invalid daily bars');
+  const groups = new Map<string, DailyBar[]>();
+  for (const bar of bars) groups.set(bar.day.slice(0, 7), [...(groups.get(bar.day.slice(0, 7)) ?? []), bar]);
+  return [...groups.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([month, rows]) => ({
+    month,
+    open: rows[0]!.open,
+    close: rows.at(-1)!.close,
+  }));
+}
+
+function weekSides(input: readonly DailyBar[]): Map<string, 'H' | 'L' | null> {
+  const counts = new Map<string, { up: number; down: number }>();
+  for (const week of weeklyBars(input)) {
+    const month = week.monday.slice(0, 7);
+    const slot = counts.get(month) ?? { up: 0, down: 0 };
+    if (week.close > week.open) slot.up += 1;
+    else if (week.close < week.open) slot.down += 1;
+    counts.set(month, slot);
+  }
+  return new Map([...counts.entries()].map(([month, slot]) => [
+    month,
+    slot.up + slot.down < 2 || slot.up === slot.down ? null : slot.up > slot.down ? 'H' : 'L',
+  ]));
+}
+
+function previousMonth(month: string): string {
+  return month.endsWith('-01')
+    ? `${Number(month.slice(0, 4)) - 1}-12`
+    : `${month.slice(0, 4)}-${String(Number(month.slice(5)) - 1).padStart(2, '0')}`;
+}
+
+export function simulateMonthWeeks(input: readonly DailyBar[]): PatternTrade[] {
+  const sides = weekSides(input);
+  const trades: PatternTrade[] = [];
+  for (const month of monthsOf(input)) {
+    if (month.month < '2024-01' || month.month > '2025-12') continue;
+    const side = sides.get(previousMonth(month.month));
+    if (!side) continue;
+    trades.push({
+      day: `${month.month}-01`,
+      pattern: side,
+      netPct: eventReturnPct(month.open, month.close, costScenarios.traderBeforeSubscription),
+      stressPct: eventReturnPct(month.open, month.close, traderStress),
+    });
+  }
+  return trades;
+}
+
+export function monthWeeksPasses(trades: readonly PatternTrade[], requireStress: boolean): boolean {
+  if (trades.length < 4) return false;
+  const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / values.length;
+  const nets = trades.map((trade) => trade.netPct);
+  const withoutBest = [...nets].sort((left, right) => right - left).slice(1).reduce((sum, value) => sum + value, 0);
+  const winners = nets.filter((value) => value > 0).length;
+  const stress = mean(trades.map((trade) => trade.stressPct));
+  return winners / nets.length >= 0.51 && mean(nets) > 0 && withoutBest > 0 && (!requireStress || stress > 0);
+}

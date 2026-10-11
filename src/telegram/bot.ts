@@ -258,6 +258,8 @@ export class TelegramTradingBot {
       offset: this.offset,
       timeoutSeconds: this.config.telegram.pollingTimeoutSeconds,
     });
+    // Empty polls used to leave no trace, so a live long-poll looked identical to a dead one.
+    this.log(`Telegram poll ok: updates=${updates.length}`);
 
     for (const update of updates) {
       await this.handleUpdate(update);
@@ -291,6 +293,8 @@ export class TelegramTradingBot {
         const detail = error instanceof Error ? error.message : 'Unknown execution queue error';
         this.log(`Execution queue failed for scenario ${scenario.id}: ${detail}`);
       }
+    } else if (this.execution) {
+      executionHint = '\nИсполнение выключено. Заявка не готовилась. Чтобы она стала подтверждаемой, нужен T_INVEST_EXECUTION_MODE=sandbox, затем /execution_arm SANDBOX и /approve ID CONFIRM. Реальные заявки недоступны.';
     }
 
     for (const chatId of this.config.telegram.allowedChatIds) {

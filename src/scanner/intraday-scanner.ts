@@ -22,7 +22,7 @@ import {
 export type IntradayScanEvent = {
   instrumentId: string;
   observedAt: string;
-  status: 'paused' | 'skipped' | 'candidate-recorded' | 'candidate-suppressed' | 'error';
+  status: 'paused' | 'skipped' | 'candidate-recorded' | 'candidate-suppressed' | 'error' | 'scan-completed';
   reasons: string[];
   scenarioId?: number;
 };
@@ -172,6 +172,9 @@ export class IntradayScanner {
 
   resume(): void {
     this.journal.setScannerPaused('intraday', false);
+    // The interval loop would otherwise stay on the paused no-op until the next
+    // boundary, so enabling the scanner looked like silence.
+    void this.scanOnce();
   }
 
   getLatestReport(): IntradayScanReport | null {
@@ -360,6 +363,20 @@ export class IntradayScanner {
     };
 
     for (const event of events) await this.emit(event);
+    // A pass with no candidate used to write nothing. Log the summary only;
+    // listeners still receive actionable events, not a message every interval.
+    const report = this.latestReport;
+    if (report) this.log({
+      instrumentId: 'scanner',
+      observedAt: report.observedAt,
+      status: 'scan-completed',
+      reasons: [
+        `active=${report.universe.active}`,
+        `scanned=${report.scanned}`,
+        `recorded=${report.recordedCandidates}`,
+        `errors=${report.errors}`,
+      ],
+    });
     return events;
   }
 
