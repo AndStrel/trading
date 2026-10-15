@@ -14,7 +14,8 @@ services:
       T_INVEST_PAPER_SNAPSHOT_DIR: /app/.trading
     volumes:
       - trading-journal:/app/data
-      - ./.trading:/app/.trading:ro
+      # Snapshot-only bind: .trading itself stays root-owned for the relay socket guard.
+      - ./.trading/paper:/app/.trading:ro
       - ${T_INVEST_LOCAL_RELAY_DIR:-./.trading/relay}:/run/relay:ro
     ports:
       - "127.0.0.1:8088:8080"
@@ -68,7 +69,7 @@ services:
     environment:
       T_INVEST_PAPER_SNAPSHOT_DIR: /app/.trading
     volumes:
-      - ./.trading:/app/.trading
+      - ./.trading/paper:/app/.trading
     command:
       - sh
       - -c

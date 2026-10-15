@@ -50,6 +50,7 @@ async function prepareEnvironment(directory) {
   }
   await privateDirectory(join(directory, '.trading'));
   await privateDirectory(join(directory, '.trading', 'relay'));
+  await privateDirectory(join(directory, '.trading', 'paper'));
   return created;
 }
 
