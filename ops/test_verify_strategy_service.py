@@ -156,6 +156,32 @@ class ReadOnlyReadback(unittest.TestCase):
                 group[key] = value
                 self.assertEqual(self.verify()["result"], "not-ready")
 
+    def test_live_mode_requires_account_consistent_arming_state(self):
+        original = copy.deepcopy(self.snapshot)
+
+        def live(kill, armed, unresolved):
+            snapshot = copy.deepcopy(original)
+            snapshot["config"]["execution"]["mode"] = "live"
+            snapshot["config"]["execution"]["accountId"] = "private-account-marker"
+            snapshot["state"]["execution.kill_switch"] = kill
+            snapshot["state"]["execution.live_armed_account"] = armed
+            snapshot["state"]["unresolved"] = unresolved
+            self.snapshot = snapshot
+            return self.verify()["result"]
+
+        self.assertEqual(live("true", None, 0), "verified")
+        self.assertEqual(live("true", "private-account-marker", 2), "verified")
+        self.assertEqual(live("false", "private-account-marker", 1), "verified")
+        self.assertEqual(live("false", None, 0), "not-ready")
+        self.assertEqual(live("false", "private-account-marker", 2), "not-ready")
+        self.assertEqual(live("true", "private-account-marker", 4), "not-ready")
+        snapshot = copy.deepcopy(original)
+        snapshot["config"]["execution"]["mode"] = "live"
+        snapshot["state"]["execution.live_armed_account"] = "private-account-marker"
+        self.snapshot = snapshot
+        self.assertEqual(self.verify()["result"], "not-ready")
+        self.assertEqual(self.verify()["reason"], "live-safety-not-verified")
+
     def test_invalid_selection_is_not_projected(self):
         for key, value in (("strategyId", "private-secret-marker"), ("revision", True),
                            ("tickers", ["private-secret-marker"]), ("tickers", ["VTBR", "VTBR"])):

@@ -149,11 +149,26 @@ def verify(expected_sha, public_url=None):
         snapshot = json.loads(private_output(["docker", "exec", cid, "node", "--input-type=module", "-e", probe]))
         config, state = snapshot["config"], snapshot["state"]
         mode, unresolved = config["execution"]["mode"], state["unresolved"]
-        report["executionMode"] = mode if mode in {"disabled", "sandbox"} else None
+        report["executionMode"] = mode if mode in {"disabled", "sandbox", "live"} else None
         report["kill"] = state.get("execution.kill_switch") == "true"
         require(type(unresolved) is int and unresolved >= 0, "journal-state-invalid")
         report["unresolvedCount"] = unresolved
-        require(mode == "disabled" and report["kill"] and unresolved == 0, "runtime-safety-not-disabled")
+        if mode == "live":
+            # Live readiness is proven by journal invariants, never by this verifier submitting.
+            # Arming is allowed only for exactly the configured account; a killed service must
+            # not carry a foreign armed-account record; outstanding intents stay bounded.
+            armed = state.get("execution.live_armed_account")
+            account = config["execution"].get("accountId")
+            require(isinstance(account, str) and re.fullmatch("[A-Za-z0-9_-]{1,128}", account),
+                    "live-safety-not-verified")
+            require(isinstance(armed, (str, type(None))) and (armed is None or armed == account),
+                    "live-safety-not-verified")
+            if not report["kill"]:
+                require(armed is not None and unresolved <= 1, "live-safety-not-verified")
+            else:
+                require(unresolved <= 3, "live-safety-not-verified")
+        else:
+            require(mode == "disabled" and report["kill"] and unresolved == 0, "runtime-safety-not-disabled")
         selection = json.loads(private_output(["docker", "exec", cid, "node", "--input-type=module", "-e", SELECTION_PROBE]))
         tickers, revision = selection.get("tickers"), selection.get("revision")
         require(selection.get("strategyId") in STRATEGIES and type(revision) is int and 1 <= revision <= 2**53 - 1

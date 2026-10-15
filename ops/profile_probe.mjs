@@ -15,15 +15,18 @@ if (!candidate) {
   const db = new DatabaseSync(config.journalPath, { readOnly: true });
   try {
     const keys = ['execution.kill_switch', 'execution.kill_generation',
-      'execution.sandbox_bootstrap_v1', 'execution.sandbox_account_id'];
+      'execution.sandbox_bootstrap_v1', 'execution.sandbox_account_id', 'execution.live_armed_account'];
     state = Object.fromEntries(keys.map(key => [key,
       db.prepare('SELECT value FROM runtime_state WHERE key=?').get(key)?.value ?? null]));
     state.unresolved = db.prepare(
       "SELECT COUNT(*) AS n FROM execution_orders WHERE status IN ('submitting','accepted')"
     ).get().n;
     stage = 'ack';
-    readPreparedSandbox(state['execution.sandbox_bootstrap_v1'],
-      state['execution.sandbox_account_id'], config.execution.accountId);
+    // A live execution account is the production one and has no sandbox bootstrap.
+    if (config.execution.mode !== 'live') {
+      readPreparedSandbox(state['execution.sandbox_bootstrap_v1'],
+        state['execution.sandbox_account_id'], config.execution.accountId);
+    }
   } finally { db.close(); }
 }
 process.stdout.write(JSON.stringify({ env, config, ...(state ? { state } : {}) }));
