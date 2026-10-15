@@ -34,6 +34,9 @@ WORKDIR /app
 COPY --from=build --chown=node:node /app/package.json ./package.json
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
+# The frozen dual-momentum protocol is hashed at runtime as an integrity guard;
+# ship exactly that document so paper-daily-refresh can verify it inside the image.
+COPY --chown=node:node docs/SBMX_SBGB_SBMM_DUAL_MOMENTUM_V1.md ./docs/
 RUN mkdir -p /app/data && chown -R node:node /app
 
 ENV NODE_ENV=production
